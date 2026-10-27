@@ -4,6 +4,60 @@
 
 ---
 
+## D8 · 展示端接入用明文 ws，不用 wss
+
+**状态**：生效（演示期）· **量产前必须重新评估**
+
+`protocol/screen-link.md` 原写的是 HTTPS/WSS :8443 自签证书。实现时改成 `ws://` :8443，理由：
+
+- 圆屏侧要连自签证书，固件得引入 TLS 栈并显式关掉证书校验。ESP32-S3 上这条路径能吃掉可观的 PSRAM 和握手时间，而"关掉校验的 TLS"提供的安全性接近 0
+- 手机给自签证书要么在构建期固化 keystore、要么运行时生成，两条路都把 W2 的工期花在一条没有真实威胁模型的链路上
+- 链路只在演示现场的局域网/热点内，不出公网
+
+**替代控制（三层，代码里都已落地）**：
+1. `ScreenLinkServer.accepting` 默认 false —— App 上必须手动打开"允许展示端接入"才收连接
+2. `screen_id` 白名单，非白名单首帧 `hello` 直接 close
+3. 服务只在 `DemoRuntime.start()` 后监听，Activity 销毁即停
+
+**被推翻的条件**：任何一条成立就换回 wss 或加 mTLS —— 展示端接入点可能出内网 / 演示数据里出现真实车主信息 / 通过安全评审要求传输加密。届时把 `accepting` 换成配对码机制。
+
+---
+
+## D7 · 传输抽象 SatelliteModem，先跑 Simulated
+
+**状态**：生效
+
+App 不直接调 SDK 的 `DispatchManager`，中间加一层 `SatelliteModem`（suspend 接口，见 `core/.../modem/`）。三个实现位：`SimulatedModem`（已实现）、`UartModem`（RS232 + USB 转 TTL，BLE 文档没到时的 Plan B）、`BleModem`（BLE 协议文档到手后）。
+
+理由：§10 风险表里"GT1005 BLE 协议文档延迟"标的是高影响阻塞。把传输做成可注入的，业务链路（链路状态机、SOS 重试、心跳排队、展示端推送）就能在**硬件和 SDK 都没到货**的现在全部写完并单测。W2 换实现时 `DemoEngineTest` 的断言不应该改。
+
+同时它给了一个副产品：`SimulatedModem` 的过境窗口可调，彩排时能人为演"没过境 → SOS 三次无 ACK → 展示端弹红字 + 下次过境倒计时"这条最难自然复现的分支。
+
+**被推翻的条件**：SDK 的 `ModuleOperation` 接口形状与本抽象差异大到需要适配层重写，或卫星时延模型（分钟级）无法用 suspend 表达。
+
+---
+
+## D6 · 构建分层：core 纯 JVM + app 薄壳
+
+**状态**：生效
+
+```
+:core  纯 Kotlin JVM。协议编解码、链路状态机、SatelliteModem、DemoEngine。零 Android 依赖。
+:app   Android 薄壳。定位、蜂窝探测、WebSocket 服务、按钮。只做"喂输入 + 推输出"。
+```
+
+理由：业务链路必须能在 CI 上跑，不能等真机和模拟器。目前 `:core` 有 32 条测试，其中一条直接读 `protocol/examples/*.json` 做三方契约对拍，另一条断言 Kotlin 编出的帧与 `protocol/sos_frame.py` 的黄金 hex 逐字节相同。
+
+配套约束：
+- **时间从外部注入**。链路状态机、SOS 重发、过境窗口全部接受 `nowMs` / `MonoClock` / 可替换 `sleep`，没有一处读系统时钟
+- **假时钟推进用相对时长**，不用绝对终点。踩过一次：测试起始时钟改到 2026 epoch 之后，写死 `untilMs = 25_000` 的用例静默零次循环、假通过
+- `minSdk = 26`（文档 §3.1 写 Android 24+，但星历 SDK 要求 26+，取严的）
+- 不引 androidx / Play Services。UI 全代码搭，定位只用 `LocationManager`
+
+工具链不在仓库里，靠本机 `C:\Users\Administrator\sdk\env.sh`（JDK 17 + Android SDK + Gradle 8.7）。换机器时这套要重建；`gradle/wrapper` 的 distributionUrl 指向华为云镜像，`services.gradle.org` 在这台网络上直连不通。
+
+---
+
 ## D5 · 代码仓库落点
 
 **状态**：生效（临时）

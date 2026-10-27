@@ -14,16 +14,23 @@
 | `protocol/link-policy.md` | 4G/卫星切换状态机。文档里只有「> 阈值」，阈值在这里定死 |
 | `docs/DECISIONS.md` | 决策记录。为什么这么选、什么条件下要推翻 |
 | `tools/validate_protocol.py` | 契约校验，CI 入口 |
-| `apps/android/` | 手机 App（车载端 + 数据源 + 局域网服务端）· 待建 |
+| `apps/android/` | Gradle `:app`。手机 App 薄壳（定位、蜂窝探测、展示端服务、按钮） |
+| `core/` | Gradle `:core`。纯 Kotlin JVM，协议 / 链路状态机 / SatelliteModem / DemoEngine |
 | `firmware/screen/` | 展示端固件（fork 小智 AI）· 待建 |
 | `simulator/` | 展示端桌面模拟器，466×466 圆屏，不等硬件就能调 UI · 待建 |
 
 ## 现在能跑的东西
 
 ```bash
-python protocol/sos_frame.py        # SOS 帧编解码自检
-python tools/validate_protocol.py   # 契约示例校验
+./gradlew :core:test              # 32 条单测，含与 sos_frame.py 的逐字节对拍
+./gradlew :app:assembleDebug      # 出 APK（debug 签名，可直接装演示机）
+python protocol/sos_frame.py      # SOS 帧编解码自检
+python tools/validate_protocol.py # 契约示例校验
 ```
+
+`:core` 里已经跑通的是整条业务链路：有网 → 断网 → 切卫星 → 按 SOS → 出结果，
+用 `SimulatedModem` 顶替真硬件，所以 GT1005 到货前就能彩排，CI 上也能跑。
+装 APK 需要 JDK 17 + Android SDK 34，本机环境见 `docs/DECISIONS.md` D6 末尾。
 
 ## 阻塞项（外部依赖，不是工作量）
 

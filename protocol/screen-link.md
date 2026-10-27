@@ -7,7 +7,7 @@
 手机 App 是**服务端**，展示端是**客户端**。反直觉，但正确：App 是数据源，且展示端不需要被外部寻址。
 
 ```
-展示端(1.75-B)  ──Wi-Fi──►  手机 App (HTTPS + WSS, :8443)
+展示端(1.75-B)  ──Wi-Fi──►  手机 App (WebSocket, :8443)
       │
       └──Wi-Fi──►  小智官方云（语音 ASR/LLM/TTS，与上面完全独立）
 ```
@@ -18,16 +18,17 @@
 
 | 通道 | 协议 | 用途 | 频率 |
 |---|---|---|---|
-| 控制面 | WebSocket (WSS) | `hello` / `state` / `event` / `command` / `ack` | state 1 Hz；event 即时 |
-| 批量面 | HTTP GET (HTTPS) | `track_pull` 返回轨迹点数组、围栏 GeoJSON、地图瓦片 | 按需 |
+| 控制面 | WebSocket (`ws://`) | `hello` / `state` / `event` / `command` / `ack` | state 1 Hz；event 即时 |
+| 批量面 | 暂未实现。`track_pull` 现在只在契约里占位，轨迹数据还没给展示端读 | 按需 |
 
 ## 会话建立
 
 1. 展示端启动 → 读配网信息 → TCP 连 `:8443`
-2. TLS 握手，**展示端不校验证书**（自签，演示设备）
-3. 展示端发 `hello`，带 `screen_id` / `fw` / `dock_type` / `protocols`
-4. App 校验 `protocols` 含 1 → 回 `ack`，开始 1 Hz `state` 推送
-5. 版本不兼容 → App 回 `ack` 带 `error: "proto_mismatch"`，展示端显示黄屏而不是崩溃
+2. 展示端发 `hello`，带 `screen_id` / `fw` / `dock_type` / `protocols`
+3. App 校验 `screen_id` 在白名单 + `protocols` 含 1 → 回 `ack`，开始 1 Hz `state` 推送
+4. 版本不兼容或 id 不认识 → App 直接 close（policy code 1000），展示端显示黄屏而不是崩溃
+
+**当前是明文 `ws://` 而不是 wss。** 理由和补偿控制在 DECISIONS D8，一句话：圆屏侧连自签证书要引 TLS 栈并关掉校验，换来的实际安全性接近 0，工程量却会把 W2 吃掉。补偿是「默认拒绝接入 + screen_id 白名单 + 只在演示时开」三层。量产前这条必须重评。
 
 ## 保活与断线
 
@@ -44,15 +45,17 @@
 
 ## 安全边界
 
-这套服务**只在局域网内监听，且只有演示设备能连**。但仍然是个无认证的 TLS 服务端，能读车主位置。所以：
+这套服务能读车主位置，而现在是明文传输、无认证。所以：
 
-- 默认只 bind `127.0.0.1`，演示时通过 App 设置页显式开启局域网监听
-- 开启时 `hello` 必须携带预共享 `screen_id`（出厂烧录，App 侧白名单），不在白名单直接断
-- 演示结束后设置页关掉，或 App 退出即关
+- 监听 `0.0.0.0:8443`，但 `accepting` 默认 false —— App 上不打开了「允许展示端接入」，任何连接进来立刻 close。这比 bind 127.0.0.1 弱一点（端口对外可见），但省掉了「演示现场还要先进设置页改绑定地址」这条必错路径
+- `hello` 必须携带预共享 `screen_id`（出厂烧录，App 侧白名单），不在白名单直接断
+- 关掉开关时**主动断开已有连接**，不是等它自己超时
+- 演示结束后关掉，或 App 退出即关（`MainActivity.onDestroy` 里 `shutdown()`）
 - 不要把这套服务部署到公网。**任何情况下都不要。** 需要远程查看就等真正的业务后端
 
 ## 待办
 
-- [ ] App 侧 HTTP 服务选型：NanoHTTPD（轻）vs Ktor（和 Kotlin 协程顺）——倾向 Ktor，W2 定
+- [x] App 侧服务选型：定了 Java-WebSocket，只做 WebSocket。批量面等真需要轨迹时再议
+- [ ] 展示端接入配对：现在是出厂烧死 `screen_id`，演示现场改不了。要不要换成一次性配对码，D8 被推翻时一起定
 - [ ] 展示端固件的 WebSocket 客户端：小智固件已依赖 `esp_websocket_client`，复用，不引新库
 - [ ] 轨迹点数组的压缩：1 Hz 采样 2 小时 = 7200 点，JSON 太大，考虑抽稀到 30s 或走二进制
