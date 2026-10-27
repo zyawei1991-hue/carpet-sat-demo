@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "t": "command",
+  "seq": 12,
+  "ts": 1795200010000,
+  "command": {
+    "cmd": "track_pull",
+    "args": { "from_ts": 1795190000000, "to_ts": 1795200010000, "max_points": 500 }
+  }
+}

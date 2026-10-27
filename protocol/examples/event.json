@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "t": "event",
+  "seq": 77,
+  "ts": 1795200003000,
+  "event": {
+    "kind": "sos_acked",
+    "event_id": "3f2a1c9e-8b04-4d77-9a1e-2c5f6d0e1b48",
+    "ttl_ms": 30000,
+    "payload": {
+      "sat_name": "GW-03",
+      "latency_s": 41,
+      "frame_hex": "1100002F1D120B7608479E3698071D405709009D",
+      "attempts": 1
+    }
+  }
+}

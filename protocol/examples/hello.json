@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "t": "hello",
+  "seq": 1,
+  "hello": {
+    "screen_id": "WS175B-A3F7",
+    "fw": "0.1.0-dev",
+    "dock_type": "desk_stand",
+    "wifi_rssi": -52,
+    "battery_mv": 4080,
+    "protocols": [1]
+  }
+}

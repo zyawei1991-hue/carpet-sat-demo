@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://carpet-demo.local/schema/screen-link.v0.1.json",
+  "$comment": "App(手机) <-> 展示端(微雪 1.75-B) 之间的唯一消息格式，单一事实来源。Android 侧照此生成数据类，固件侧照此手写 cJSON 解析。改字段必须升 v 并同步两端，禁止只改一端。传输细节见 screen-link.md。",
+  "title": "ScreenLinkMessage",
+  "type": "object",
+  "required": ["v", "t", "seq"],
+  "properties": {
+    "v": { "const": 1, "description": "契约主版本，不兼容改动 +1" },
+    "t": {
+      "enum": ["hello", "bye", "state", "event", "command", "ack"],
+      "description": "消息类型。state=周期快照，event=即时推送，其余为会话控制"
+    },
+    "seq": { "type": "integer", "minimum": 0, "description": "发送方自增序号，接收方用于去重和检测丢包" },
+    "ts": { "type": "integer", "description": "Unix 毫秒，App 侧时钟。展示端不信任此值，仅用于显示" },
+
+    "hello": {
+      "type": "object",
+      "description": "t=hello 时必填。展示端 -> App，建链后首帧",
+      "required": ["screen_id", "fw"],
+      "properties": {
+        "screen_id": { "type": "string", "maxLength": 32 },
+        "fw": { "type": "string", "description": "固件版本" },
+        "dock_type": {
+          "enum": ["none", "desk_stand", "car_mount", "collar", "gym_belt", "toy"],
+          "description": "底座识别结果，来自 8PIN 分压电阻。App 据此决定首页布局"
+        },
+        "wifi_rssi": { "type": "integer", "minimum": -120, "maximum": 0 },
+        "battery_mv": { "type": "integer" },
+        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "展示端能解析的契约版本列表" }
+      }
+    },
+
+    "state": {
+      "type": "object",
+      "description": "t=state 时必填。App -> 展示端，1 Hz 周期快照，是幂等全量，丢一帧不影响正确性",
+      "required": ["link", "sat", "gnss", "fence", "sos"],
+      "properties": {
+        "link": {
+          "type": "object",
+          "required": ["primary", "cell_ok", "sat_ok"],
+          "properties": {
+            "primary": { "enum": ["cell", "sat"], "description": "当前主链路。切换阈值见 protocol/link-policy.md" },
+            "cell_ok": { "type": "boolean" },
+            "cell_dbm": { "type": "integer", "description": "蜂窝信号强度，用于演示时给观众看'为什么要切卫星'" },
+            "sat_ok": { "type": "boolean" }
+          }
+        },
+        "sat": {
+          "type": "object",
+          "description": "GT1005 卫星侧状态，字段直接映射 SDK 回调",
+          "required": ["phase"],
+          "properties": {
+            "phase": {
+              "enum": ["idle", "searching", "locked", "tx_pending", "tx_ok", "tx_fail", "tx_no_ack"],
+              "description": "idle=待命省电 / searching=对星中 / locked=已锁定 / tx_*=发送结果，对应 MCQ 回调 COMPLETE|FAIL|NO_ACK"
+            },
+            "sat_name": { "type": "string", "description": "setSelectedSatelliteListening 返回的卫星名" },
+            "cnr": { "type": "number", "description": "载噪比 dB-Hz" },
+            "next_pass_in_s": { "type": "integer", "description": "StarManager.calculate 结果，下次过境还有多少秒。null=星历缓存不可用" },
+            "module_battery": { "type": "integer", "description": "来自 PDI" },
+            "fw": { "type": "string", "description": "来自 DII" }
+          }
+        },
+        "gnss": {
+          "type": "object",
+          "required": ["lat", "lon", "source"],
+          "properties": {
+            "lat": { "type": "number", "multipleOf": 1e-7 },
+            "lon": { "type": "number", "multipleOf": 1e-7 },
+            "alt_m": { "type": "number" },
+            "hdop": { "type": "number" },
+            "source": { "enum": ["phone", "gt1005", "fused"], "description": "本帧位置来自哪一路" },
+            "fix_age_s": { "type": "number", "description": "定位新鲜度。>30s 展示端应画成灰色点" }
+          }
+        },
+        "fence": {
+          "type": "object",
+          "required": ["active", "inside"],
+          "properties": {
+            "active": { "type": "boolean", "description": "是否启用了围栏" },
+            "inside": { "type": "boolean" },
+            "name": { "type": "string" },
+            "dist_m": { "type": "number", "description": "到围栏边界的距离，出界为负" }
+          }
+        },
+        "sos": {
+          "type": "object",
+          "required": ["level"],
+          "properties": {
+            "level": { "enum": ["normal", "armed", "pending", "sent", "acked"], "description": "armed=哨兵模式已布防 pending=已触发等待 ACK" },
+            "since_ts": { "type": "integer" },
+            "attempts": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "sentinel": {
+          "type": "object",
+          "properties": {
+            "armed": { "type": "boolean" },
+            "last_motion_ts": { "type": "integer" },
+            "drift_m": { "type": "number", "description": "离车后累计位移" }
+          }
+        },
+        "phone_battery": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "demo_mode": { "type": "boolean", "description": "演示模式：展示端隐藏调试信息，放大关键视觉元素" }
+      }
+    },
+
+    "event": {
+      "type": "object",
+      "description": "t=event 时必填。App -> 展示端，即时推送，展示端必须回 ack",
+      "required": ["kind", "event_id"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "sos_triggered", "sos_acked", "sos_failed",
+            "fence_enter", "fence_exit",
+            "sentinel_motion",
+            "link_switched", "sat_visible",
+            "downlink_msg",
+            "track_reset"
+          ],
+          "description": "sat_visible=卫星进入过境窗口，可发 SOS，展示端应弹提示；downlink_msg=收到 MCI 下行"
+        },
+        "event_id": { "type": "string", "description": "UUID，展示端 ack 时回填，App 据此判断哪些事件展示端没收到" },
+        "payload": { "type": "object", "description": "kind 相关的负载，见下方各 kind 定义" },
+        "ttl_ms": { "type": "integer", "description": "过期时间。展示端收到时若已过期则丢弃且不弹提示" }
+      }
+    },
+
+    "command": {
+      "type": "object",
+      "description": "t=command 时必填。展示端 -> App",
+      "required": ["cmd"],
+      "properties": {
+        "cmd": {
+          "enum": ["sos_press", "track_pull", "set_demo_mode", "set_fence", "reboot_ui"],
+          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹"
+        },
+        "args": { "type": "object" }
+      }
+    },
+
+    "ack": {
+      "type": "object",
+      "required": ["for_seq", "for_event_id"],
+      "properties": {
+        "for_seq": { "type": "integer" },
+        "for_event_id": { "type": "string" }
+      }
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "t": { "const": "state" } } }, "then": { "required": ["state"] } },
+    { "if": { "properties": { "t": { "const": "event" } } }, "then": { "required": ["event"] } },
+    { "if": { "properties": { "t": { "const": "hello" } } }, "then": { "required": ["hello"] } },
+    { "if": { "properties": { "t": { "const": "command" } } }, "then": { "required": ["command"] } },
+    { "if": { "properties": { "t": { "const": "ack" } } }, "then": { "required": ["ack"] } }
+  ]
+}
