@@ -1,6 +1,8 @@
 package com.carpet.satdemo.core.modem
 
 import com.carpet.satdemo.core.protocol.AccessService
+import com.carpet.satdemo.core.protocol.SfiFailReason
+import com.carpet.satdemo.core.protocol.SfiState
 import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.GsatDecoder
 import com.carpet.satdemo.core.protocol.GsatParseResult
@@ -93,7 +95,9 @@ class SentenceModemTest {
         assertFalse(fx.modem.sessionReady)
         // ICI 读到了，预算是已知的 —— 但会话没就绪，写方向仍然一个字节都不发
         assertNotNull(fx.modem.caps)
-        assertFalse(fx.modem.enqueueSfq("0102A1A2"))
+        val blocked = fx.modem.enqueueSfq("0102A1A2")
+        assertFalse(blocked.accepted)
+        assertEquals(SatFailReason.NOT_PROVISIONED, blocked.reason)
         assertTrue(fx.fake.received.none { it.verb == "SFQ" }, "会话没就绪就入队，等于把 SOS 交给一个还没配好的模组")
     }
 
@@ -163,7 +167,9 @@ class SentenceModemTest {
         fx.bringUpLocated()
         val before = fx.fake.received.size
         // 等级 1 = ≤90 B，这里给 100 字节（200 个 hex 字符）
-        assertFalse(fx.modem.enqueueSfq("00".repeat(100)))
+        val over = fx.modem.enqueueSfq("00".repeat(100))
+        assertFalse(over.accepted)
+        assertEquals(SatFailReason.TOO_LONG, over.reason, "超预算要能说出是哪一维不对（E.4）")
         // 关键断言：**一个字节都没往模组发**，不是"发了然后被拒"
         assertEquals(before, fx.fake.received.size)
     }
@@ -172,7 +178,12 @@ class SentenceModemTest {
     fun `预算内的报文走完整往返`() = runBlocking {
         val fx = Fixture()
         fx.bringUpLocated()
-        assertTrue(fx.modem.enqueueSfq("0102A1A2"))
+        val stored = fx.modem.enqueueSfq("0102A1A2")
+        assertTrue(stored.accepted)
+        // 存进模组队列 ≠ 星上确认：三态里只能到 NO_ACK（§6.1 红线一）
+        assertEquals(SatResult.NO_ACK, stored.result)
+        assertEquals(SatPath.QUEUED, stored.via)
+        assertEquals(1, stored.messageId, "SFI 给的报文 ID 要留着对账")
         val sfq = fx.fake.received.last { it.verb == "SFQ" }
         assertEquals(listOf("0", "0", "0102A1A2"), sfq.fields, "收信方 0=平台、优先级普通（〔规 §3.1.12 注1/注2〕）")
         assertEquals(1, fx.fake.queue.size)
@@ -183,7 +194,9 @@ class SentenceModemTest {
         val fx = Fixture()
         fx.bringUpLocated()
         fx.fake.refuseNewMessages = true
-        assertFalse(fx.modem.enqueueSfq("0102A1A2"), "模组没确认收下，这条就得留在 App 队列里")
+        val full = fx.modem.enqueueSfq("0102A1A2")
+        assertFalse(full.accepted, "模组没确认收下，这条就得留在 App 队列里")
+        assertEquals(SatFailReason.QUEUE_FULL, full.reason)
     }
 
     @Test
@@ -359,6 +372,30 @@ class SentenceModemTest {
         assertEquals(SatResult.FAIL, result)
     }
 
+    @Test
+    fun `模组超时丢弃的报文必须被捡回 App 队列`() = runBlocking {
+        val fx = Fixture(model = ModuleModel.GM1003)
+        fx.bringUpLocated()
+        val stored = fx.modem.enqueueSfq("0102A1A2")
+        assertEquals(1, fx.modem.moduleQueueDepth, "模组收下之后我们还得记着它，否则丢了就找不回来")
+
+        // 〔规 §3.1.13〕GM1003 存够 4 分钟没发出去，模组主动吐一条 state=4 reason=3
+        fx.fake.report("SFI", listOf(SfiState.TRANSMIT_FAILED.code.toString(), stored.messageId!!.toString(), SfiFailReason.TIMEOUT.code.toString()))
+        assertEquals(0, fx.modem.moduleQueueDepth)
+        assertEquals(listOf("0102A1A2"), fx.modem.drainDropped(), "SOS 不能因为模组丢弃就静默消失（E.6）")
+        assertTrue(fx.modem.drainDropped().isEmpty(), "取走一次就该清空")
+    }
+
+    @Test
+    fun `发射成功的报文不再被当成待补发`() = runBlocking {
+        val fx = Fixture()
+        fx.bringUpLocated()
+        val stored = fx.modem.enqueueSfq("0102A1A2")
+        fx.fake.report("SFI", listOf(SfiState.SENT.code.toString(), stored.messageId!!.toString(), "0"))
+        assertEquals(0, fx.modem.moduleQueueDepth)
+        assertTrue(fx.modem.drainDropped().isEmpty())
+    }
+
     // ---- 换传输不换协议 ----
 
     @Test
@@ -380,7 +417,7 @@ class SentenceModemTest {
             runBlocking {
                 modem.updateLocation(120.1551, 30.2741)
                 assertIs<SentenceModem.BringUpOutcome.Ready>(modem.bringUp())
-                assertTrue(modem.enqueueSfq("0102A1A2"))
+                assertTrue(modem.enqueueSfq("0102A1A2").accepted)
             }
             assertEquals(1, fake.queue.size)
             assertTrue(port.written.any { it.startsWith("\$CCSFQ,0,0,0102A1A2*") }, port.written.toString())

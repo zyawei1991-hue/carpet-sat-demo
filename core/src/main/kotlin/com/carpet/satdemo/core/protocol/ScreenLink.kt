@@ -109,6 +109,13 @@ data class SosState(
     val level: SosLevel,
     @SerialName("since_ts") val sinceTs: Long? = null,
     val attempts: Int? = null,
+    /**
+     * **卫星**有没有应答。true 不等于平台收到（〔规 §3.1.4 注6〕），
+     * 所以文案里"已回执"只能由 level==acked 触发，acked 只由平台回执置位。
+     */
+    @SerialName("sat_ack") val satAck: Boolean? = null,
+    /** 失败成因（no_reply / queue_full / …）。给圆屏那行小字用，正常时为 null */
+    val fail: String? = null,
 )
 
 @Serializable

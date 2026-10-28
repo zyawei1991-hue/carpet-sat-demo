@@ -42,6 +42,22 @@ class SimulatedModem(
     /** 被 sendMcq / enqueueSfq 收到过的包，供演示脚本和断言检查 */
     val sent: MutableList<String> = ArrayList()
 
+    private val dropped = ArrayList<String>()
+
+    /**
+     * 演"存进模组队列之后又被丢掉"（GM1003 的 4 分钟超时，〔规 §3.1.13 注〕）。
+     * 真机那条口径由 [SentenceModem] 从 SFI 里读出来，这里给演示脚本一个手动注入的口子。
+     */
+    fun simulateDropped(hex: String) {
+        dropped += hex
+    }
+
+    override fun drainDropped(): List<String> {
+        val out = dropped.toList()
+        dropped.clear()
+        return out
+    }
+
     override val available: Boolean get() = reachable
 
     /**
@@ -53,19 +69,20 @@ class SimulatedModem(
 
     override suspend fun readFix(): Fix? = lastFix
 
-    override suspend fun sendMcq(hex: String): SatResult {
-        if (!reachable) return SatResult.FAIL
+    override suspend fun sendMcq(hex: String): SatSend {
+        if (!reachable) return SatSend.failed(SatPath.IMMEDIATE, SatFailReason.NO_REPLY)
         sent += hex
         sleep(txLatencyMs)
         val result = if (inPassWindow()) SatResult.COMPLETE else SatResult.NO_ACK
         lockHandler?.invoke(if (inPassWindow()) SatLock(nextPassName(), CNR) else null)
-        return result
+        return SatSend(result, SatPath.IMMEDIATE)
     }
 
-    override suspend fun enqueueSfq(hex: String): Boolean {
-        if (!reachable) return false
+    override suspend fun enqueueSfq(hex: String): SatSend {
+        if (!reachable) return SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY)
         sent += hex
-        return true
+        // 场景层不建模"模组队列被超时丢弃"，那条口径由 SentenceModemTest 钉
+        return SatSend(SatResult.NO_ACK, SatPath.QUEUED)
     }
 
     override suspend fun updateLocation(lon: Double, lat: Double) {

@@ -6,8 +6,11 @@ import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.link.LinkPolicy
 import com.carpet.satdemo.core.link.LinkSignal
 import com.carpet.satdemo.core.link.LinkStateMachine
+import com.carpet.satdemo.core.modem.SatFailReason
 import com.carpet.satdemo.core.modem.SatLock
+import com.carpet.satdemo.core.modem.SatPath
 import com.carpet.satdemo.core.modem.SatResult
+import com.carpet.satdemo.core.modem.SatSend
 import com.carpet.satdemo.core.modem.SatelliteModem
 import com.carpet.satdemo.core.modem.SosCoordinator
 import com.carpet.satdemo.core.modem.SosProgress
@@ -78,12 +81,14 @@ class DemoEngine(
                 lastSosHex = p.frameHex
             }
             is SosProgress.Exhausted -> sosNextPassInS = p.nextPassInS
+            is SosProgress.SatResultReady -> lastSosSend = p.send
             else -> Unit
         }
         onSosProgress(p)
     }
 
     private var sosNextPassInS: Long? = null
+    private var lastSosSend = SatSend(SatResult.FAIL, SatPath.IMMEDIATE, SatFailReason.NO_REPLY)
     private var lastSosHex = ""
     private var fix: GnssState? = null
     private var phoneBatteryPct = 100
@@ -104,6 +109,7 @@ class DemoEngine(
         emit(machine.onSignal(LinkSignal.Cell(status, nowMs)), nowMs)
 
     fun onTick(nowMs: Long): List<ScreenMessage> {
+        reclaimDropped()
         // 「平台已确认」是给人看一眼就收回去的回执，长期压着会把轨迹图挡住；
         // 未确认那条不能收 —— 那是催人在开阔处等下次过境的红字
         val since = sosSinceTs
@@ -136,7 +142,7 @@ class DemoEngine(
             // 探测包只在蜂窝已经判死的时候发，所以不带 DUAL 标志
             flags = frameFlags(cellOk = false),
         ).toHex()
-        val ok = runCatching { modem.sendMcq(hex) }.getOrDefault(SatResult.FAIL) == SatResult.COMPLETE
+        val ok = runCatching { modem.sendMcq(hex) }.getOrDefault(SatSend.failed(SatPath.IMMEDIATE, SatFailReason.NO_REPLY)).result == SatResult.COMPLETE
         return onSatAck(nowMs, ok)
     }
 
@@ -178,7 +184,8 @@ class DemoEngine(
             SosFrame.MSG_HEARTBEAT, f.lat, f.lon, nowSec, phoneBatteryPct, flags = frameFlags(cellOk),
         ).toHex()
         if (phase == LinkPhase.CELL) return true
-        if (modem.enqueueSfq(hex)) return true
+        val send = modem.enqueueSfq(hex)
+        if (send.accepted) return true
         pending.addLast(hex)
         return false
     }
@@ -189,11 +196,12 @@ class DemoEngine(
      * 那个数字往下掉。刷完才告诉状态机可以回 CELL；中途模块又不收了就停在 RECOVER。
      */
     suspend fun drainPending(nowMs: Long): List<ScreenMessage> {
+        reclaimDropped()
         if (phase != LinkPhase.RECOVER) return emptyList()
         var flushed = 0
         while (flushed < DRAIN_BURST && pending.isNotEmpty()) {
             val hex = pending.first()
-            if (!modem.enqueueSfq(hex)) break
+            if (!modem.enqueueSfq(hex).accepted) break
             pending.removeFirst()
             flushed++
         }
@@ -210,7 +218,7 @@ class DemoEngine(
         sosNextPassInS = null
 
         val f = fix
-        val result = runCatching {
+        val send = runCatching {
             sos.trigger(
                 lat = f?.lat ?: 0.0,
                 lon = f?.lon ?: 0.0,
@@ -219,21 +227,60 @@ class DemoEngine(
                 flags = frameFlags(cellOk),
                 cellOk = cellOk,
             )
-        }.getOrDefault(SatResult.FAIL)
+        }.getOrDefault(SatSend.failed(SatPath.IMMEDIATE, SatFailReason.NO_REPLY))
+        lastSosSend = send
 
-        sosLevel = if (result == SatResult.COMPLETE) SosLevel.acked else SosLevel.sent
-        return SosResult(result, lastSosHex, f != null, sosAttempts, sosNextPassInS)
+        // §6.1 红线一：星上 ACK 不能把状态推到 acked。acked 只由平台回执触发，见 onPlatformAck()
+        sosLevel = if (send.accepted) SosLevel.sent else SosLevel.pending
+        return SosResult(send, lastSosHex, f != null, sosAttempts, sosNextPassInS)
+    }
+
+    /**
+     * 平台侧回执到了（4G 下行或卫星下行里的救援受理确认）。
+     *
+     * 名字故意不叫 `onAck`：**星上 ACK 不算**（〔规 §3.1.4 注6〕卫星应答只代表卫星收到），
+     * 叫 ack 会让后来人以为可以在发送回调里调它。这是 §6.1 红线一在代码里的唯一入口。
+     */
+    fun onPlatformAck() {
+        if (sosLevel == SosLevel.sent || sosLevel == SosLevel.pending) {
+            sosLevel = SosLevel.acked
+            sosSinceTs = System.currentTimeMillis()
+        }
+    }
+
+    /**
+     * 模组收下了之后又把它丢掉的报文（GM1003 存够 4 分钟没发出去，〔规 §3.1.13 注〕）。
+     * App 那份补发队列在模组"收下"时就清了，不捡回来这条就静默消失 —— SOS 尤其不能这样。
+     */
+    private fun reclaimDropped() {
+        val back = modem.drainDropped()
+        if (back.isEmpty()) return
+        // 插到队首：SOS 和撤销都比后面的心跳要紧
+        back.forEachIndexed { i, hex -> pending.add(i, hex) }
     }
 
     data class SosResult(
-        val result: SatResult,
+        val send: SatSend,
         val frameHex: String,
         val hasFix: Boolean,
         /** 实际发出的次数，三次都没 ACK 时展示端要写清楚 */
         val attempts: Int,
         /** 仅三次无 ACK 时非空：下一条过顶还有多少秒 */
         val nextPassInS: Long?,
-    )
+    ) {
+        /** 三态之一。文案请走 [com.carpet.satdemo.core.link.SosCopy.statusLine]，别在 UI 里自己拼 */
+        val result: SatResult get() = send.result
+
+        val reason: SatFailReason? get() = send.reason
+
+        val via: SatPath get() = send.via
+    }
+
+    /**
+     * 最近一次 SOS 的三态结果。展示端不要自己解释它，
+     * 走 [com.carpet.satdemo.core.link.SosCopy.statusLine] 生成文案（§6.1 红线一）。
+     */
+    val sosSend: SatSend get() = lastSosSend
 
     fun snapshot(): StatePayload = StatePayload(
         link = LinkState(
@@ -254,7 +301,14 @@ class DemoEngine(
         ),
         gnss = fix ?: GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
         fence = fence,
-        sos = SosState(sosLevel, sosSinceTs, sosAttempts.takeIf { it > 0 }),
+        sos = SosState(
+            sosLevel,
+            sosSinceTs,
+            sosAttempts.takeIf { it > 0 },
+            // 星上收没收到 ≠ 平台收没收到，屏上要把这两件事分开画（§6.1 红线一）
+            satAck = lastSosSend.result == SatResult.COMPLETE,
+            fail = lastSosSend.reason?.name?.lowercase(),
+        ),
         sentinel = sentinel,
         phoneBattery = phoneBatteryPct,
         demoMode = demoMode,

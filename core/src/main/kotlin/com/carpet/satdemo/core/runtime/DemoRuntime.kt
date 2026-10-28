@@ -5,6 +5,7 @@ import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.modem.SatResult
 import com.carpet.satdemo.core.modem.SimulatedModem
+import com.carpet.satdemo.core.link.SosCopy
 import com.carpet.satdemo.core.modem.SosProgress
 import com.carpet.satdemo.core.protocol.AckPayload
 import com.carpet.satdemo.core.protocol.EventKind
@@ -140,10 +141,12 @@ class DemoRuntime(
     fun pressSos(): Job = scope.launch {
         val out = engine.triggerSos(nowSec = clockMs() / 1000, cellOk = cellOk())
         _status.value = _status.value.copy(lastSos = out.result)
+
         val failed = out.result != SatResult.COMPLETE
+        // 这句日志和屏上那行字走同一张表：现场排练时读日志就是在读用户会看到的话（§6.1 红线一）
         log(
-            "SOS ${out.result} ×${out.attempts}${if (out.hasFix) "" else "（无定位）"} ${out.frameHex}" +
-                (out.nextPassInS?.let { "，下一条过顶 ${it / 60}:${it % 60}" } ?: ""),
+            "SOS ${SosCopy.statusLine(out.send, out.nextPassInS)}" +
+                " ×${out.attempts}${if (out.hasFix) "" else "（无定位）"} ${out.frameHex}",
         )
         push(
             MsgType.event,

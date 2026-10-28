@@ -156,27 +156,52 @@ class SentenceModem(
      * 校验和错误或被模组静默丢弃的形态出现，那种 bug 到外场才暴露。
      * 真机走厂商 SDK（它会自己组 MCQ），或者走 [enqueueSfq] 让模组排队。
      */
-    override suspend fun sendMcq(hex: String): SatResult = throw UnsupportedOperationException(MCQ_WIRE_FORMAT_UNDOCUMENTED)
+    override suspend fun sendMcq(hex: String): SatSend = throw UnsupportedOperationException(MCQ_WIRE_FORMAT_UNDOCUMENTED)
 
     /**
      * 入队等过境自动发（〔规 §3.1.12〕，模组侧 FIFO 自动完成发送）。
      * 返回 false = 没进队列，App 侧持久队列必须自己留着补发。
      */
-    override suspend fun enqueueSfq(hex: String): Boolean {
-        val c = caps ?: return false
+    override suspend fun enqueueSfq(hex: String): SatSend {
+        val c = caps ?: return SatSend.failed(SatPath.QUEUED, SatFailReason.NOT_PROVISIONED)
         // 会话没就绪就连"入队"都不发：位置没推进去时模组存了也发不出去，
         // 还会占掉一个队列位（GM1003 只有 50 个），App 侧那份补发反倒被架空
-        if (!sessionReady) return false
-        val payload = runCatching { hexToBytesSafe(hex) }.getOrNull() ?: return false
+        if (!sessionReady) return SatSend.failed(SatPath.QUEUED, SatFailReason.NOT_PROVISIONED)
+        val payload = runCatching { hexToBytesSafe(hex) }.getOrNull()
+            ?: return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
         // 预算在这里拦：等级不是常量，是上电读到的（E.4）
-        if (payload.size > c.maxMessageBytes) return false
+        if (payload.size > c.maxMessageBytes) return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
         val stored = io.withLock {
             // 〔规 §3.1.12 注1〕收信方填 0 = 发给平台；注2 优先级仅 GM1003 支持，GM1001 固定 0。
             // 目前所有报文都是普通优先级，所以两种型号都发 0 —— 需要抢占时再改这里。
             request("SFI", cmdTimeoutMs, { send("SFQ", listOf(RECEIVER_PLATFORM, "0", hex)) }) { s -> GsatDecoder.sfi(s) }
+        } ?: return SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY)
+        if (stored.state != SfiState.STORED) {
+            return SatSend(SatResult.FAIL, SatPath.QUEUED, SatFailReason.fromSfi(stored.state, stored.failReason), stored.messageId.takeIf { it > 0 })
         }
-        return stored?.state == SfiState.STORED
+        // 存进去 ≠ 发出去：记下 ID→内容，模组事后报"超时丢弃"时才捡得回来（E.6）
+        if (stored.messageId > 0) inFlight[stored.messageId] = hex
+        return SatSend(SatResult.NO_ACK, SatPath.QUEUED, messageId = stored.messageId.takeIf { it > 0 })
     }
+
+    /** 已交给模组、还没等到发射结果的报文：模组报文 ID → 原始 hex */
+    private val inFlight = LinkedHashMap<Int, String>()
+
+    /**
+     * 被模组**主动丢弃**的报文。GM1003 存了 4 分钟没发出去就走到这里（〔规 §3.1.13 注〕），
+     * 而 App 侧那份补发队列早就在模组"收下"的时候清了 —— 不捡回来，SOS 就是静默消失。
+     */
+    private val droppedHex = ArrayList<String>()
+
+    /** 取走并清空被丢弃的报文，调用方把它们重新排队 */
+    override fun drainDropped(): List<String> {
+        val out = droppedHex.toList()
+        droppedHex.clear()
+        return out
+    }
+
+    /** 还压在模组队列里的条数，给工程模式日志窗用 */
+    val moduleQueueDepth: Int get() = inFlight.size
 
     /** 队列位还有没有。SFP 查询剩余待发数量，范围 0~512（〔规 §3.1.14〕） */
     suspend fun queryQueueRemaining(): Int? {
@@ -328,7 +353,16 @@ class SentenceModem(
             }
             "SFI" -> {
                 val f = GsatDecoder.sfi(s) ?: return
-                if (f.droppedByTimeout) trace("模组超时丢弃: 报文ID=${f.messageId}")
+                when {
+                    f.state == SfiState.SENT -> inFlight.remove(f.messageId)
+                    f.droppedByTimeout -> {
+                        // 模组把它丢了，内容只有我们从 ID 反查才拿得回来
+                        val hex = inFlight.remove(f.messageId)
+                        if (hex != null) droppedHex += hex
+                        trace("模组超时丢弃: 报文ID=${f.messageId} 已交回 App 队列")
+                    }
+                    else -> Unit
+                }
             }
             else -> Unit
         }

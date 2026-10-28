@@ -48,22 +48,39 @@ interface SatelliteModem {
     suspend fun readFix(): Fix?
 
     /**
-     * 立即发射并等 ACK。SDK 侧对应 sendMsgMCQ。
-     * 返回 [SatResult.NO_ACK] 表示发出去了但星上没确认。
+     * 立即发射并等星上确认。SDK 侧对应 sendMsgMCQ。
      *
      * 注意**卫星 ACK 只代表卫星收到，不代表星座核心网收到**（〔规 §3.1.4 注6〕）：
-     * 即使是 COMPLETE 也不能对外说"已送达"（§6.1 红线一）。
+     * 即使是 [SatResult.COMPLETE] 也不能对外说"已送达"（§6.1 红线一）。
+     * 失败成因看 [SatSend.reason]。
+     *
+     * 语句级实现会抛 [UnsupportedOperationException]：MCQ 的线格式不在规范正文里（§9 #13）。
+     * 调用方要么先看 [supportsImmediateSend]，要么像 [SosCoordinator] 那样用 runCatching 兜住。
      */
-    suspend fun sendMcq(hex: String): SatResult
+    suspend fun sendMcq(hex: String): SatSend
 
-    /** 入 FIFO 队列，等下次过境自动发。SDK 侧对应 sendMsgSFQ */
-    suspend fun enqueueSfq(hex: String): Boolean
+    /**
+     * 入模组的 FIFO 队列，等下次过境自动发。SDK 侧对应 sendMsgSFQ。
+     *
+     * **收下 ≠ 送达**：返回 [SatResult.NO_ACK] + [SatPath.QUEUED] 只说明它进了模组队列。
+     * 所以 App 侧那份持久队列不能在这一步就清掉 ——
+     * GM1003 会在 4 分钟后把没发出去的丢掉（[SatFailReason.DROPPED_BY_TIMEOUT]），
+     * 丢了要重新排队，否则 SOS 会静默消失（E.6）。
+     */
+    suspend fun enqueueSfq(hex: String): SatSend
 
     /**
      * 手机位置反向喂给模组（E.5）。SDK 侧对应 `updateLocation(经度, 纬度)`。
      * 上电一次、之后 1~10 分钟一次；模组复位/掉电即丢；**经纬度直接影响下行能不能收到**。
      */
     suspend fun updateLocation(lon: Double, lat: Double)
+
+    /**
+     * 取走并清空"模组收下之后又主动丢弃"的报文（GM1003 的 4 分钟超时，〔规 §3.1.13 注〕）。
+     *
+     * 场景层替身没有这个概念，返回空即可；语句层实现必须给真的，否则 SOS 会静默消失（E.6）。
+     */
+    fun drainDropped(): List<String> = emptyList()
 
     /** 平台下行。SDK 侧对应 setMCIMessageListening */
     fun onDownlink(handler: (hex: String) -> Unit)
