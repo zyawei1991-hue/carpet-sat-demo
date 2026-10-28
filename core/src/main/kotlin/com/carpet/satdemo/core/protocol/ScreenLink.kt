@@ -85,6 +85,16 @@ data class SatState(
     /** App 侧攒着待补发的条数。掉线期间这个数字一直涨，就是"一条不能丢"的凭据 */
     @SerialName("queue_pending") val queuePending: Int = 0,
     /**
+     * 因为队列满了被挤掉/拒收的条数（E.10 #8）。容量按模组型号注入（GM1001 500 / GM1003 50），
+     * 所以这个数字非零是**可能**发生的：展示端要把它画出来，而不是假装"一条没丢"。null = 没有队列概念
+     */
+    @SerialName("queue_dropped") val queueDropped: Int? = null,
+    /**
+     * 队列容量，同样是型号口径（E.10 #8）。展示端画"N/额度"才有紧迫感 ——
+     * 光说"待补发 47 条"没人知道这离 50 条的上限只差 3 条。
+     */
+    @SerialName("queue_capacity") val queueCapacity: Int? = null,
+    /**
      * 距上次成功推送 TPI 多少秒（E.5）。模组那边的位置是**我们喂给它的**，
      * 它过期就代表下行可能收不到 —— 这不再是可省的遥测。
      */

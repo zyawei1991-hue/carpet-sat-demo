@@ -223,7 +223,9 @@ class DemoEngineTest {
         modem.reachable = false
         repeat(3) {
             e.heartbeat(nowSec = clock.ms / 1000, cellOk = false)
-            clock.advance(1_000)
+            // 帧里的时间戳是分钟粒度：隔一秒再发一条是完全相同的报文，
+            // 队列按内容去重不会收（E.10 #8，GM1003 只有 50 个槽，重复帧白占额度）
+            clock.advance(60_000)
         }
 
         val s = e.snapshot()
@@ -256,7 +258,9 @@ class DemoEngineTest {
         modem.reachable = false
         repeat(3) {
             e.heartbeat(nowSec = clock.ms / 1000, cellOk = false)
-            clock.advance(1_000)
+            // 帧里的时间戳是分钟粒度：隔一秒再发一条是完全相同的报文，
+            // 队列按内容去重不会收（E.10 #8，GM1003 只有 50 个槽，重复帧白占额度）
+            clock.advance(60_000)
         }
         assertEquals(3, e.pending.size)
 

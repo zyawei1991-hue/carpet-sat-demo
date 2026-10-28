@@ -62,6 +62,8 @@
             "fw": { "type": "string", "description": "来自 DII" },
             "module_ok": { "type": "boolean", "description": "GT1005 是否在。掉线≠没锁到星：前者展示「终端离线」，后者展示「等过顶」" },
             "queue_pending": { "type": "integer", "minimum": 0, "description": "App 侧攒着待补发的条数，掉线期间一直涨" },
+            "queue_capacity": { "type": ["integer", "null"], "minimum": 1, "description": "队列容量，来自模组型号〔规 §3.1.12/§3.1.13 注〕：GM1001 是 500 条（FLASH、掉电保存、无超时），GM1003 只有 50 条（RAM、掉电丢失、4 分钟未发出即丢）。画成「12/50」才有意义 —— 单说待补发条数没人知道离上限差几条" },
+            "queue_dropped": { "type": ["integer", "null"], "minimum": 0, "description": "因为队满被挤掉或拒收的条数。SOS 档永远排在心跳前面被保下来，真被挤掉的只会是遥测；这个数字非零就是「一条不能丢」的反证，展示端要如实画出来，不能假装没丢" },
             "tpi_age_s": { "type": "integer", "minimum": 0, "description": "距上次成功把位置推给模组（TPI）过了多少秒。〔规 §3.1.7〕要求 1~10 分钟推一次，模组掉电即丢 —— 这个数就是那根线的余量" },
             "tpi_stale": { "type": "boolean", "description": "位置陈旧到不能再信（默认 15 分钟，或压根没有位置源）。true 时展示端要打红字「位置已过期 N 分钟，卫星可能投递失败」，因为经纬度直接决定平台下行能不能收到" },
             "upgrade_pct": { "type": "integer", "minimum": 0, "maximum": 99, "description": "模组固件升级进度（updateSOC 的 0~99）。非 null = 正在升级 = 全局写锁生效，期间所有发送按钮置灰：〔SDK文 §9-2〕'正在更新模组任务时，所有数据发送和自定义任务都不可用'" },

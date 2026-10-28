@@ -25,6 +25,7 @@ import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.GnssState
 import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.LinkState
+import com.carpet.satdemo.core.protocol.ModuleCaps
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.SatState
@@ -36,6 +37,8 @@ import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.StatePayload
 import com.carpet.satdemo.core.protocol.toHex
+import com.carpet.satdemo.core.queue.Outbox
+import com.carpet.satdemo.core.queue.OutboxClass
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -68,8 +71,14 @@ class DemoEngine(
     var phase: LinkPhase = machine.phase
         private set
 
-    /** 离线期间攒着等补发的报文。RECOVER 态由 App 刷出去 */
-    val pending: ArrayDeque<String> = ArrayDeque()
+    /**
+     * 离线期间攒着等补发的报文（E.10 #8）。容量、超时、掉电要不要重推都来自**模组型号**，
+     * 不写死 —— 见 [Outbox]。RECOVER 态由 App 刷出去。
+     */
+    val outbox = Outbox(modem.caps)
+
+    /** 待补发的队首顺序（屏上那个数字是它的 size）。已交给模组盯梢的不算在这里 */
+    val pending: List<String> get() = outbox.hexes
 
     /** 平台下发的最后一条原始报文，SOS 回执靠它 */
     var lastDownlinkHex: String? = null
@@ -126,7 +135,10 @@ class DemoEngine(
         emit(machine.onSignal(LinkSignal.Cell(status, nowMs)), nowMs)
 
     fun onTick(nowMs: Long): List<ScreenMessage> {
+        adoptCaps()
         reclaimDropped()
+        noteModulePowerLoss(nowMs)
+        reparkEmergency(nowMs)
         // 「平台已确认」是给人看一眼就收回去的回执，长期压着会把轨迹图挡住；
         // 未确认那条不能收 —— 那是催人在开阔处等下次过境的红字
         val since = sosSinceTs
@@ -136,6 +148,30 @@ class DemoEngine(
             sosAttempts = 0
         }
         return emit(machine.onSignal(LinkSignal.Tick(nowMs)), nowMs)
+    }
+
+    /** 上电会话读到 ICI 之前只能按最坏档排队，读到之后立刻换成真档（E.10 #8） */
+    private fun adoptCaps() {
+        val caps = modem.caps ?: return
+        if (adoptedCaps === caps) return
+        adoptedCaps = caps
+        outbox.adopt(caps)
+    }
+
+    private var adoptedCaps: ModuleCaps? = null
+    private var lastModuleAvailable = true
+
+    /**
+     * 模组掉电/复位这一路必须让队列知道，而且**处理方向按型号相反**（〔规 §3.1.12/§3.1.13 注〕）：
+     * GM1003 队列在 RAM 里，掉电即空，交出去的必须整体重推；
+     * GM1001 存 FLASH，那些报文还在里面躺着，重推就是把同一条 SOS 又发一遍。
+     * 判定全在 [Outbox.onModulePowerLoss] 里按 [QueuePolicy] 走，这里只负责发现这件事发生了。
+     */
+    private fun noteModulePowerLoss(nowMs: Long) {
+        val up = modem.available
+        if (lastModuleAvailable && !up) outbox.onModulePowerLoss()
+        lastModuleAvailable = up
+        outbox.sweep(nowMs)
     }
 
     fun onSatAck(nowMs: Long, ok: Boolean): List<ScreenMessage> =
@@ -205,7 +241,7 @@ class DemoEngine(
         if (phase == LinkPhase.CELL) return true
         val send = modem.enqueueSfq(hex)
         if (send.accepted) return true
-        pending.addLast(hex)
+        outbox.offer(hex, OutboxClass.Telemetry, nowMs = nowSec * 1000)
         return false
     }
 
@@ -213,6 +249,9 @@ class DemoEngine(
      * RECOVER 态把离线期间攒下的补发出去。一次 tick 只刷 [DRAIN_BURST] 条 ——
      * 真机上一条 SFQ 要过一次 BLE 写，一秒刷干净反而是假的，而且展示端正好想看
      * 那个数字往下掉。刷完才告诉状态机可以回 CELL；中途模块又不收了就停在 RECOVER。
+     *
+     * 一次推几条还要看 [Outbox.slotsLeft]：模组只有 50 个槽（GM1003），
+     * 推满了它只会回"缓存已满"，那条报文又得回到队首白转一圈。
      */
     suspend fun drainPending(nowMs: Long): List<ScreenMessage> {
         reclaimDropped()
@@ -220,14 +259,16 @@ class DemoEngine(
         // 普通心跳仍然只在 RECOVER 刷，CELL 态下不该去碰卫星链路
         if (phase != LinkPhase.RECOVER && !sosParked) return emptyList()
         var flushed = 0
-        while (flushed < DRAIN_BURST && pending.isNotEmpty()) {
-            val hex = pending.first()
-            if (!modem.enqueueSfq(hex).accepted) break
-            pending.removeFirst()
-            if (sosParked && hex == lastSosHex) sosParked = false
+        for (entry in outbox.peek(nowMs)) {
+            if (flushed >= DRAIN_BURST || outbox.slotsLeft() <= 0) break
+            if (!modem.enqueueSfq(entry.hex).accepted) break
+            // 双写的分岔（E.10 #8）：SOS 交出去之后 App 仍留一份盯着，模组偷偷丢了要能捡回来；
+            // 心跳不留 —— 下一分钟就有一条新的盖过它，留着只是占掉 50 个槽里的一个
+            if (entry.kind == OutboxClass.Telemetry) outbox.release(entry.hex) else outbox.markHanded(entry.hex, nowMs)
+            if (sosParked && entry.hex == lastSosHex) sosParked = false
             flushed++
         }
-        return if (pending.isEmpty() && phase == LinkPhase.RECOVER)
+        return if (outbox.size == 0 && phase == LinkPhase.RECOVER)
             emit(machine.onSignal(LinkSignal.QueueDrained(nowMs)), nowMs) else emptyList()
     }
 
@@ -258,9 +299,17 @@ class DemoEngine(
         // 一个字节都没写出去的（升级写锁、没电、缓存满），留在 App 侧队列等补发。
         // 已经存进模组队列的（accepted）不能重复留：GM1003 只有 50 个槽，重三条就是 6%
         if (!send.accepted && send.reason in REQUEUE_REASONS) {
-            pending.addFirst(lastSosHex)
+            outbox.offer(lastSosHex, OutboxClass.Emergency, nowMs = nowSec * 1000)
             sosParked = true
+        } else if (send.accepted && send.via == SatPath.QUEUED) {
+            // 双写：模组那句"收下"只代表进了它自己的队列。GM1003 存够 4 分钟没发出去就偷偷丢掉
+            // （〔规 §3.1.13 注〕），App 这份盯梢副本就是唯一能把它捡回来的东西（E.6）。
+            // 模组没报告丢也没关系 —— 超时判定在 Outbox 里按型号自己算。
+            outbox.offer(lastSosHex, OutboxClass.Emergency, nowMs = nowSec * 1000)
+            outbox.markHanded(lastSosHex, nowSec * 1000)
         }
+        // 星上确认发出去了 = 模组队列里已经没有它，盯梢副本撤掉
+        if (send.result == SatResult.COMPLETE) outbox.confirm(lastSosHex)
         return SosResult(send, lastSosHex, f != null, sosAttempts, sosNextPassInS)
     }
 
@@ -294,6 +343,8 @@ class DemoEngine(
         if (sosLevel == SosLevel.sent || sosLevel == SosLevel.pending) {
             sosLevel = SosLevel.acked
             sosSinceTs = System.currentTimeMillis()
+            // 平台都回执了，模组队列里那条早就发走了，盯梢副本没用了
+            outbox.confirm(lastSosHex)
         }
     }
 
@@ -302,10 +353,17 @@ class DemoEngine(
      * App 那份补发队列在模组"收下"时就清了，不捡回来这条就静默消失 —— SOS 尤其不能这样。
      */
     private fun reclaimDropped() {
-        val back = modem.drainDropped()
-        if (back.isEmpty()) return
-        // 插到队首：SOS 和撤销都比后面的心跳要紧
-        back.forEachIndexed { i, hex -> pending.add(i, hex) }
+        outbox.reclaim(modem.drainDropped())
+    }
+
+    /**
+     * 被捡回来的 SOS 不等 RECOVER 就该重推 —— 模组把它丢了不等于人不用救了。
+     * 三条来路都归到这里：模组报告的丢弃、[Outbox.sweep] 的超时判定、掉电重推。
+     */
+    private fun reparkEmergency(nowMs: Long) {
+        if (sosParked || lastSosHex.isEmpty()) return
+        val head = outbox.peek(nowMs).firstOrNull() ?: return
+        if (head.hex == lastSosHex) sosParked = true
     }
 
     data class SosResult(
@@ -350,6 +408,11 @@ class DemoEngine(
                 moduleBattery = null,
                 moduleOk = modem.available,
                 queuePending = pending.size,
+                // 队列口径按型号注入（E.10 #8）：容量和被挤掉的条数一起上屏，
+                // 光给"待补发 N 条"没人知道离上限还差几条
+                queueDropped = outbox.dropped.takeIf { outbox.dropped > 0 },
+                // 容量不按 module_ok 门控：掉线时正是它最有用的时候（"50 条只剩 3 个位置"）
+                queueCapacity = outbox.policy.capacity,
                 // TPI 陈旧度是新的 §4 呈现字段：模组的位置是我们喂的，过期了下行就收不到（E.5）
                 tpiAgeS = tpiStatus?.ageMs?.let { it / 1000 },
                 tpiStale = tpiStatus?.let { it.state == TpiTracker.State.STALE || it.state == TpiTracker.State.NO_SOURCE },
