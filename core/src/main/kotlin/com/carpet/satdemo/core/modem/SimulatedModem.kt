@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.protocol.ModuleCaps
 import kotlinx.coroutines.delay
 
 /** 时间源。单测里塞假时钟，让"分钟级时延"的分支不用真等。 */
@@ -33,10 +34,22 @@ class SimulatedModem(
     private var lockHandler: ((SatLock?) -> Unit)? = null
     private var lastFix: Fix? = DEFAULT_FIX
 
+    /**
+     * 位置是**推给**模组的（对应真机的 TPI），不是模组测出来的。
+     * 改名提醒：原来这里叫 readFix，读法反了会被当成 GNSS 源用（E.5）。
+     */
+
     /** 被 sendMcq / enqueueSfq 收到过的包，供演示脚本和断言检查 */
     val sent: MutableList<String> = ArrayList()
 
     override val available: Boolean get() = reachable
+
+    /**
+     * 场景层替身默认给**最坏档**能力（等级 1 = ≤90 B、短接入、GM1003），
+     * 因为演示里跑出来的结论必须能扛住真机的坏情况；要演好结果就显式换掉它。
+     */
+    var capsOverride: ModuleCaps = ModuleCaps.worstKnown()
+    override val caps: ModuleCaps? get() = if (reachable) capsOverride else null
 
     override suspend fun readFix(): Fix? = lastFix
 

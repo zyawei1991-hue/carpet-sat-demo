@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets
 /**
  * 时空道宇「通用数据接口规范 V1.0」的语句层：`$` + 说话方 2 字 + 动词 3 字 + `,字段…` + `*` + 校验和 + CRLF。
  *
- * 这一层是从规范里那几条**带真实校验和的例句**反推验证出来的（见 ProtocolTest）：
+ * 这一层是从规范里那几条**带真实校验和的例句**反推验证出来的（见 `GsatSentenceTest`）：
  * `$CCCOP,2*42` / `$CCSFP,2,1,,*46` / `$CCSFP,1,2,,*46` 三条都能被本文件的算法逐字节复现，
  * 所以异或口径是实测的，不是猜的。
  *
@@ -150,9 +150,6 @@ data class GsatSentence(
 
         /** 逗号分隔，空字段保留（`a,,b` → [a, "", b]）；不做 trim，理由见类注释 */
         private fun splitFields(s: String): List<String> = s.split(',')
-
-        private const val HEX_CHARS = "0123456789ABCDEF"
-        private fun HEX(n: Int): String = HEX_CHARS[n].toString()
     }
 }
 
@@ -164,6 +161,9 @@ enum class GsatParseError {
     /** 内容被改动（读串位、丢字节、多余字符）都会走到这里，是最该上屏的错误 */
     CHECKSUM_MISMATCH,
     TOO_SHORT,
+
+    /** 一直没等到 CRLF、缓冲涨到上限。拔线/模组卡死时的形态，和"内容错"不是一回事 */
+    OVERFLOW,
     UNKNOWN_SPEAKER,
     NO_FIELD_SEPARATOR,
 }
