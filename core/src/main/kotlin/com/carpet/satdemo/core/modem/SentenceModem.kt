@@ -46,7 +46,7 @@ class SentenceModem(
     private val cmdTimeoutMs: Long = 3_000,
     /**
      * 报文长度的单位口径。默认按最坏的那一头（hex 字符）折，
-     * §9 #13 有了厂商答复只需要在这里换成 [LengthUnit.BYTES]。
+     * §9 #16 有了厂商答复只需要在这里换成 [LengthUnit.BYTES]。
      */
     private val lengthUnit: LengthUnit = LengthUnit.WORST_KNOWN,
     /** 升级期间的全局写锁（E.10 #6）。真机上厂商 SDK 的 `updateSOC` 会在升级中把发送判成

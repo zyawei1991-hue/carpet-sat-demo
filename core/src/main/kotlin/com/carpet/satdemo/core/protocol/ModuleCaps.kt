@@ -60,8 +60,13 @@ enum class AccessService {
 /**
  * `ICI` 字段 9「通信单元发送消息长度」的等级。
  * 〔规 §3.1.4 注7〕：此字段长度限制对应通信申请语句中通信数据字段的**字节**长度。
- * 但厂商传的是 hex 字符串，这个数按字节还是字符算没答（§9 #13）——
- * 所以 [maxBytes] 只是原始数值，**要判断发不发得出去请用 [MessageBudget]**。
+ * 但厂商传的是 hex 字符串，这个数按字节还是字符算没答（§9 #16）。
+ *
+ * 〔码〕实测（V1.4）：SDK 的 `EntityICI.getMaxMsgLength()` 就是 `getfield msgLength; ireturn`，
+ * 而 `ParseICI` 把语句字段**原样 parseInt** 存进去 —— **存的是等级 1~5，SDK 内部没有等级→字节的换算表**。
+ * 所以下面这张 [maxBytes] 表是**我们的业务代码**，别指望升级 SDK 能少写它。
+ *
+ * **要判断发不发得出去请用 [MessageBudget]** —— 那里才有单位口径。
  */
 enum class MsgLengthLevel(val level: Int, val maxBytes: Int) {
     L1(1, 90),
@@ -121,10 +126,11 @@ data class ModuleCaps(
     val isInvalidCard: Boolean get() = cardId == INVALID_CARD_ID
 
     /**
-     * 单条报文的数据字段上限（字节）。
+     * 单条报文的数据字段上限（字节）—— **是我们那张等级表换算出来的，不是厂商给的**。
      *
-     * ⚠️ 这是 `ICI` 字段的**原始数值**。「这个数到底按字节还是按 hex 字符算」文档没定死（§9 #13），
-     * 所以发不发得出去**不要直接比它**，走 [budget] —— 那里有最坏口径。
+     * 〔码〕实测 SDK 的 `getMaxMsgLength()` 返回等级原值（1~5），换算在我们这边（[MsgLengthLevel]）。
+     * 而「模组到底按字节还是按 hex 字符判这个数」文档没定死（§9 #16），
+     * 所以发不发得出去**不要直接比它**，走 [budget] —— 那里才有最坏口径。
      */
     val maxMessageBytes: Int get() = lengthLevel.maxBytes
 

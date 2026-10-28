@@ -123,7 +123,7 @@ class TpiTracker(
             log("TPI 已推送 %.5f, %.5f".format(pos.latitude.degrees, pos.longitude.degrees))
         } else {
             rejectedAtMs = now
-            log(if (modem.gate.isUpgrading) "TPI 被升级写锁挡下" else "TPI 模组未应答")
+            log(if (modem.gate.isUpgrading) "TPI 被升级写锁挡下" else "TPI 未写出去（链路未开、档位未就绪或模组没应答）")
         }
         return status()
     }

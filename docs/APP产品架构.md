@@ -1,4 +1,9 @@
-# 车宠 · 手机 App 产品架构 V1.3
+# 车宠 · 手机 App 产品架构 V1.4
+
+> **V1.4 变更（E.10 那 10 条代码改动全部落地 + 用字节码把厂商 SDK 重新对了一遍）**：两件事。
+> **一是代码追平了文档**：删 `Gt1005Verbs`、字节管道、事件驱动上电会话、SOS 三态、TPI 周期任务、升级写锁、星历 `StarManager`、构建配置（minSdk 26 / RxJava3 / aar 进库 / 普通签名 / 明文按域名）、队列层与报文预算的运行时注入、`passthrough` 工程模式日志窗 —— **10 条全做完，`:core` 单测从 43 条涨到 158 条，`:app:assembleDebug` 出包 3.68 MB**（E.10 逐条标了实际落地形态，并把"还没做的两件"说清楚：物理口 UART/BLE 的真实现、`updateSOC` 真驱动写锁 —— **都等实物，不做投机代码**）。
+> **二是把 SDK 从"读文档"改成"解字节码"（新增附录 E.12），结果文档错了四处**：① `EntityICI.getMaxMsgLength()` **返回的是等级原值（1~5），SDK 内部压根没有等级→字节的换算表**，所以那张换算表是我们的业务代码；顺带把 §9 #14 逼出一个更尖锐的问题 —— **模组按字节还是按 hex 字符拦报文，等级 1 下差一倍（90 vs 45）**（§9 #16，代码已按最坏口径做成一个开关）；② `CustomError` 实测**五个值**（文档只写四个，漏了 `TIMEOUT_ERROR`）；③ **`updateLocation()` 返回 `void`，而且 aar 里有 `EntityTPI` 却没有 TPI 监听器** —— "模组认了这条位置"在应用侧**不可观测**，所以 UI 只能说"最近一次推送于 N 秒前"，不能说"已同步"（§9 #17）；④ **`EntityDII` 没有任何位置字段**，"从模组读位置"这条路在 SDK 面上不存在（SDK 路线的 `readFix()` 直接返回 null，不编数）。另外三条集成期会炸的实测事实：`ModuleDataManager` 构造**包私有**、监听器**入参是 `java.util.function.Consumer` 而返回值是 rxjava3 `Disposable`**（两套生态混用）、**aar 里没有 `destroy()` 而资料包 jar 里有**（两个不同构建，§9 #18）。
+> **一条方法论上的更正，比上面任何一条都重要**：**"照文档写代码"在这个 SDK 上已经被证伪**。从现在起我们以字节码 + 真机为准，文档只在能交叉验证时引用（§11 已加一条：向厂商要一份和 aar 同步的文档）。**§9 从 15 条涨到 18 条，其中 P0 从 3 条涨到 5 条。**
 
 > **V1.3 变更（拿到时空道宇 SDK 后的一次大改，全部结论见附录 E）**：那份 SDK 我**已经从群里下载并解完**（两个 aar + 参考代码 + 28 页《通用数据接口规范 V1.0》）。它**推翻了三个假设**：① 协议是 **NMEA 风格 ASCII 语句**（`$CCSFQ,…*hh`，异或校验），不是二进制 → **我们的手写指令表 `Gt1005Verbs` 应该整张删掉，解析交给厂商 SDK**；② SDK **不做 IO**，只暴露 `send(byte[])/receive(byte[])` 让我们实现 → **UART 路线合法，BLE 只是官方 demo 的实现**，`UartModem` 不用推翻；③ 消息长度**分 5 个等级（≤90/200/230/430/1900 B）** → V2.0 方案里"1900B vs 90B"的矛盾**不是笔误，是等级差**，必须运行时读 ICI 决定。另外挖出两条会改变设计的硬事实：**SOS 的"卫星 ACK 只代表卫星收到，不代表核心网收到"**（写进文案红线），以及**规范里只有 GM1001（500 条/掉电保存/无超时）和 GM1003（50 条/掉电丢失/4 分钟超时丢弃）两颗型号，而我们一直说 GT1005** —— 这是现在最贵的一个待确认问题（E.6）。**还挖出两个我们此前完全没有的功能/约束**：**TPI —— 手机要把时间和经纬度反向喂给模组**（上电一次、之后 1~10 分钟一次，模组复位即丢，且**经纬度直接影响下行接收**，这是 §3.2 新增的一条 P0，E.5）；以及**两个 SDK 的线程模型完全相反**（基础通信回调全在子线程、星历必须主线程调用且主线程回调），这是集成期最容易炸的地方（E.8）。构建侧硬约束：**minSdk 提到 26、RxJava3、星历走明文 HTTP、禁止 platform 签名**。**§6 新增 6.1 两条红线，§8/§9/§11/§12 同步改写。**
 
@@ -315,7 +320,7 @@ feature-home/            账号、订阅、隐私中心
 
 | 阶段 | 目标 | 交付判据 |
 | --- | --- | --- |
-| **R0 演示**（现在） | 链路可信、彩排可重复 | ✅ 43 条 core 单测、8 帧彩排、`v0.3-rehearsal`；✅ **协议形态已由 SDK 文档确认（ASCII 语句 + 异或校验，附录 E.2），不再是推测**；⚠️ **但仍未对真机发过一帧**，且**型号未确认（GM1001 还是 GM1003，§9 #12）**；⚠️ `simulator/screen.html` 按 466 CSS px 直接画，真机要开 LVGL 2× scale（逻辑约 233），**现在 11–19px 的字号搬到屏上会糊，投放前得按逻辑像素重算**（附录 A.1） |
+| **R0 演示**（现在） | 链路可信、彩排可重复 | ✅ **158 条 core 单测**（V1.3 时是 43 条）、8 帧彩排、`v0.3-rehearsal`；✅ **附录 E.10 那 10 条代码改动全部落地**，`:app:assembleDebug` 出包 3.68 MB（提交 `6aa148f…baa3763`）；✅ **协议形态已由 SDK 文档确认（ASCII 语句 + 异或校验，附录 E.2），不再是推测**；⚠️ **但仍未对真机发过一帧**：`VendorSdkModem` / `StarManagerEphemeris` 目前只被"编译 + aar 签名对得上"证明（附录 E.12），且**型号未确认（GM1001 还是 GM1003，§9 #12）**；⚠️ **手机端还是"演示控制台"，不是 §5 的 SceneShell + 四 Tab**；⚠️ `simulator/screen.html` 按 466 CSS px 直接画，真机要开 LVGL 2× scale（逻辑约 233），**现在 11–19px 的字号搬到屏上会糊，投放前得按逻辑像素重算**（附录 A.1） |
 | **R1 车宠守护 1.0** | 车载场景闭环，能给吉利真机看 | 设备总线 + 账号 + 真实 UART 通信 + SOS 全流程（长按倒计时可取消、队列补发、用量页）+ 首页卡片流 + **CI/CD 与自动化部署**（digivita 在这里欠了债：无测试无 CI、手动 SSH 部署、PM2 因 1.8G 无 swap 重启 4624 次 —— **我们不重复**，见附录 D） |
 | **R2 亲子 + 健康底座** | 形态切换可用，家长管控先上线；健康闭环接进设备总线 | `dock_type`/屏幕几何路由 + 儿童隐私档 + AI 网关（Skill 注册表 + 权限五档）+ 遗留车内告警 + **打卡/连续/徽章留存引擎**（亲子与健康共用一份，不做两套） |
 | **R3 分身与社交** | 叙事与留存 | 人设、消息代回；A2A 只做技术储备 |
@@ -327,9 +332,9 @@ feature-home/            账号、订阅、隐私中心
 
 **近期该做的四件事（不需要新硬件）**：
 
-1. **把 `SimulatedModem` 换成"会讲语句的假模组"**：不再模拟"发送成功/失败"，而是**在 App 内生成合法的 `$GS…` 语句喂给厂商 SDK 的 `receive(byte[])`**（〔E.1〕SDK 不做 IO，这条天然可行）。好处是**到货前就能把解析、状态机、UI 全链路跑通，并且测的是真解析器而不是我写的假解析器**；到货当天只换 `send/receive` 的字节来源。
+1. ~~把 `SimulatedModem` 换成"会讲语句的假模组"~~ ✅ **V1.4 已做完，而且做得比设想的更彻底**：`:core` 里有 `FakeGsatModule`（按规范生成合法 `$GS…` 语句、带异或校验）+ `SentenceModem`（协议层实现），字节管道 `ModemBytePipe` 在 JVM 侧，**测的是真解析器而不是我们写的假解析器**。同时多出了一条 V1.3 没计划到的路：**厂商 SDK 那侧另有一个 `VendorSdkModem`，与 `SentenceModem` 实现同一个 `SatelliteModem` 接口、共用同一套语义**（E.12 决定 1）。到货当天只换字节的来源，`DemoEngine` 不用动。
 2. 建 **设备总线**：现在圆屏、卫星模块、手机自身定位三者的连接逻辑分散在 `DemoRuntime` / `LocationMonitor` / `NetworkMonitor` 里，越加硬件越乱。**戒指/手环也要进这个总线**，否则健康场景会起第二套蓝牙栈（digivita 就是这么长歪的）。
-3. 把 App 从"演示控制台"改成 §5 的 **SceneShell + 四 Tab 骨架**，**演示功能收进一个"工程模式"入口**（不删，现场救场要用）。
+3. 把 App 从"演示控制台"改成 §5 的 **SceneShell + 四 Tab 骨架**，**演示功能收进一个"工程模式"入口**（不删，现场救场要用）。🔶 **V1.4 只做了一半**：手机端已经加了「工程模式日志窗」开关（管道原文 + SDK passthrough + 状态注解三路同屏，E.10 #10），但 **SceneShell + 四 Tab 还没动** —— 现在的 `MainActivity` 仍是一屏开关，靠 `simulator/screen.html` 演展示端。这一条是 R0 → R1 之间最大的一块工作量。
 4. 把 digivita 的 **Skill 定义（关键词触发 + 结构化 JSON + 权限五档）和 Heartbeat 主动扫描**落成 `core/ai` + 规则引擎的接口 —— 这是我们唯一不用从零设计的场景包。
 
 ---
@@ -337,6 +342,7 @@ feature-home/            账号、订阅、隐私中心
 ## 9. 开放问题（需要别人回答，不是我们能查的）
 
 V1.2 时这里剩 4 条真卡点。**V1.3 拿到 SDK 后，#1 和 #11 关闭（#1 是被"问题问错了"关闭的），但新开了 4 条（#12/#13/#14/#15），其中 #12/#13/#14 都是 P0 —— 因为 SDK 只能回答"协议长什么样"，回答不了"我们手上这颗是哪一颗、这张卡是什么等级"。**
+**V1.4 又开了三条（#16/#17/#18），来源和前三条不同：不是"文档没写"，是"文档写了、但 aar 里的东西跟文档不一样"** —— 〔码〕实测细节全在附录 E.12 那张表里。**这三条都属于"软件无法自证、必须问厂商或上真机"的一类**，所以先按最坏口径写代码，把切换点收在单个运行时注入值上。
 
 | # | 问题 | 问谁 | 卡住哪块 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -355,6 +361,9 @@ V1.2 时这里剩 4 条真卡点。**V1.3 拿到 SDK 后，#1 和 #11 关闭（#
 | 13 | **FBI / FBIS 语句的字段表**：MCQ 失败码的含义。规范正文和 SDK 文档都只有 FBI 这个类、没有它的字段定义（`EntityFBIS` 在 AAR 里存在但无文档） | 时空道宇 | SOS/消息发送失败时**能不能给用户看得懂的错误文案** | 🔴 **P0，本轮新增**。没有这张表，UI 只能显示"发送失败(3)"这种天书 |
 | 14 | **我们的测试卡是哪个等级？** `ICI` 字段 9 的等级 1~5 对应 **≤90 / 200 / 230 / 430 / 1900 B** 报文长度；另外字段 4 的 **serviceType 长/短接入**决定下行消息要不要我们主动 `CEQ` 轮询 | 时空道宇 | 报文内容设计（SOS 能塞多少字段）、接收状态机 | 🔴 **P0，本轮新增**。**这同时解开了 V2.0 里"1900B 还是 90B"那个自相矛盾 —— 不是写错，是等级不同**（E.4）。按 90B 设计会导致后面所有报文格式推倒重来，**必须先确认再写编码层** |
 | 15 | **`update()`（星历下载）走的是明文 HTTP**，SDK 要求 `android:usesCleartextTraffic="true"`；同时**星历 SDK 禁止应用使用 Platform Signature**，否则"可能导致 SDK 无法运行" | 时空道宇 + 我们自己 | 发布签名方案、安全评审 | ⏳ **本轮新增**。两个都是硬约束：签名必须走普通签名（§10.1 的独立 App 方案兼容），明文流量要么整 App 放开、要么用 `networkSecurityConfig` 只对该域名放开 —— 需要厂商给**域名清单**才能做后者（E.8） |
+| 16 | **ICI 字段 9 那个上限，模组到底按「字节」还是按「hex 字符」拦截？**〔规 §3.1.4 注 7〕写的是"字节长度"，〔规 §3.1.11〕又说通信数据字段是**字节的 hex ASCII 表示**，而〔码〕实测 `EntityICI.getMaxMsgLength()` **返回的就是等级原值、SDK 内部没有任何换算**（附录 E.12）—— 于是这句话到底约束的是哪一层，SDK 没给答案 | 时空道宇 | 报文预算 = 等级 1 时是 **90 字节还是 45 字节**，差一倍；SOS 能塞几个字段直接跟着变 | 🔴 **P0，V1.4 实测新增**。代码已按**最坏口径（当字符算）**设计，并把口径做成运行时注入的 `LengthUnit`（附录 E.4，代码在 `MessageBudget`）：**厂商一答复就改一个枚举值，不动结构** |
+| 17 | **TPI 有没有回执？** aar 里存在 `bean.EntityTPI`（带经纬度和方向），但 `ModuleDataManager` 的六个监听器里**没有 TPI**，且 `updateLocation()` 返回 **void** —— 应用侧完全无法观测"模组把这条位置收下了没有" | 时空道宇 | §3.2 TPI 陈旧度上屏的语义、"位置已同步"这句话能不能对外说 | 🔴 **P0，V1.4 实测新增**。当前代码里 `updateLocation(): Boolean` 的 true **只表示"没被升级写锁挡住、已交给 SDK"**（E.5）。UI 在拿到答案前**不说"已同步"，只说"最近一次推送于 N 秒前"** |
+| 18 | **SDK 的生命周期**：`protocollibrary_1.0.0.aar` 里 `DispatchManager` **没有 `destroy()`**，而资料包里的 `jar_comm.jar` **有** —— 两份构建不同步。`stop()` 是否真的停掉循环解析线程、重连要不要重建整个 `DispatchManager`、包私有构造的 `Looper` 参数该传哪个线程 | 时空道宇 | App 长时间挂后台 / BLE 反复断重连时的稳定性与内存 | ⏳ **V1.4 实测新增**。当前 `close()` 只做"解订阅 + `stop()`"（E.8 ③），**这条必须真机验，不是软件能自证的** |
 
 > 状态图例：✅ 已定 / 🔶 方向已定细节待定 / ⏸️ 本轮明确降级 / ⏳ 需实物或外部输入。
 
@@ -411,7 +420,7 @@ V1.2 时这里剩 4 条真卡点。**V1.3 拿到 SDK 后，#1 和 #11 关闭（#
 
 ## 11. 需要你支撑的事项（按"卡住什么"排序）
 
-这些不是我希望你做的，是我**没有就只能在假设上继续写代码**的东西。**V1.3 变化最大：SDK 已拿到，原来的 P0「取不到 SDK」关闭；但 SDK 只能回答协议问题，回答不了"我们手上这颗是哪颗、这张卡是什么等级"，于是换成三条新的 P0。**
+这些不是我希望你做的，是我**没有就只能在假设上继续写代码**的东西。**V1.3 变化最大：SDK 已拿到，原来的 P0「取不到 SDK」关闭；但 SDK 只能回答协议问题，回答不了"我们手上这颗是哪颗、这张卡是什么等级"，于是换成三条新的 P0。V1.4 再加两条 P0（长度口径、TPI 回执）—— 它们的来源不是"文档缺"，而是"aar 和文档不一致"（附录 E.12）。**
 
 | 优先级 | 需要你给的 | 为什么卡 | 最晚时间点 |
 | --- | --- | --- | --- |
@@ -419,10 +428,14 @@ V1.2 时这里剩 4 条真卡点。**V1.3 拿到 SDK 后，#1 和 #11 关闭（#
 | **P0** | **确认 GT1005 对应规范里的哪一颗：GM1001 还是 GM1003**（或者直接问厂商要这颗的**数据手册**） | 三份文档里**只有 GM1001 / GM1003 两个型号，"GT1005" 一次都没出现**。两颗的差别是**队列 500 vs 50 条、掉电保存 vs 丢失、有没有 4 分钟未发出即丢弃**。这不是细节 —— **它决定 SOS 能不能依赖模组排队，也决定"存发可靠性"这句话能不能对外讲**。当前按 GM1003 坏档设计（E.6） | **写队列层代码之前**（现在就该问，否则要重写） |
 | **P0** | **测试卡的 `ICI` 等级（报文长度 ≤90/200/230/430/1900 B）与 serviceType（长接入还是短接入）**，以及**卡号/cardId 怎么给** | 等级决定**报文能塞多少字段**，现在定格式、以后改等级 = 全部编码层推倒；**短接入必须我们自己轮询 `CEQ` 才能收到下行消息**，长接入则不用 —— 这是两套接收状态机（E.4） | **报文格式定稿之前** |
 | **P0** | **FBI / FBIS 语句的字段表**（MCQ 的失败码含义）。类在 AAR 里有，规范正文和 SDK 文档都没字段定义 | 没有它，UI 只能显示"发送失败(3)"这种天书，**SOS 失败时给不出人话**（E.7） | R1 联调前 |
+| **P0** | **V1.4 新增：ICI 字段 9 那个长度上限，模组是按「字节」还是按「hex 字符」判定？**（§9 #16） | 〔码〕实测 `getMaxMsgLength()` 返回的是**等级原值**、SDK 里没有换算（E.12），所以规范那句"对应字节长度"落到了模组固件里 —— **等级 1 下 90 字节和 45 字节差一倍，直接决定 SOS 报文骨架**。当前按最坏口径（字符）设计，改一个枚举值就能翻 | **报文格式定稿之前**（和上面那条 P0 一起问，一次问完） |
+| **P0** | **V1.4 新增：TPI 到底有没有回执语句？**（§9 #17） aar 里有 `EntityTPI` 但**没有任何 TPI 监听器**，`updateLocation()` 又返回 `void` | 决定 §3.2 那条"位置已同步给卫星"能不能对外说。**现在代码里 true 只代表"已交给 SDK"**，UI 只显示"最近一次推送于 N 秒前"，不写"已同步"（E.5） | R1 联调前（演示不受影响，因为演示用桩） |
 | **P1** | 星历 SDK **拉取轨道数据的域名清单** | 只有拿到域名，才能用 `networkSecurityConfig` 只对该域名放开明文，**而不是整个 App 开 `usesCleartextTraffic`**（§6.1 红线二） | 提审前 |
 | **P1** | SDK 里**是否含平台侧 demo 账号/测试卡**，以及测试卡的**配额与有效期** | 没有测试卡，R1 的卫星部分只能全程跑模拟器，"链路可信"没法对外证明 | R1 开工前 |
 | **P1** | **明天圆屏到货后**：让我知道它的实物形态（壳上接口位置、供电口是 USB-C 还是 8pin 触点、有没有电池仓） | 一条已定（**无电池**，常供电），剩下的接口形态决定 §4 展示端连接方式和 BOM | 到货当天 |
-| **P1** | **我们App 的 minSdk 需要提到 26**（星历 SDK v1.0.9 要求 Android SDK 26+，基础通信要求 24+）；另外**签名只能用普通签名，不能用 platform 签名** | 这是**发布配置层面的硬约束**，越晚发现越贵（机型覆盖范围要重算）。请确认设备池里有没有 < Android 8.0 的（E.8） | 定发布配置时（建议本周就定） |
+| **P1** | ~~**我们App 的 minSdk 需要提到 26**（星历 SDK v1.0.9 要求 Android SDK 26+，基础通信要求 24+）；另外**签名只能用普通签名，不能用 platform 签名**~~ | ✅ **构建侧 V1.4 已按此落地**（minSdk 26、JVM 11、RxJava3、两个 aar 进库、普通签名、明文按域名放行 —— E.10 #9）。**但机型覆盖这件事仍然要你确认**：设备池里有没有 < Android 8.0 的机子，这决定吉利车主的可用面（E.8） | 定发布配置时（本周） |
+| **P1** | **V1.4 新增：GT1005 这颗模组自己带不带 GNSS？** | 〔码〕实测 `EntityDII` **一个位置字段都没有**，〔规〕又说 DII 的经纬度全靠外部 TPI 输入（E.5）。**带 GNSS = 有一个独立第二位置源，"手机 GPS 喂模组"就退化成备份；不带 = 手机是唯一位置源，地库里/屏蔽袋场景必须按 TPI 陈旧度设计**（§3.2）。这个问题只有厂商的数据手册能答 | R1 联调前 |
+| **P1** | **V1.4 新增：向厂商要一份和 aar 同步的文档 / 说明 `jar_comm.jar` 与 `protocollibrary_1.0.0.aar` 到底哪个是准的**（§9 #18） | 实测**aar 里没有 `destroy()`，jar 里有**；`CustomError` 实测五个值、文档只写四个；`getMaxMsgLength` 实测是等级、文档语气像字节数。**"照文档写代码"在这个 SDK 上已经被证伪**，所以我们现在只信字节码 + 真机（E.12） | R1 联调前 |
 | **P2** | **救援接收方的真实方案**（SOS 未确认送达之后，平台侧由谁接、响应 SLA） | 本轮按"先做 Demo"降级了，模拟回执能演示。**但对外招商前必须有真答案**，否则 SOS 只是会亮的按钮。**并且现在更要紧的是文案：卫星 ACK 只代表卫星收到（§6.1 红线一），"已送达"不能说** | 演示对外之前 |
 | **P2** | **前装车数据真实开放范围**（车况 / 里程 / DTC） | 本轮按全开放做 Demo，UI 上会标"Demo 数据"。真开放范围窄一半的话，用车养车要重做手动录入路径 | R1 中期 |
 | **P2** | **健康供给方与 SLA**（你说"我有办法"，我等具体的人/机构） | 角色与责任边界已按"健康顾问（非医疗）"定死（§3.4）。缺的是**谁来签** | R2 开工前 |
@@ -435,7 +448,7 @@ V1.2 时这里剩 4 条真卡点。**V1.3 拿到 SDK 后，#1 和 #11 关闭（#
 1. 按 §5.3 把 App 从"演示控制台"重搭成 **SceneShell + 四 Tab 骨架**（演示功能收进"工程模式"，不删）。
 2. 建 **设备总线**：把现在散在 `DemoRuntime` / `LocationMonitor` / `NetworkMonitor` 里的连接逻辑收成统一的 `Device` 抽象。
 3. 补 **§3.4 健康助手场景包**，并把 digivita 可复用的闭环机制落成卡片与规则。
-4. **附录 E.10 那 10 条代码改动里，8 条不用等厂商答复**（删 `Gt1005Verbs`、`UartModem` 退化成字节管、`LinkStateMachine` 改事件驱动、收信状态机按 serviceType 分叉的骨架、TPI 周期任务、升级写锁、星历接入、构建配置、`passthrough` 工程模式日志窗）。**只有两处必须等**：队列层（等 §9 #12 型号答案）和报文预算（等 §9 #14 等级答案）—— 所以这两处我先做成**运行时注入配置**而不是写死常量，厂商一答复就改一个数，不动结构。
+4. ~~附录 E.10 那 10 条代码改动里，8 条不用等厂商答复~~ ✅ **V1.4：10 条全部落地了，一条没等**。当初判断"必须等厂商答复"的两处（队列层等 §9 #12 型号、报文预算等 §9 #14 等级）已做成**运行时注入配置**：型号是 `ModuleModel` 枚举的四个字段、长度口径是 `LengthUnit` 一个开关，**厂商一答复就改一个取值，结构不动**。**并且 V1.4 又发现一个非等不可的口径问题 —— §9 #16（长度上限按字节还是按 hex 字符算），代码已按最坏档写死在同一个开关上。**
 
 ---
 
@@ -800,7 +813,7 @@ SOS 交互：三段倒计时可取消 + 响应中心双向确认（GEOS）。我
 
 ---
 
-## 附录 E · 时空道宇 SDK 实测接口面（V1.3 新增，来源=群里那份 SDK）
+## 附录 E · 时空道宇 SDK 实测接口面（V1.3 新增，V1.4 补 E.12 实测类面；来源=群里那份 SDK）
 
 > 文件取自群消息 `om_x100b6123db6158acc0b1ed57c8301a3`（合并转发），已落到 `vendor/gt1005/out/`：
 > `基础模组SDK/protocollibrary_1.0.0.aar` + `时空道宇星座基础通信SDK说明文档_1.0.0.pdf` + 参考代码 `CommunicationManager.java` / `MainFragment.java`；
@@ -891,7 +904,9 @@ ModuleDataManager m = dm.getDataManager();
 〔规 注 6〕**"卫星应答只是表示卫星收到该消息，并不代表星座核心网收到。"**
 > **进 §6 文案红线：SOS 的 UI 语义最多到「卫星已接收」，不能写「救援已受理」。** 这条我们原来差点写错。
 
-〔码〕`EntityICI.getMaxMsgLength()` 已经把等级换算成字节数，我们直接用，不必自己查表。
+~~〔码〕`EntityICI.getMaxMsgLength()` 已经把等级换算成字节数，我们直接用，不必自己查表。~~
+> ⚠️ **V1.4 实测更正：这句是错的，而且是本轮最贵的一处更正。** `javap -c` 解出来 `getMaxMsgLength()` 的字节码就一句 `getfield msgLength; ireturn`，而 `ParseICI` 是把 ICI 语句里那个字段 **原样 parseInt 存进去** —— **SDK 存的是等级 1~5，从等级到字节数的换算表在 SDK 里根本不存在**（E.12）。
+> 后果有两层：① **换算必须我们自己建**，`MsgLengthLevel.fromLevel(1..5)` 那张 90/200/230/430/1900 的表是业务代码，不是厂商代码，别指望升级 SDK 就能少写；② 〔规 §3.1.4 注 7〕说的是「**字节**长度」，但 `SFQ` 的载荷是 **hex 字符串**（E.2），**模组到底按字节数还是按 hex 字符数拦这条报文，SDK 没有体现，规范也没写** —— 这两种口径在等级 1 下差一倍（90 字节 vs 45 字节）。已列 §9 #16，**在厂商答复前按最坏口径（当字符算）设计报文预算**，代码里做成一个运行时注入的 `LengthUnit`，改一个数就能切换。
 
 ### E.5 TPI：手机的位置是要**喂给模组**的，不是从模组读出来的
 
@@ -899,6 +914,9 @@ ModuleDataManager m = dm.getDataManager();
 〔规 注〕**通信单元上电必须配置一次，后续建议 1~10 分钟更新一次；模组复位、掉电后时间位置信息丢失。时间信息对上下行无影响，经纬度对下行接收有影响。**
 〔规 注 1〕时间字段为 `0` 时，表示模组内部已有的经纬度数据**无效**。
 〔码〕`ModuleDataManager.updateLocation(double longitude, double latitude)`，且 **SDK 自己保存最近一次经纬度、模组每次启动自动补发**，所以"至少更新一次"由 SDK 兜底，但仍要我们按 1~10 分钟续。
+> ⚠️ **V1.4 实测补两条（E.12），这两条把"TPI 是不是真的喂进去了"变成不可观测：**
+> ① `updateLocation` 的返回类型是 **`void`**，不是布尔、不是任务对象 —— SDK 层面**没有"模组认了这条 TPI"的回调**。aar 里确实有 `bean.EntityTPI`（带 lat/lon/direction），但 `ModuleDataManager` 的六个监听器里**没有 TPI 那一个**，`Parse` 包也没有对外暴露 TPI 回显的入口。所以我们代码里 `updateLocation(): Boolean` 的 `true` **只表示"一个字节都没被升级写锁挡住、已经交给 SDK"**，绝不表示模组内部位置已更新（§9 #17）。
+> ② **`EntityDII` 压根没有位置字段** —— 实测只有 `DTU_Type / Module_SoftwareVersion / Module_HardwareVersion / DeviceSerialNumber / UserVersion` 五个 getter。配合〔规 §3.1.2 注〕「DII 里的时间和经纬度均由外部通过 TPI 输入」，**"从模组读位置"这条路在 SDK 面上是不存在的**：要么这颗模组自带 GNSS（文档没说，§11 要问），要么读回来的是我们自己几天前推进去的回显。所以代码里 SDK 路线的 `readFix()` **直接返回 null 而不是编一个值**，车内/屏蔽袋场景的位置源只有手机自己这一条（§3.2 定位融合不是可选增强，是唯一路径）。
 
 > **这条改写 §2 的定位融合方向**：手机 GPS 是模组的**必要输入**，不是可选增强。
 > 于是"地库里没定位"要重述为：**用的是最后一次成功 TPI 的位置**，而不是"完全没位置"。寻车、遗留车内告警、围栏都因此更可用；但代价是 **TPI 陈旧度必须成为一个可观测状态**上屏 ——「位置已过期 N 分钟，卫星可能投递失败」，这是新加的 §4 呈现字段。
@@ -922,11 +940,13 @@ ModuleDataManager m = dm.getDataManager();
 > **§9 #1 因此升级为 P0 的第一问：GT1005 对应哪一颗？** 如果是 GM1003，那 §3.2「存发队列 + 断链补发」这条产品主张的物理上限只有 **50 条、掉电即清、4 分钟不发就丢** —— 队列设计要整个重做（App 侧自建持久队列兜底，而不是依赖模组），"补发数量上屏"这个演示点也得改口径。
 
 〔码〕SDK 已经把这条链给全了：`clearSFQ()` / `queryMsgSFQ(Consumer<Integer>)`（返回 `<0` 表示查询失败）/ `sendMsgSFQ` 成功回调的 `bundle` 就是报文 ID，可直接与 `setSFIMessageListening` 对上。**补发状态追踪不用自己造轮子。**
+> **V1.4 实测更正（E.12）：`sendMsgSFQ` / `sendMsgMCQ` / `queryMsgSFQ` / `updateSOC` 的返回类型不是 `void`，而是 `com.geesatcom.wheel.SubjectTask<*>`。** 这既是好事也是坑：好事是**超时可以自己兜**（我们给发送另设一个计时器，到点 `task.cancel(null)`，别让 SOS 卡在一个永不回调的任务上）；坑是**任务对象是 SDK 的内部调度单元，取消语义没有文档**（`cancel(Object)` 的参数该传什么、取消后回调还来不来、会不会回 `CustomError.REMOVE`），所以代码里取消只用在"我们已经等到超时"这一种情况，并且**把超时结果归到 `NO_REPLY`（没发出去）而不是 `DROPPED_BY_TIMEOUT`（发出去被丢）** —— 后者的重试策略是把同一条再排一次队，前者不能这么干。**"已存储(1) → 完成发送(2)" 的中间态回调，SDK 只在 `FAIL` 分支写了文档，`state==1` 会不会推给我们，必须真机验证**（§8 R0 → R1 的第一次真机联调）。
 〔规 §3.1.14〕SFP 示例：查询待发数量 `$CCSFP,2,1,,*46`；清除所有待发 `$CCSFP,1,2,,*46`。
 
 ### E.7 MCQ 的 `NO_ACK`：SOS 的"半成功"态，产品必须显式建态
 
 〔SDK文 §4.1〕`CustomError` 只有四个值：`INITIALIZE_ERROR`（SDK 未可用或模组正在升级）/ `INPUT_ERROR`（参数不正确）/ `REMOVE`（任务被移除、重复调用）/ **`NO_ACK`**。
+> ⚠️ **V1.4 实测更正（E.12）：aar 里 `CustomError` 是五个值**，文档漏了一个 **`TIMEOUT_ERROR`**。这一个值直接决定"发出去没人认"和"等太久没回"要不要分开显示，代码里按五个建全。**另外 `TaskState` 实测是 `{INIT, START, COMPLETE, FAIL}` 四态**，`INIT/START` 是进度态不是终局 —— 我们的三态只认后两个，`INIT` 阶段就回来的一条不能当失败（否则 SOS 会被自己骗一次）。
 〔SDK文 §8.3〕MCQ 即时发送：`FAIL` 时 `bundle` 是 `CustomError` 或模组返回码（**参考文档 FBI 定义**）；**`COMPLETE` 且 `bundle == CustomError.NO_ACK` 表示"发送完成，但未收到 ACK"**。〔码〕`SubjectTask.cancel(Object)` 可取消发送。
 
 > **`NO_ACK` 既不是成功也不是失败，这恰好是 SOS 最真实的那个状态。** §3.2 的"无 ACK 自动重发"必须把它建成独立态（文案：「卫星已收下，但未确认回执」并给出重试），否则要么骗用户，要么把已经成功的报文重复发一遍占配额。
@@ -946,6 +966,12 @@ ModuleDataManager m = dm.getDataManager();
 
 〔SDK文 §9-2〕**"如果当前正在更新模组任务，所有数据发送和自定义任务都不可用。"** → 升级期间要**全局写锁**，§5.2 的按钮禁用态必须覆盖这一档；〔SDK文 §8.1〕`updateSOC` 进度 0~99 已给，失败码分 `CustomError` 与模组整型码两类。
 
+> **V1.4 实测加三条（E.12），都是集成期会直接炸人的：**
+> ① **依赖不止 RxJava3 一套生态**：`ModuleDataManager` 的六个监听器**入参是 `java.util.function.Consumer<T>`（JDK8 API），返回值却是 `io.reactivex.rxjava3.disposables.Disposable`**。于是 minSdk 24 那个下限是被 `java.util.function` 卡的、RxJava3 是被 `Disposable` 卡的，两件事来源不同。工程后果：**Kotlin 侧不能把一个函数值当 Java Consumer 传**（Kotlin 只对 lambda 字面量做 SAM 转换，对已经存成变量的 `(T)->Unit` 不转），适配器签名必须直接收 `Consumer<T>`。这一条我们踩了一次才编过。
+> ② **`ModuleDataManager` 的构造函数是包私有**（`ModuleDataManager(ModuleOperation, android.os.Looper)`），应用代码 new 不出来，**只能从 `DispatchManager.getDataManager()` 拿** —— 意味着"SDK 没起来就返回 null"是必须处理的路径，不能当异常忽略。
+> ③ **资料包里的 `jar_comm.jar` 和 `protocollibrary_1.0.0.aar` 是两个不同构建**：`DispatchManager` 在 jar 里有 `destroy()`，**aar 里没有**，只剩 `stop()`。所以按文档写的释放顺序在 aar 上根本编不过（我们实测报错）。当前代码 `close()` 只做"解订阅 + `stop()`"，**`stop()` 之后模组侧的解析线程到底停没停、要不要额外 `powerDown()`，得真机验证**（§9 #18）。
+> ④ **星历 aar 里带 `libdecodeutil.so` 且部分类是混淆过的**，所以它抛的不一定是 `Exception`：缺 so / 缺系统 WebView 时是 `UnsatisfiedLinkError`、`NoClassDefFoundError`。彩排现场一次崩溃比一次算不出星历难看得多，因此适配器在这个插件边界上**捕获 `Throwable` 并降级成"星历暂时算不出来"**（E.9 的文案分支），而不是让它穿透到 Activity。
+
 > **minSdk 取 26**（被星历 SDK 卡住），要回记到 §11 的前置条件里，这直接影响机型覆盖和吉利车主的旧机比例。
 > **`usesCleartextTraffic=true` 是安全债**：为了星历下载给整个 App 放开明文不合理。工程上要么单独隔离这条下载（独立进程/独立域名白名单），要么推厂商上 HTTPS；无论哪种，**§6 要记一笔**。
 > **"不能用系统签名"对我们尤其关键**：将来若走吉利前装、要求 platform 签名，**星历 SDK 可能直接跑不起来**。这是 §10.1「车机只做投屏式对接、不做深度内置」的一个新增硬理由。
@@ -957,6 +983,10 @@ ModuleDataManager m = dm.getDataManager();
 〔SDK文 §5.1.3〕`CalculateResultBean = {starName(对外展示名), startTime(入境), endTime(出境), startAzimuth(正北 0° 顺时针 360°), endAzimuth, maxElevation}`，结果按开始时间戳排序。
 〔SDK文 §5.1.2〕`resultState`：`SUCCESS / NETWORK_ERROR（无星历数据且无缓存）/ TIME_OUT / CALCULATION_FAILED`；非 SUCCESS 时 `result` 为 null。
 〔SDK文 §5.2 / §8〕建议**每日在有网时 `update()`**；**位置变化超过 20 公里要主动重算**；不用时 `release()`。
+> **V1.4 实测补三条（E.12）：**
+> ① `RequestBean` 有两个构造：`(double lon, double lat, double alt, int elevation, int hour)` 和 `(double, double, double, double, int)` —— **`hour` 实测是 `int`**，文档写"小时"容易让人传 0.5 天这种数，代码里按 `horizonHours.toInt().coerceAtLeast(1)` 收口，**宁可多看不如看不到**（0 小时会算出空窗口，跟"没有星"一模一样，是最难查的假故障）。
+> ② **`update()` 返回 `void`**，下载成功与否只能从 `getStarManager` 的 `Consumer<Long> dataState` 回调里推（`-1` 下载中 / `0` 失败且无缓存 / `>0` 当前数据时间戳）。适配器因此必须**先记旧时间戳、再等一个"和旧值不同"的回调**，否则拿到的 `>0` 可能只是创建时就喂过一次的那条缓存时间戳 —— 会被误判成"刚下载成功"。
+> ③ **主线程约束是真的**：适配器把 `getStarManager / calculate / update` 全部 hop 到 `Dispatchers.Main`（core 侧接口做成 `suspend`，`Looper` 一个字都不进 `:core`），这跟基础通信"回调全在子线程"正好相反（E.8）。彩排时最容易犯的错是"在协程里随手调"，一崩就是演示现场崩。
 
 > 直接改写 §3.2「星历管理与失效提示」：`secondsToNextPass()` 这个抽象现在有真实现了，而且厂商给的是**过境窗口 + 进出方位角 + 最大仰角**，信息量远大于我们原来只算的"还有 N 秒"。
 > **圆屏因此可以多演一个真有用的东西：野外时的方位角指针**（告诉用户"该把车头/天线朝哪边"）。这是这次 SDK 带来的净新增演示点。
@@ -965,16 +995,20 @@ ModuleDataManager m = dm.getDataManager();
 
 ### E.10 我们要改的代码清单（按这个顺序改最省钱）
 
-1. **删 `Gt1005Verbs` 整张手写指令表**，`UartModem` 退化成纯字节管道（`send(byte[])` / `receive(byte[])`），语句解析交给 `DispatchManager`（E.1）。
-2. **`LinkStateMachine` 改成事件驱动**：`连上 → powerOn → dm.start() → initialization(isReady=true) → GMO 读 DII/ICI/CII → 按 ICI 等级设报文预算 → 发 TPI`。原来是线性发指令，现在必须等 SDK 回调（E.1/E.4）。
-3. **收信状态机按 `ICI.serviceType` 分叉**：长接入被动收 MCI；短接入主动 `queryOfflineMsg()`，〔规 §4.2〕逻辑是"查询一条、接收一条"，MCI 与 CES 同步输出。
-4. **SOS 三态化**：成功 / `NO_ACK`（已发未确认）/ 失败（带 SFI 或 FBI 码），并把"卫星 ACK ≠ 核心网收到"写进 §6 文案红线（E.4/E.7）。
-5. **TPI 周期任务（1~10 分钟）+ TPI 陈旧度上屏**；坐标一律走带字段名的类型，禁止裸 `(double, double)`（E.5）。
-6. **升级期间全局写锁**（`updateSOC` 的 `TaskState.START` 期间禁一切发送），进度接 §5.2 的禁用态（E.8）。
-7. **星历接 `StarManager`**：过境窗口 + 方位角投圆屏；`update()` 每日一次，`NETWORK_ERROR` 给专门文案（E.9）。
-8. **队列口径按模组型号双写**：在拿到 GT1005=GM1001/GM1003 的答案前，App 侧持久队列按 **50 条、掉电不保、4 分钟超时** 这个最坏档设计（E.6）。
-9. **构建配置**：minSdk **26**、JVM target 11、RxJava3 3.1.12、两个 aar 进 `app/libs`、**不使用 platform 签名**、明文流量按域名白名单收敛（E.8）。
-10. **`passthrough` 接进工程模式日志窗**（现场排障，接 §8 近期四件事 #3）。
+> **V1.4：这 10 条已经全部落地**（提交序列 `7e6a47c → 2b6a0e7 → 4f5fbe6 → 3a88078 → a2c2f59 → b87dab6 → e6a4d60 → baa3763`；`:core` 单测 158 条全绿，`:app:assembleDebug` 出包 3.68 MB）。下面每条后面标了落地时的**实际形态**，因为有几条改法跟当初设想的不一样 —— 不一样的地方才是有用的信息。
+
+1. **删 `Gt1005Verbs` 整张手写指令表**，`UartModem` 退化成纯字节管道（`send(byte[])` / `receive(byte[])`），语句解析交给 `DispatchManager`（E.1）。✅ 已删。字节管道留在 **JVM 侧**做成了 `ModemBytePipe`，因此多出一层原本没计划的东西：`SentenceModem`（协议层替身，配 `FakeGsatModule`）——**它不是厂商 SDK 的复制品，是"独立见证人"**：JVM 上跑的解析链路和真机上跑的 SDK 各自实现同一套语义，谁漂移了单测会叫。
+2. **`LinkStateMachine` 改成事件驱动**：`连上 → powerOn → dm.start() → initialization(isReady=true) → GMO 读 DII/ICI/CII → 按 ICI 等级设报文预算 → 发 TPI`。原来是线性发指令，现在必须等 SDK 回调（E.1/E.4）。✅ 改成 `BringUpOutcome` **六种结局**（`Ready / NoReply(哪条语句没回) / InvalidCard(卡号) / NeedsLocation / Upgrading / PipeClosed`）而不是一个 bool —— **每一步"卡在哪"决定了下一步该做什么动作**，合并成一个失败等于把排障信息扔了。
+3. **收信状态机按 `ICI.serviceType` 分叉**：长接入被动收 MCI；短接入主动 `queryOfflineMsg()`，〔规 §4.2〕逻辑是"查询一条、接收一条"，MCI 与 CES 同步输出。✅ `AccessService.LONG/SHORT` 两套状态，`worstKnown()` 默认档是 SHORT（**按最坏的收**：宁可自己去轮询，也不要以为会推结果等不到）。
+4. **SOS 三态化**：成功 / `NO_ACK`（已发未确认）/ 失败（带 SFI 或 FBI 码），并把"卫星 ACK ≠ 核心网收到"写进 §6 文案红线（E.4/E.7）。✅ `SatSend = 三态 + SatPath + SatFailReason(7 种成因)`。**三态一个不多一个不少**：`COMPLETE` 的注释钉死了"只代表卫星收到"；文案只由 `SosCopy` 从这一个对象生成，UI 里没有第二句可写。
+5. **TPI 周期任务（1~10 分钟）+ TPI 陈旧度上屏**；坐标一律走带字段名的类型，禁止裸 `(double, double)`（E.5）。✅ `TpiTracker` + `GeodeticPosition`。**本轮新事实：SDK 的 `updateLocation` 返回 void 且没有 TPI 监听器（E.5/E.12），所以"手机侧显示已同步"这句话在真机上不可证 —— 已列 §9 #17。**
+6. **升级期间全局写锁**（`updateSOC` 的 `TaskState.START` 期间禁一切发送），进度接 §5.2 的禁用态（E.8）。✅ `ModemGate`，两条实现共用。**关键区分**：被写锁挡下的报文是 `UPGRADING`（**一个字节都没写出去**，留 App 侧队列），跟 `NO_ACK`（发出去没人认）是两种重试策略，混了就等于重复烧配额。`updateSOC` 的真机驱动还没接（§11）。
+7. **星历接 `StarManager`**：过境窗口 + 方位角投圆屏；`update()` 每日一次，`NETWORK_ERROR` 给专门文案（E.9）。✅ `StarManagerEphemeris`（主线程适配器）+ `EphemerisTracker`。`EphState` 四个厂商状态**一个都不合并**，另加自有的 `NO_FIX`；失效文案由 core 直接投给圆屏，**"无卫星信号/搜星失败"这类词被列进 `EphemerisCopy.FORBIDDEN`**，防止有人把"星历过期"演成"天上没星"。
+8. **队列口径按模组型号双写**：在拿到 GT1005=GM1001/GM1003 的答案前，App 侧持久队列按 **50 条、掉电不保、4 分钟超时** 这个最坏档设计（E.6）。✅ `ModuleModel` 两颗的四个维度（容量/掉电/超时/优先级）全做成枚举字段，`WORST_KNOWN = GM1003`。**"GT1005" 在规范、SDK 文档、aar 里仍然一次都没出现**（§9 #12 未解）。
+9. **构建配置**：minSdk **26**、JVM target 11、RxJava3 3.1.12、两个 aar 进 `app/libs`、**不使用 platform 签名**、明文流量按域名白名单收敛（E.8）。✅ 全部落到 `apps/android/build.gradle.kts`。**顺带证实一条：本地 `implementation(files("libs/…aar"))` 对 APK 构建是有效的**，不必先发包到 maven。
+10. **`passthrough` 接进工程模式日志窗**（现场排障，接 §8 近期四件事 #3）。✅ 手机端 `MainActivity` 加了开关和滚动窗，三路输入共用一个窗口：**字节管道的原文（TX/RX）+ SDK `passthrough(String)` 的语句（标 UNCLASSIFIED）+ 我们的状态注解**。**没有一行业务代码伪造协议文本** —— 现场要看的是"模组到底回没回"，演示用的假语句混进去就废了。
+
+> **还没落地的只有两件，都不是软件能自己决定能做的**：① Android 侧的 `ModemBytePipe` 真实现（UART/BLE 的物理口，等实物到位后按 §8 的验证顺序接，**不做投机代码**）；② `updateSOC` 固件升级路径真正驱动 `ModemGate`（同一个原因）。**因此 `VendorSdkModem` / `StarManagerEphemeris` 目前只被"编译 + aar 签名"证明，行为必须真机验（E.12 末尾）。**
 
 ### E.11 拿到 SDK 后**仍然**要问时空道宇的
 
@@ -985,3 +1019,45 @@ ModuleDataManager m = dm.getDataManager();
 5. **测试卡的等级（ICI 字段 9）、条数配额、有效期**（原 §11 P1）—— 等级 1 和等级 5 的报文设计完全不同。
 6. 星历服务能否提供 HTTPS；若只能 HTTP，我们的明文白名单怎么划、审核怎么过。
 7. **救援接收方与响应 SLA**（§9 #2 的业务部分，SDK 回答不了）。
+8. **`EntityICI.getMaxMsgLength()` 返回的是等级还是字节数？** 〔码〕实测：**是 ICI 语句字段的原值（等级 1~5），SDK 内部没有任何等级→字节的换算**。那么〔规 §3.1.4 注 7〕"此字段长度限制对应通信数据字段的字节长度"里的这个数，**模组到底按字节还是按 hex 字符数拦截**？（→ §9 #16，代码已按最坏口径做成一个开关）
+9. **`bean.EntityTPI` 存在，但没有任何 TPI 监听器**（六个 listener 里没有它）。**模组收到 TPI 后到底回不回一条？** 回的话语句是什么 —— 这决定 App 能不能说"位置已同步给卫星"（→ §9 #17）。
+10. **`DispatchManager` 的 `stop()` / `destroy()` 语义**：aar 里**没有 `destroy()`**（资料包 jar 里有，两个不同构建）。`stop()` 之后循环解析线程是否真的停、重连是否要重建整个 `DispatchManager`、`ModuleDataManager` 的 `Looper` 参数是不是包私有的构造里必须传主线程 —— **文档全都没有**（→ §9 #18）。
+11. **这颗模组自己带不带 GNSS？**〔规 §3.1.2 注〕说 DII 的经纬度"由外部通过 TPI 输入"，〔码〕`EntityDII` 也确实没有位置字段。**那 GT1005 有没有内置定位**（带 GPS 的版本 vs 不带）直接决定 §3.2 定位融合里"独立第二源"这句话成不成立（→ §11）。
+
+### E.12 实测类面全表（`javap -c` 解 aar 的结果，V1.4 新增）
+
+> 方法：把 `protocollibrary_1.0.0.aar` / `ephemerislibrary-release.aar` 解出 `classes.jar`，用 JDK17 的 `javap -p -c` 直接读签名和字节码。**凡是本表里"〔码〕"的结论都是这么来的，不是从文档抄的**；文档与实测冲突的地方，上面各小节都已经就地标了 ⚠️。
+> 这一节存在的意义：**文档说 SDK 有什么，不如 SDK 里真有什么**。上面 E.2 到 E.9 的每一处更正，都出自这张表。
+
+**基础通信 `com.geesatcom.protocollibrary`**
+
+| 类 | 实测签名 | 说明 |
+| --- | --- | --- |
+| `controller.DispatchManager` | ct `DispatchManager(ModuleOperation)`；pub `receive(byte[]) / send / start / stop / initialization / passthrough / powerOn / powerDown / getDataManager()`；pkg-private `<E> notifyData(ParseConfig<E>, E)` | **aar 里没有 `destroy()`**；`notifyData` 包私有 = 应用无法自行注入解析结果，测试替身只能走 `receive(byte[])` |
+| `controller.ModuleDataManager` | ct `(ModuleOperation, android.os.Looper)` **包私有** | **只能 `getDataManager()` 拿**；拿不到就是 SDK 没起来，必须当 null 路径处理 |
+| 监听器 ×6 | `setICIListening / setDIIListening / setMCIMessageListening / setSFIMessageListening / setSelectedSatelliteListening / setEarthStationListening` | 入参 **`java.util.function.Consumer<T>`**，返回 **rxjava3 `Disposable`**；卫星锁定那条是 `Consumer<android.util.Pair<String,Float>>`，地球站是 `Consumer<Boolean>`。**没有 TPI / CII / SFP 的 listener** |
+| `ModuleDataManager` 其它 | `clearSFQ() / setCOP(int) / sendGMO(String,int,int) / updateSOC(Context,File,Consumer<SubjectTaskBean>) / sendMsgSFQ(cardId,content,cb) / sendMsgMCQ(...) / queryOfflineMsg(...) / queryMsgSFQ(Consumer<Integer>)` | 后五个返回 **`wheel.SubjectTask<?>`**；`updateLocation(double lon, double lat)` 返回 **void** |
+| `utils.TaskState` | `{INIT, START, COMPLETE, FAIL}` | `INIT/START` 是进度态 |
+| `utils.CustomError` | `{INITIALIZE_ERROR, INPUT_ERROR, TIMEOUT_ERROR, REMOVE, NO_ACK}` | **五个，文档只写了四个** |
+| `bean.SubjectTaskBean` | `final TaskState state; final Object bundle; static empty` | SFQ `COMPLETE` 的 `bundle` = 报文 ID(Integer)；`FAIL` 的 `bundle` 是 `CustomError` **或** Integer（SFI/FBI 码），两种都要收 |
+| `bean.EntityICI` | `getId/getLinkMode/getNetworkingType/getServiceType/getCommunicationType/getSatelliteResponseMode/getMaxMsgLength` | **`getMaxMsgLength()` = ICI 字段原值（等级）**，无换算 |
+| `bean.EntityDII` | `getDTU_Type / Module_SoftwareVersion / Module_HardwareVersion / DeviceSerialNumber / UserVersion` | **无经纬度、无时间字段** |
+| `bean.EntitySFI / EntityMCI / EntityPDI` | `getState/getId/getFailCode`；`getUTCTime/getCardId/getHexStr`；`getStarId/hasStar/getDuration/getCNR` | 够撑 §5 的状态列；`EntityPDI.hasStar` 就是"对星中/已锁定"的判据 |
+| 还有 | `bean.EntityTPI`（含 lat/lon/direction）、`EntityRET`、`Parse.entity.EntityACK{getUtc/getStarCode/getFrameNum}` | **类在、接口面不暴露** —— E.11 #9 的由来 |
+
+**星历 `com.example.ephemerislibrary`**（包名还是 `com.example`，说明厂商没做发布前的收尾）
+
+| 成员 | 实测 |
+| --- | --- |
+| `StarManagerFactory` | `getStarManager(Context)` / `(Context, java.util.function.Consumer<Long>)` |
+| `interfaces.StarManager` | `calculate(RequestBean, ResultCallBack)` / `release()` / **`update()` 返回 void** |
+| `bean.RequestBean` | 字段 `lon, lat, alt, elevation, startStamp, endStamp`；ctor `(double,double,double,int)` 和 `(double,double,double,double,int)` —— **`hour` 是 int** |
+| `bean.ResultBean` | `List<CalculateResultBean> result; ResultBean$State resultState`，`State ∈ {SUCCESS, NETWORK_ERROR, TIME_OUT, CALCULATION_FAILED}`（与我们 `EphState` 一一对应，`NO_FIX` 是自加的） |
+| `CalculateResultBean` | `starName/startTime/endTime/startAzimuth/endAzimuth/maxElevation`，`implements Comparable` |
+| 附带 | 内含 `libdecodeutil.so` + 部分混淆类 → 可能抛 `UnsatisfiedLinkError`（E.8 ④） |
+
+**这张表换来的三个设计决定**
+
+1. **`VendorSdkModem` 不是 `SentenceModem` 的复制品**：两者实现同一个 `SatelliteModem` 接口、共用同一套语义（三态 / 写锁 / 预算 / 工程模式窗），所以 `DemoEngine` 一行没改。**SDK 路线仍然要走 `sendGMO(target, 2, 0/1)` 手动开语句**才能拿到 DII/ICI —— 因为 `ModuleDataManager` 只有 listener、没有"主动读一次并同步返回"的 API。**这正好独立证明了 E.10 #2（会话顺序）对两条实现都成立，不是我们臆造的时序。**
+2. **SDK 路线上三处"没有数据"就是没有数据**：`readFix()` 返回 null（E.5 ②）、`secondsToNextPass()` 交给星历 SDK、`updateLocation()` 的 true 只到"已交给 SDK"（E.5 ①）。**编一个好看的值比承认不可观测更贵** —— 演示时骗过自己，联调时一定赔回去。
+3. **这两类代码在 JVM 上测不了**：绑定 aar 类和 `android.util.Pair`，只能用"`:app:assembleDebug` 编得过 + aar 签名对得上"当编译门禁，行为一律留到真机（§8 R0 行那条 ⚠️：**仍未对真机发过一帧**）。**`:core` 那 158 条单测覆盖的是语义，不是厂商。**

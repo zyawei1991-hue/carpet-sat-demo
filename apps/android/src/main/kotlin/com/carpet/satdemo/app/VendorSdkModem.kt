@@ -63,7 +63,7 @@ class VendorSdkModem(
     /** 型号只能注入：ICI 里没有型号字段，GT1005 对应 GM1001 还是 GM1003 还没确认（§9 #12） */
     private val model: ModuleModel = ModuleModel.WORST_KNOWN,
     private val clock: MonoClock = MonoClock { System.currentTimeMillis() },
-    /** §9 #13 有了答复就在这里换成 [LengthUnit.BYTES]，结构不动 */
+    /** §9 #16 有了答复就在这里换成 [LengthUnit.BYTES]，结构不动。〔码〕实测 SDK 不做等级→字节的换算，所以这个口径只能我们来定（附录 E.12） */
     private val lengthUnit: LengthUnit = LengthUnit.WORST_KNOWN,
     /** 本地语句（读 DII/ICI、入队）的应答超时。这些是模组自己回，不涉星，所以是秒级 */
     private val cmdTimeoutMs: Long = 3_000,
@@ -469,7 +469,7 @@ class VendorSdkModem(
      * `return this.msgLength`，而 `ParseICI` 是把语句字段**原样 parseInt 塞进去**的 ——
      * 也就是说 SDK 眼里那个数就是〔规 §3.1.4 字段 9〕的**等级 1~5**，中间没有任何换算表。
      * 这里仍然两头都认（1~5 当等级、90/200/230/430/1900 当字节数反推），因为
-     * "模组按哪个数拒收"和"SDK 按哪个数解析"是两件事，后者已经清楚、前者还没答（§9 #13）。
+     * "模组按哪个数拒收"和"SDK 按哪个数解析"是两件事，后者已经清楚、前者还没答（§9 #16）。
      */
     private fun EntityICI.toCaps(): ModuleCaps? {
         val service = AccessService.fromCode(serviceType) ?: return null

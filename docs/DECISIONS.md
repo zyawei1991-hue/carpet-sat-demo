@@ -82,6 +82,11 @@ App 不直接调 SDK 的 `DispatchManager`，中间加一层 `SatelliteModem`（
 
 **被推翻的条件**：SDK 的 `ModuleOperation` 接口形状与本抽象差异大到需要适配层重写，或卫星时延模型（分钟级）无法用 suspend 表达。
 
+**V1.4 更新（这条抽象被真检验了一次，而且方向没变）**：上面那句"被推翻的条件"没有发生 —— 厂商 SDK 接进来时**`:core` 一行接口都没改**，新增的 `VendorSdkModem`（Android 侧）与 `SentenceModem`（JVM 侧）**实现同一个 `SatelliteModem`、共用同一套语义**（三态 / 写锁 / 报文预算 / 工程模式窗），`DemoEngine` 完全不知道底下换成了 aar。
+顺带更正本条早先那句"BLE 文档没到时 UART 是 Plan B"：**SDK 自己不做 IO，UART 和 BLE 是平级的两条正路**，不存在主备关系（附录 E.1）。
+这一轮最值得留下的经验是**"别信文档，解字节码"**：`javap` 解 aar 之后推翻了四处文档口径（`getMaxMsgLength` 返回的是等级不是字节数、`CustomError` 实际五个值、`updateLocation` 返回 void 且无 TPI 监听器、`EntityDII` 根本没有位置字段），还发现**资料包 jar 和 aar 是两个不同构建**（`destroy()` 只在前者）。
+所以由此定下两条硬规矩：① **不可观测的事情不许在 UI 上承诺** —— TPI 没回执就只显示"最近一次推送于 N 秒前"，不写"已同步"；SDK 路线读不到位置就返回 `null`，不编一个值；② **厂商口径未定的数值一律做成运行时注入的单点开关**（`ModuleModel` / `LengthUnit`），这样"等答案"和"写代码"不再互相阻塞。代价也要如实写下来：**`VendorSdkModem` 和 `StarManagerEphemeris` 至今只被"编得过 + aar 签名对得上"证明，行为全部待真机**（`java.util.function.Consumer` 与 rxjava3 `Disposable` 混用、星历必须主线程这两处最容易在真机上炸）。
+
 ---
 
 ## D6 · 构建分层：core 纯 JVM + app 薄壳

@@ -78,7 +78,12 @@ interface SatelliteModem {
      * 参数是 [GeodeticPosition] 而不是两个 double：SDK 的 `(经, 纬)` 和语句里的 `(纬, 经)`
      * 顺序正好相反，裸 double 传参编译器抓不住（E.5 末尾那条坑）。
      *
-     * @return 模组是否认了这条（回显了 TPI）。false 表示升级写锁挡下或模组没应答。
+     * @return **只能读成"这一条有没有被送出去"**：false = 升级写锁挡下、链路没开、模组没应答。
+     * 语句层实现能等到 TPI 回显，所以它的 true 含义强一些；
+     * **厂商 SDK 路线的 true 只到"已交给 SDK"** —— 〔码〕实测 `updateLocation()` 返回 void，
+     * 且 `ModuleDataManager` 的六个监听器里**没有 TPI 那一个**（`EntityTPI` 这个类比在但没暴露），
+     * 所以"模组认了这条位置"在应用侧压根不可观测（§9 #17，附录 E.5/E.12）。
+     * 上层因此**不许把它显示成"位置已同步"**，只能说"最近一次推送于 N 秒前"。
      */
     suspend fun updateLocation(position: GeodeticPosition): Boolean
 
