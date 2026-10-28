@@ -239,7 +239,7 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 | 4 | 1.75 圆屏带外壳版是否随盒带电池、发货时间 | 微雪 | 亲子/桌面底座的形态与 BOM |
 | 5 | 儿童语音是否需要单独备案/认证路径 | 吉利法务 | R2 能不能上线 |
 | 6 | 卫星流量包的定价与结算主体 | 商务 | 收入结构 |
-| 7 | 展示端最终选哪颗 MCU：继续 **RP2040/RP2350**（微雪 1.75 现成板）还是改 **ESP32-S3** | 我们 + 微雪 | **决定语音陪伴的可行性**：ESP-Brocast / xiaozhi 一族全部只跑在 ESP32-S3，RP2040 侧 AEC 得自研（见附录 A.3） |
+| 7 | **我们买的这块 1.75 到底是 ESP32-S3 还是 RP2040/RP2350？** V2.0 方案文档 §4 写的是「微雪 ESP32‑S3 Avatar 1.75」，但微雪 1.75 圆屏 wiki 的官方 demo 全是 **RP2040 / RP2350** 两版 | 微雪 + 我们自己核对实物 | **决定语音陪伴的可行性**：ESP-Brocast / 小智（xiaozhi-esp32）整套 AEC 语音栈只跑 ESP32-S3；是 Pico 就得自研或把 ASR 挪到手机侧（见附录 A.6） |
 
 ---
 
@@ -271,7 +271,7 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 
 1. **`dock_type` 是错的抽象。** ESP32 侧没有 device tree，`dock_type` 只能靠 ADC 分压电阻或 1-WID 芯片识别。行业做法是 **LVGL 侧按「朝向 + 可用输入设备 + 面板几何」三个参数自适应**，把逻辑抽成一次 `panel_profile` 协商 —— 这恰好是我们现在 `screen-link` hello 里缺的字段（现有 `avatar_mode` / `dock_type` 不解决布局问题）。
 2. **`wifilibrary` 方向反了。** 它假设屏是 ESP32、手机是中心。我们的设计里 **屏是 SoftAP / 手机是 STA，或反之**，两种都可行，但要么统一到 ESP-Brocast 的 UDP 多流音频，要么明确保留 WebSocket 文本 JSON。**协议必须择一，不能并存。**
-3. **双麦 AEC 的验证成本被低估，但屏侧驱动不是问题。** 微雪 1.75 的 MCU 是 **RP2040/RP2350，不是 ESP32-S3** → ESP-Brocast 和 xiaozhi 那套现成语音栈全部用不上，AEC/ASR 只能自研或走手机侧。**好消息**：LVGL 9.5 已官方提供 RP2040/RP2350 驱动（Pico Display 2 例程，DMA 双缓冲 SPI + scan-detect 防撕裂），**GC9A01 只是换 init 表和 offsets，移植量不大**。
+3. **双麦 AEC 的验证成本被低估，但屏侧驱动不是问题。** 微雪 1.75 官方 demo 是 **RP2040/RP2350**（与方案文档写的 ESP32-S3 冲突，§9 #7 要去核实物）。若是 Pico 系，ESP-Brocast 和 xiaozhi 那套现成语音栈全部用不上，AEC/ASR 只能自研或走手机侧。**好消息**：LVGL 9.5 已官方提供 RP2040/RP2350 驱动（Pico Display 2 例程，DMA 双缓冲 SPI + scan-detect 防撕裂），**GC9A01 只是换 init 表和 offsets，移植量不大**。
 4. **无参考实现：BLE 圆屏 ↔ 手机服务 这个精确组合，GitHub 上零结果**（`M5Stack`+`Android`+`BLE` 搜不到、`watchface`+`phone companion` 搜不到、`Pico Display 2`+`Android` 也搜不到）。所以 `protocol/screen-link.md` 的 `dock_type` / `avatar_mode` **没有上游可抄，只能我们自己维护** —— 好消息是唯一性，坏消息是文档漂移的风险全在我们身上。
 
 ### A.4 可白嫖的表盘视觉参考
@@ -296,7 +296,7 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 | **ESP32-BLE-Gamepad**（GPL-2.0，有商业授权渠道） | HID 路线；**GPL-2.0，用前买授权，别当免费组件** |
 | **LVGL 自定义屏 + 实体旋钮** / LVGL Rotary Encoder with BLE HID | 无触控时**旋钮比按键的信息密度高一个量级**，底座按键应优先做旋钮（圆屏场景几乎一致结论） |
 
-### A.6 与本项目 MCU 的匹配度（**微雪 1.75 = RP2040/RP2350，不是 ESP32**）
+### A.6 与本项目 MCU 的匹配度（**微雪 1.75 官方 demo 是 RP2040/RP2350，与方案文档写的 ESP32-S3 不一致，见 §9 #7**）
 
 | 项目 | 与我们的相关性 |
 | --- | --- |
