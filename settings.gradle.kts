@@ -25,3 +25,5 @@ dependencyResolutionManagement {
 include(":core")
 include(":app")
 project(":app").projectDir = file("apps/android")
+include(":simulator")
+project(":simulator").projectDir = file("simulator")

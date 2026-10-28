@@ -12,6 +12,7 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import com.carpet.satdemo.core.protocol.CommandType
+import com.carpet.satdemo.core.runtime.DemoRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob

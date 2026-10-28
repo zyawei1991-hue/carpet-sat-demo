@@ -123,7 +123,8 @@ class LinkStateMachine(
         if (!probeAwaitingAck) return
         probeAwaitingAck = false
         if (phase == LinkPhase.PROBE) {
-            // 卫星通了就切，不等蜂窝 —— 蜂窝已经确认坏了才发的探测
+            // 探测有结果就走，ACK 和 NO_ACK 一样切 SAT：蜂窝已经判死了，
+            // 卫星不通也只剩这条路，区别只是接下来要显示「等过顶」还是「已锁定」
             goTo(LinkPhase.SAT, ack.atMs, out)
         }
     }

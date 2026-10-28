@@ -1,7 +1,8 @@
-package com.carpet.satdemo.app
+package com.carpet.satdemo.core.screen
 
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
@@ -28,6 +29,11 @@ class ScreenLinkServer(
     @Volatile
     var onMessage: (ScreenMessage) -> Unit = {}
 
+    /** hello 过了白名单之后回调，参数是整条消息（回执要引用它的 seq） */
+    var onHello: (ScreenMessage) -> Unit = {}
+
+    private val known = ConcurrentHashMap<String, WebSocket>()
+
     val clientCount: Int get() = connections.count { it.isOpen }
 
     override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
@@ -44,9 +50,13 @@ class ScreenLinkServer(
             return
         }
         val hello = msg.hello
-        if (hello != null && hello.screenId !in whitelist) {
-            conn.close(CLOSE_POLICY, "unknown screen")
-            return
+        if (hello != null) {
+            if (hello.screenId !in whitelist) {
+                conn.close(CLOSE_POLICY, "unknown screen")
+                return
+            }
+            known[hello.screenId] = conn
+            onHello(msg)
         }
         onMessage(msg)
     }
@@ -55,7 +65,9 @@ class ScreenLinkServer(
         // Java-WebSocket 1.5 要求实现；接入日志由 DemoRuntime 打，这里不重复
     }
 
-    override fun onClose(conn: WebSocket, code: Int, reason: String, remote: Boolean) = Unit
+    override fun onClose(conn: WebSocket, code: Int, reason: String, remote: Boolean) {
+        known.entries.removeIf { it.value === conn }
+    }
 
     override fun onError(conn: WebSocket?, ex: Exception?) {
         ex?.printStackTrace()
@@ -69,8 +81,19 @@ class ScreenLinkServer(
         }
     }
 
+    /**
+     * 只发给某个 screen_id。hello 之后才认得出连接是谁，所以建链时的那条 ack
+     * 只能走这里 —— 用 broadcast 会把车主位置发给还没通过白名单校验的连接。
+     */
+    fun sendTo(screenId: String, message: ScreenMessage) {
+        if (!accepting) return
+        val conn = known[screenId] ?: return
+        if (conn.isOpen) conn.send(message.encode())
+    }
+
     private fun closeClients() {
         connections.forEach { runCatching { it.close(CLOSE_POLICY, "demo lock") } }
+        known.clear()
     }
 
     companion object {

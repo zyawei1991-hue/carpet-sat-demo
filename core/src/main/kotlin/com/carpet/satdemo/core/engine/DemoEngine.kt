@@ -9,6 +9,8 @@ import com.carpet.satdemo.core.link.LinkStateMachine
 import com.carpet.satdemo.core.modem.SatLock
 import com.carpet.satdemo.core.modem.SatResult
 import com.carpet.satdemo.core.modem.SatelliteModem
+import com.carpet.satdemo.core.modem.SosCoordinator
+import com.carpet.satdemo.core.modem.SosProgress
 import com.carpet.satdemo.core.protocol.EventKind
 import com.carpet.satdemo.core.protocol.EventPayload
 import com.carpet.satdemo.core.protocol.FenceState
@@ -39,7 +41,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * 不用等真机、不用模拟器、不用卫星。
  */
 class DemoEngine(
-    private val modem: SatelliteModem,
+    val modem: SatelliteModem,
     ownerId: Long,
     val policy: LinkPolicy = LinkPolicy(),
 ) {
@@ -56,6 +58,33 @@ class DemoEngine(
     var lastDownlinkHex: String? = null
         private set
 
+    /** 下一条卫星过顶还有多少秒。星历不可用时为 null，展示端要显示「--」而不是 0 */
+    var nextPassInS: Long? = null
+
+    /** SOS 全过程的进度，App 拿来写日志、发协议事件 */
+    var onSosProgress: (SosProgress) -> Unit = {}
+
+    private val sos = SosCoordinator(
+        modem = modem,
+        encoder = encoder,
+        policy = policy,
+        progress = { onSosProgressHandler(it) },
+    )
+
+    private fun onSosProgressHandler(p: SosProgress) {
+        when (p) {
+            is SosProgress.SatSending -> {
+                sosAttempts = p.attempt
+                lastSosHex = p.frameHex
+            }
+            is SosProgress.Exhausted -> sosNextPassInS = p.nextPassInS
+            else -> Unit
+        }
+        onSosProgress(p)
+    }
+
+    private var sosNextPassInS: Long? = null
+    private var lastSosHex = ""
     private var fix: GnssState? = null
     private var phoneBatteryPct = 100
     private var fence = FenceState(active = false, inside = true)
@@ -65,7 +94,6 @@ class DemoEngine(
     private var sosSinceTs: Long? = null
     private var sosAttempts = 0
     private var lock: SatLock? = null
-    private var seq = 0L
 
     init {
         modem.onSatelliteLock { lock = it }
@@ -75,11 +103,42 @@ class DemoEngine(
     fun onCellStatus(status: CellStatus, nowMs: Long): List<ScreenMessage> =
         emit(machine.onSignal(LinkSignal.Cell(status, nowMs)), nowMs)
 
-    fun onTick(nowMs: Long): List<ScreenMessage> =
-        emit(machine.onSignal(LinkSignal.Tick(nowMs)), nowMs)
+    fun onTick(nowMs: Long): List<ScreenMessage> {
+        // 「平台已确认」是给人看一眼就收回去的回执，长期压着会把轨迹图挡住；
+        // 未确认那条不能收 —— 那是催人在开阔处等下次过境的红字
+        val since = sosSinceTs
+        if (sosLevel == SosLevel.acked && since != null && nowMs - since >= ACKED_BANNER_HOLD_MS) {
+            sosLevel = SosLevel.normal
+            sosSinceTs = null
+            sosAttempts = 0
+        }
+        return emit(machine.onSignal(LinkSignal.Tick(nowMs)), nowMs)
+    }
 
     fun onSatAck(nowMs: Long, ok: Boolean): List<ScreenMessage> =
         emit(machine.onSignal(LinkSignal.SatAck(nowMs, ok)), nowMs)
+
+    /** 状态机这一轮要求发探测包，等 [drainProbe] 把它真的发出去 */
+    private var probeRequested = false
+
+    /**
+     * 把攒下的探测请求真的走一趟模块。探测包就是一条心跳，
+     * 收到 ACK 才说明卫星可用，状态机据此从 PROBE 切 SAT。
+     * 调用方（App / 演示驱动器）每秒 tick 后调一次，返回值直接推给展示端。
+     */
+    suspend fun drainProbe(nowMs: Long): List<ScreenMessage> {
+        if (!probeRequested) return emptyList()
+        probeRequested = false
+        val f = fix
+        val hex = encoder.encode(
+            SosFrame.MSG_HEARTBEAT, f?.lat ?: 0.0, f?.lon ?: 0.0,
+            whenSec = nowMs / 1000, batteryPct = phoneBatteryPct,
+            // 探测包只在蜂窝已经判死的时候发，所以不带 DUAL 标志
+            flags = frameFlags(cellOk = false),
+        ).toHex()
+        val ok = runCatching { modem.sendMcq(hex) }.getOrDefault(SatResult.FAIL) == SatResult.COMPLETE
+        return onSatAck(nowMs, ok)
+    }
 
     /** 手机 GPS 或 GT1005 GNSS 出了个定位 */
     fun onFix(lat: Double, lon: Double, source: GnssSource, hdop: Double?, fixAgeSec: Double?) {
@@ -125,27 +184,58 @@ class DemoEngine(
     }
 
     /**
+     * RECOVER 态把离线期间攒下的补发出去。一次 tick 只刷 [DRAIN_BURST] 条 ——
+     * 真机上一条 SFQ 要过一次 BLE 写，一秒刷干净反而是假的，而且展示端正好想看
+     * 那个数字往下掉。刷完才告诉状态机可以回 CELL；中途模块又不收了就停在 RECOVER。
+     */
+    suspend fun drainPending(nowMs: Long): List<ScreenMessage> {
+        if (phase != LinkPhase.RECOVER) return emptyList()
+        var flushed = 0
+        while (flushed < DRAIN_BURST && pending.isNotEmpty()) {
+            val hex = pending.first()
+            if (!modem.enqueueSfq(hex)) break
+            pending.removeFirst()
+            flushed++
+        }
+        return if (pending.isEmpty()) emit(machine.onSignal(LinkSignal.QueueDrained(nowMs)), nowMs) else emptyList()
+    }
+
+    /**
      * SOS。不进链路状态机、不等蜂窝判定 —— 见 protocol/link-policy.md「SOS 例外」。
      * 没有定位时也照样要发，用 flags.bit2 标定位已过期，让平台知道这条不可信到什么程度。
      */
     suspend fun triggerSos(nowSec: Long, cellOk: Boolean): SosResult {
         sosLevel = SosLevel.pending
         sosSinceTs = nowSec * 1000
-        sosAttempts++
+        sosNextPassInS = null
 
         val f = fix
-        val lat = f?.lat ?: 0.0
-        val lon = f?.lon ?: 0.0
-        val hex = encoder.encode(SosFrame.MSG_SOS, lat, lon, nowSec, phoneBatteryPct, flags = frameFlags(cellOk)).toHex()
+        val result = runCatching {
+            sos.trigger(
+                lat = f?.lat ?: 0.0,
+                lon = f?.lon ?: 0.0,
+                whenSec = nowSec,
+                batteryPct = phoneBatteryPct,
+                flags = frameFlags(cellOk),
+                cellOk = cellOk,
+            )
+        }.getOrDefault(SatResult.FAIL)
 
-        val result = runCatching { modem.sendMcq(hex) }.getOrDefault(SatResult.FAIL)
         sosLevel = if (result == SatResult.COMPLETE) SosLevel.acked else SosLevel.sent
-        return SosResult(result, hex, f != null)
+        return SosResult(result, lastSosHex, f != null, sosAttempts, sosNextPassInS)
     }
 
-    data class SosResult(val result: SatResult, val frameHex: String, val hasFix: Boolean)
+    data class SosResult(
+        val result: SatResult,
+        val frameHex: String,
+        val hasFix: Boolean,
+        /** 实际发出的次数，三次都没 ACK 时展示端要写清楚 */
+        val attempts: Int,
+        /** 仅三次无 ACK 时非空：下一条过顶还有多少秒 */
+        val nextPassInS: Long?,
+    )
 
-    fun snapshot(nowMs: Long): StatePayload = StatePayload(
+    fun snapshot(): StatePayload = StatePayload(
         link = LinkState(
             primary = if (phase == LinkPhase.CELL || phase == LinkPhase.RECOVER) LinkPrimary.cell else LinkPrimary.sat,
             cellOk = phase == LinkPhase.CELL || phase == LinkPhase.RECOVER,
@@ -154,10 +244,13 @@ class DemoEngine(
         ),
         sat = SatState(
             phase = satPhase(),
-            satName = lock?.name,
-            cnr = lock?.cnr,
-            nextPassInS = null,
+            // 终端都没了，上一次锁定的星名和 CNR 就是旧数据，再画出来等于骗人
+            satName = if (modem.available) lock?.name else null,
+            cnr = if (modem.available) lock?.cnr else null,
+            nextPassInS = nextPassInS?.toInt(),
             moduleBattery = null,
+            moduleOk = modem.available,
+            queuePending = pending.size,
         ),
         gnss = fix ?: GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
         fence = fence,
@@ -188,6 +281,7 @@ class DemoEngine(
 
     private fun emit(events: List<LinkEvent>, nowMs: Long): List<ScreenMessage> {
         phase = machine.phase
+        if (events.any { it is LinkEvent.ProbeRequested }) probeRequested = true
         if (events.isEmpty()) return emptyList()
         return events.mapNotNull { toMessage(it, nowMs) }
     }
@@ -212,12 +306,22 @@ class DemoEngine(
     private fun event(nowMs: Long, kind: EventKind, vararg fields: Pair<String, JsonElement>): ScreenMessage =
         ScreenMessage(
             t = MsgType.event,
-            seq = seq++,
+            // 序号和事件 id 由发送方 DemoRuntime 统一盖。这里各留一个占位，
+            // 是因为 engine 不知道自己排在整条链路的第几帧上。
+            seq = 0,
             ts = nowMs,
             event = EventPayload(
                 kind = kind,
-                eventId = "evt-${seq}",
+                eventId = "",
                 payload = JsonObject(linkedMapOf(*fields)),
             ),
         )
+
+    companion object {
+        /** 补发时每 tick 刷几条。真机上一条 SFQ 要过一次 BLE 写 */
+        private const val DRAIN_BURST = 2
+
+        /** SOS 确认横幅在展示端停留多久后收回 */
+        private const val ACKED_BANNER_HOLD_MS = 12_000L
+    }
 }

@@ -115,7 +115,7 @@ class DemoEngineTest {
         assertTrue(d.flags and SosFrame.FLAG_DUAL != 0, "蜂窝同时在发，flags.bit0 必须置上")
         assertTrue(d.flags and SosFrame.FLAG_SRC_GT1005 != 0, "位置来自 GT1005，要标出来")
         assertFalse(d.flags and SosFrame.FLAG_STALE_FIX != 0, "2 秒前的定位不该标过期")
-        assertEquals(SosLevel.acked, e.snapshot(clock.ms).sos.level)
+        assertEquals(SosLevel.acked, e.snapshot().sos.level)
     }
 
     @Test
@@ -185,10 +185,87 @@ class DemoEngineTest {
         val (e, modem) = newEngine(clock)
         modem.reachable = false
 
-        val s = e.snapshot(clock.ms)
+        val s = e.snapshot()
         assertFalse(s.link.satOk)
         assertEquals(SatPhase.idle, s.sat.phase)
         assertEquals(SosLevel.normal, s.sos.level)
+        assertFalse(s.sat.moduleOk, "展示端要靠这个字段区分「终端没了」和「没锁到星」")
+    }
+
+    @Test
+    fun `offline heartbeats show up as a pending count on the screen`() = runTest {
+        val clock = FakeClock(1_795_200_000_000L)
+        val (e, modem) = newEngine(clock)
+        e.onFix(30.2741, 120.1551, GnssSource.phone, null, 2.0)
+        drive(e, clock, dead, durationMs = 25_000)
+        modem.reachable = false
+        repeat(3) {
+            e.heartbeat(nowSec = clock.ms / 1000, cellOk = false)
+            clock.advance(1_000)
+        }
+
+        val s = e.snapshot()
+        assertEquals(3, s.sat.queuePending, "掉线期间攒了几条，展示端要能数出来")
+        assertEquals(null, s.sat.satName, "终端都不在了，上一次锁定的星名不该还画在屏上")
+    }
+
+    @Test
+    fun `a requested probe is actually put on the air`() = runTest {
+        val clock = FakeClock(1_795_200_000_000L)
+        val (e, modem) = newEngine(clock)
+        drive(e, clock, dead, durationMs = 25_000)
+        assertEquals(LinkPhase.PROBE, e.phase)
+        assertTrue(modem.sent.isEmpty(), "状态机只是要求探测，没真发")
+
+        e.drainProbe(clock.ms)
+        assertEquals(1, modem.sent.size, "PROBE 态的探测包必须真的走一趟模块")
+        assertEquals(LinkPhase.SAT, e.phase, "蜂窝已判死，探测完就该落到卫星主链路")
+    }
+
+    @Test
+    fun `RECOVER only returns to CELL once the queue is actually empty`() = runTest {
+        val clock = FakeClock(1_795_200_000_000L)
+        val (e, modem) = newEngine(clock)
+        e.onFix(30.2741, 120.1551, GnssSource.phone, null, 2.0)
+        drive(e, clock, dead, durationMs = 25_000)
+        e.drainProbe(clock.ms)
+        assertEquals(LinkPhase.SAT, e.phase)
+
+        modem.reachable = false
+        repeat(3) {
+            e.heartbeat(nowSec = clock.ms / 1000, cellOk = false)
+            clock.advance(1_000)
+        }
+        assertEquals(3, e.pending.size)
+
+        modem.reachable = true
+        drive(e, clock, good, durationMs = 35_000)
+        assertEquals(LinkPhase.RECOVER, e.phase)
+
+        repeat(5) {
+            e.drainPending(clock.ms)
+            clock.advance(1_000)
+        }
+        assertTrue(e.pending.isEmpty(), "补发完队列就该空")
+        assertEquals(LinkPhase.CELL, e.phase)
+    }
+
+    @Test
+    fun `acked sos banner is retracted but an unacked one stays`() = runTest {
+        val clock = FakeClock(1_795_200_000_000L)
+        val (e, modem) = newEngine(clock, visible = false)
+        e.onFix(30.2741, 120.1551, GnssSource.phone, null, 2.0)
+
+        e.triggerSos(nowSec = clock.ms / 1000, cellOk = false)
+        assertEquals(SosLevel.sent, e.snapshot().sos.level)
+        drive(e, clock, dead, durationMs = 30_000)
+        assertEquals(SosLevel.sent, e.snapshot().sos.level, "没确认的红字不能自己消失")
+
+        modem.passWindowMs = Long.MAX_VALUE / 4
+        e.triggerSos(nowSec = clock.ms / 1000, cellOk = false)
+        assertEquals(SosLevel.acked, e.snapshot().sos.level)
+        drive(e, clock, dead, durationMs = 20_000)
+        assertEquals(SosLevel.normal, e.snapshot().sos.level, "确认回执停一会儿就该收回，别一直压着轨迹图")
     }
 
     @Test

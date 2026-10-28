@@ -76,6 +76,13 @@ data class SatState(
     @SerialName("next_pass_in_s") val nextPassInS: Int? = null,
     @SerialName("module_battery") val moduleBattery: Int? = null,
     val fw: String? = null,
+    /**
+     * GT1005 本身在不在。掉线和「在窗口外没锁到星」是两件事：
+     * 前者是硬件没了，展示端要说"终端离线"，后者才是"等过顶"。
+     */
+    @SerialName("module_ok") val moduleOk: Boolean = true,
+    /** App 侧攒着待补发的条数。掉线期间这个数字一直涨，就是"一条不能丢"的凭据 */
+    @SerialName("queue_pending") val queuePending: Int = 0,
 )
 
 @Serializable
@@ -141,7 +148,10 @@ data class CommandPayload(
 @Serializable
 data class AckPayload(
     @SerialName("for_seq") val forSeq: Long,
-    @SerialName("for_event_id") val forEventId: String,
+    /** 确认的是哪条 event。会话类 ack（hello 的回执）没有它 */
+    @SerialName("for_event_id") val forEventId: String? = null,
+    /** 非空表示拒绝，目前只有 proto_mismatch */
+    val error: String? = null,
 )
 
 @Serializable

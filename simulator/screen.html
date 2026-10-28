@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>微雪 1.75-B 展示端 · 466×466</title>
+<style>
+  :root{
+    --scr: 466px;
+    --amber:#ffb020;
+    --green:#3ddc84;
+    --red:#ff4545;
+    --dim:#5a6472;
+    --ink:#e8edf4;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#15181d;
+    font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    color:var(--ink);
+    display:flex;gap:34px;align-items:flex-start;padding:30px;
+  }
+  .stage{display:flex;flex-direction:column;gap:14px;align-items:center}
+  .bezel{
+    width:calc(var(--scr) + 26px);height:calc(var(--scr) + 26px);
+    border-radius:50%;
+    background:linear-gradient(150deg,#3a3f47,#1b1e23 45%,#2c3138);
+    display:grid;place-items:center;
+    box-shadow:0 22px 50px rgba(0,0,0,.6), inset 0 1px 2px rgba(255,255,255,.18);
+  }
+  .screen{
+    width:var(--scr);height:var(--scr);border-radius:50%;
+    background:#000;overflow:hidden;position:relative;
+  }
+  svg{display:block}
+  .hint{font:12px/1.6 ui-monospace,Consolas,monospace;color:#7c8697;text-align:center}
+  .panel{
+    background:#1c2027;border:1px solid #2b313a;border-radius:12px;
+    padding:16px 18px;min-width:330px;max-width:380px;
+    font:12px/1.7 ui-monospace,Consolas,monospace;color:#aeb9c9;
+  }
+  .panel h2{font:600 13px/1 sans-serif;color:#dfe6ef;margin-bottom:10px;letter-spacing:.5px}
+  .panel .row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #262c35;padding:3px 0}
+  .panel .row b{color:#e8edf4;font-weight:600}
+  .log{height:210px;overflow:auto;margin-top:10px;white-space:pre-wrap;word-break:break-all;color:#7f8a9b}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="bezel"><div class="screen"><svg id="ui" viewBox="0 0 466 466" width="466" height="466"></svg></div></div>
+  <div class="hint" id="hint">等待连接…</div>
+</div>
+<div class="panel">
+  <h2>原始状态流</h2>
+  <div id="kv"></div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+// 这页是调 UI 用的，画错了必须当场看见，否则只会对着静止画面猜
+window.onerror=(m,f,l,c)=>{
+  const d=document.getElementById('log');
+  if(d) d.textContent=`ERR ${m} @${l}:${c}\n`+d.textContent;
+};
+const NS='http://www.w3.org/2000/svg';
+const ui=document.getElementById('ui');
+const cx=233, cy=233;
+let last=null, lastSeq=-1, connected=false;
+
+function el(tag,attrs,parent){
+  const n=document.createElementNS(NS,tag);
+  for(const k in attrs) n.setAttribute(k,attrs[k]);
+  (parent||ui).appendChild(n);
+  return n;
+}
+function text(x,y,str,o){
+  const t=el('text',Object.assign({x,y,'text-anchor':'middle',fill:'#e8edf4',
+    'font-family':'Segoe UI, Microsoft YaHei, sans-serif'},o||{}));
+  t.textContent=str; return t;
+}
+function arc(r,a0,a1,color,w,opacity){
+  const p=(a)=>[cx+r*Math.cos(a), cy+r*Math.sin(a)];
+  const [x0,y0]=p(a0), [x1,y1]=p(a1);
+  const large=(a1-a0)>Math.PI?1:0;
+  return el('path',{d:`M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`,
+    stroke:color,'stroke-width':w,fill:'none','stroke-linecap':'round',opacity:opacity||1});
+}
+
+const PHASE_CN={idle:'待命',searching:'对星中',locked:'已锁定',tx_pending:'待发',tx_ok:'已送达',tx_fail:'发送失败',tx_no_ack:'星上未确认'};
+const LINK_CN={cell:'蜂窝主链路',sat:'卫星主链路'};
+const SOS_CN={normal:'',armed:'已布防',pending:'发送中',sent:'已发出待确认',acked:'平台已确认'};
+
+function draw(s){
+  ui.textContent='';
+  el('circle',{cx,cy,r:232,fill:'#000'});
+
+  // 外圈：链路。蜂窝=绿实线弧，卫星=琥珀弧
+  const sat = s.link.primary==='sat';
+  arc(226,-Math.PI*0.78,Math.PI*0.78,'#1b222c',5);
+  if(!sat) arc(226,-Math.PI*0.78,Math.PI*0.78,'#3ddc84',5);
+  else { arc(226,-Math.PI*0.78,Math.PI*0.78,'#ffb020',5); arc(226,Math.PI*0.78,Math.PI*1.22,'#ffb020',5,.55); }
+
+  // 卫星相位环
+  const ph=s.sat.phase, order=['idle','searching','locked','tx_pending','tx_ok','tx_fail','tx_no_ack'];
+  const fill={idle:0,searching:.35,locked:.85,tx_pending:.55,tx_ok:1,tx_fail:.3,tx_no_ack:.2}[ph]||0;
+  arc(206,-Math.PI/2,-Math.PI/2+Math.PI*2*fill, ph==='tx_fail'||ph==='tx_no_ack'?'#ff4545':'#ffb020',7);
+  el('circle',{cx,cy,r:206,fill:'none',stroke:'#1b222c','stroke-width':7});
+
+  // 顶部三行：星名 / 信号 / 相位。
+  // 「终端离线」和「没锁到星」必须分开说：前者是 GT1005 掉电，后者只是在等过顶。
+  const offline = s.sat.module_ok === false;
+  const queued = s.sat.queue_pending || 0;
+  text(cx,96,offline?'GT1005':(s.sat.sat_name||'—'),{'font-size':19,'letter-spacing':1.5,
+    fill:offline?'#ff4545':(s.sat.sat_name?'#ffb020':'#5a6472')});
+  text(cx,116,offline?(queued?`离线 · 攒 ${queued} 条待补发`:'终端离线'):
+      (s.sat.cnr?('CNR '+s.sat.cnr.toFixed(1)+' dB'):'未锁定'),{'font-size':12,fill:offline?'#aeb9c9':'#5a6472'});
+  text(cx,138,offline?'终端离线':(PHASE_CN[ph]||ph),{'font-size':15,
+    fill:offline?'#ff4545':'#e8edf4','font-weight':'600'});
+  // 没锁定又在等窗口时，唯一有用的信息就是还有多少秒过顶
+  if(!offline && ph!=='locked' && s.sat.next_pass_in_s!=null && s.sat.next_pass_in_s>0)
+    text(cx,158,`距下次过顶 ${s.sat.next_pass_in_s}s`,{'font-size':12,fill:'#ffb020'});
+
+  drawTrack(s);
+
+  // 底部：位置 / 围栏 / 电量
+  text(cx,344,`${s.gnss.lat.toFixed(5)}, ${s.gnss.lon.toFixed(5)}`,{'font-size':13,fill:'#aeb9c9'});
+  text(cx,362,`源 ${s.gnss.source==='gt1005'?'GT1005':(s.gnss.source==='fused'?'融合':'手机GPS')}`+
+      (s.gnss.fix_age_s!=null?`  ${s.gnss.fix_age_s.toFixed(0)}s前`:''),{'font-size':11,fill:'#5a6472'});
+  if(s.fence.active)
+    text(cx,386,s.fence.inside?`围栏内 · ${s.fence.name||''}`:`出界 ${Math.abs(s.fence.dist_m||0).toFixed(0)}m`,
+      {'font-size':14,'font-weight':'600',fill:s.fence.inside?'#3ddc84':'#ff4545'});
+  text(cx,412,`${s.phone_battery}%  ·  ${LINK_CN[s.link.primary]||s.link.primary}`,
+    {'font-size':12,fill:'#5a6472'});
+
+  // SOS 横幅压在最上层
+  if(s.sos.level!=='normal') sosBanner(s.sos);
+}
+
+function drawTrack(s){
+  const g=el('g',{});
+  el('circle',{cx,cy,r:74,fill:'#071018',stroke:'#1e2833','stroke-width':1},g);
+  for(let r=26;r<=74;r+=24) el('circle',{cx,cy,r,fill:'none',stroke:'#141d27','stroke-width':1},g);
+  el('line',{x1:cx-74,y1:cy,x2:cx+74,y2:cy,stroke:'#141d27'},g);
+  el('line',{x1:cx,y1:cy-74,x2:cx,y2:cy+74,stroke:'#141d27'},g);
+  if(s.fence.active && !s.fence.inside){
+    el('circle',{cx,cy,r:52,fill:'none',stroke:'#ff4545','stroke-width':2,'stroke-dasharray':'7 6',opacity:.85},g);
+  } else if(s.fence.active){
+    el('circle',{cx,cy,r:52,fill:'none',stroke:'#3ddc84','stroke-width':2,'stroke-dasharray':'7 6',opacity:.6},g);
+  }
+  // 轨迹：用 seq 造一条会动的线，硬件到位后换成 track_pull 的真实点
+  const n=14, pts=[];
+  for(let i=0;i<n;i++){
+    const a=i/n*Math.PI*1.7-Math.PI*0.9, rr=10+i*3.2;
+    pts.push([cx+rr*Math.cos(a)-14, cy+rr*Math.sin(a)+10]);
+  }
+  el('polyline',{points:pts.map(p=>p.join(',')).join(' '),fill:'none',
+    stroke:'#4a8fd6','stroke-width':2,'stroke-linecap':'round',opacity:.9},g);
+  const head=pts[pts.length-1];
+  el('circle',{cx:head[0],cy:head[1],r:6,fill:'#e8edf4'},g);
+  el('circle',{cx:head[0],cy:head[1],r:11,fill:'none',stroke:'#e8edf4',opacity:.35},g);
+}
+
+function sosBanner(sos){
+  const bad=sos.level==='sent'||sos.level==='pending';
+  const col=sos.level==='acked'?'#3ddc84':(bad?'#ff4545':'#ffb020');
+  // 先压一块暗底。SOS 弹层压在地图上，不压住就看不清，演示时看不清等于没做
+  el('rect',{x:0,y:186,width:466,height:94,fill:'#0b0d10',opacity:.9});
+  el('rect',{x:53,y:196,width:360,height:74,rx:16,fill:col,opacity:.16});
+  el('rect',{x:53,y:196,width:360,height:74,rx:16,fill:'none',stroke:col,'stroke-width':2});
+  text(cx,228,'SOS '+SOS_CN[sos.level],{'font-size':21,'font-weight':'700',fill:col});
+  text(cx,252,(sos.attempts||0)+' 次发送'+(sos.level==='sent'?' · 等星上确认':''),
+    {'font-size':12,fill:'#aeb9c9'});
+}
+
+function renderKv(s){
+  const kv=document.getElementById('kv');
+  const rows=[
+    ['链路',s.link.primary+(s.link.cell_ok?' / 蜂窝通':' / 蜂窝断')],
+    ['卫星',[s.sat.module_ok===false?'offline':s.sat.phase,s.sat.sat_name,
+      s.sat.queue_pending?('待补发'+s.sat.queue_pending):null].filter(Boolean).join(' · ')],
+    ['定位',`${s.gnss.lat.toFixed(5)},${s.gnss.lon.toFixed(5)} (${s.gnss.source})`],
+    ['围栏',s.fence.active?(s.fence.inside?'界内':'出界 '+s.fence.dist_m+'m'):'未启用'],
+    ['SOS',s.sos.level+(s.sos.attempts?' 第'+s.sos.attempts+'次':'')],
+    ['哨兵',s.sentinel?(s.sentinel.armed?'布防':'解除'):'-'],
+    ['演示模式',String(s.demo_mode)],
+  ];
+  kv.innerHTML=rows.map(r=>`<div class="row"><span>${r[0]}</span><b>${r[1]}</b></div>`).join('');
+}
+
+function note(txt,color){
+  const d=document.getElementById('log');
+  d.textContent=`${new Date().toLocaleTimeString()}  ${txt}\n`+d.textContent;
+  if(color) d.style.color=color;
+}
+
+function handleFrame(chunk){
+  for(const line of chunk.split('\n')){
+    let m; try{ m=JSON.parse(line); }catch(e){ continue; }
+    if(m.t==='state'){
+      if(m.seq<=lastSeq) continue;
+      lastSeq=m.seq; last=m.state; draw(m.state); renderKv(m.state);
+    } else if(m.t==='event'){
+      note('事件 '+m.event.kind+' '+JSON.stringify(m.event.payload).slice(0,80));
+      if(m.event.kind==='sos_triggered'||m.event.kind==='sos_failed') note('  ↑ 弹层', '#ff4545');
+    }
+  }
+}
+
+function connect(){
+  const ws=new WebSocket(`ws://127.0.0.1:8443`);
+  ws.onopen=()=>{
+    connected=true;
+    document.getElementById('hint').textContent='已连接 · 状态 1Hz 推送';
+    ws.send(JSON.stringify({v:1,t:'hello',seq:1,
+      hello:{screen_id:'WS175B-A3F7',fw:'sim-0.1.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1]}}));
+  };
+  ws.onmessage=(ev)=>handleFrame(ev.data);
+  ws.onclose=()=>{
+    connected=false;
+    const h=document.getElementById('hint');
+    let secs=0;
+    h.textContent='链路中断 00:00 · 保留最后一帧';
+    const t=setInterval(()=>{
+      if(connected){clearInterval(t);return;}
+      secs++;
+      h.textContent=`链路中断 00:${String(secs).padStart(2,'0')} · 保留最后一帧`;
+      h.style.color=secs>3?'#ff4545':'#7c8697';
+    },1000);
+    setTimeout(connect,2000);
+  };
+  ws.onerror=()=>ws.close();
+}
+
+// 服务还没起来时先画一帧静态图，避免白屏
+draw({link:{primary:'cell',cell_ok:true,sat_ok:false},
+  sat:{phase:'idle'},gnss:{lat:30.2741,lon:120.1551,source:'phone',fix_age_s:0},
+  fence:{active:false,inside:true},sos:{level:'normal',attempts:0},
+  phone_battery:63,demo_mode:false});
+
+// ?replay=xxx.jsonl —— 回放驱动器录下来的一轮，不连 ws。
+// 调 UI 和批量出静帧都用它：headless 浏览器抢 ws 首帧不稳，回放是确定的。
+const replay=new URLSearchParams(location.search).get('replay');
+if(replay && /^[\w.\-]+$/.test(replay)){
+  fetch('/'+replay).then(r=>{
+    if(!r.ok) throw new Error(r.status);
+    return r.text();
+  }).then(t=>{
+    t.split('\n').filter(Boolean).forEach(handleFrame);
+    document.getElementById('hint').textContent='回放 '+replay+' · 已定格在最后一帧';
+  }).catch(e=>{
+    document.getElementById('hint').textContent='回放读不到：'+e;
+  });
+} else connect();
+</script>
+</body>
+</html>

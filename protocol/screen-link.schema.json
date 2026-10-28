@@ -59,7 +59,9 @@
             "cnr": { "type": "number", "description": "载噪比 dB-Hz" },
             "next_pass_in_s": { "type": "integer", "description": "StarManager.calculate 结果，下次过境还有多少秒。null=星历缓存不可用" },
             "module_battery": { "type": "integer", "description": "来自 PDI" },
-            "fw": { "type": "string", "description": "来自 DII" }
+            "fw": { "type": "string", "description": "来自 DII" },
+            "module_ok": { "type": "boolean", "description": "GT1005 是否在。掉线≠没锁到星：前者展示「终端离线」，后者展示「等过顶」" },
+            "queue_pending": { "type": "integer", "minimum": 0, "description": "App 侧攒着待补发的条数，掉线期间一直涨" }
           }
         },
         "gnss": {
@@ -143,10 +145,14 @@
 
     "ack": {
       "type": "object",
-      "required": ["for_seq", "for_event_id"],
+      "required": ["for_seq"],
       "properties": {
         "for_seq": { "type": "integer" },
-        "for_event_id": { "type": "string" }
+        "for_event_id": { "type": "string", "description": "确认的是哪条 event。会话类 ack（hello 的回执）没有它" },
+        "error": {
+          "type": "string",
+          "description": "非空表示拒绝。目前只有 proto_mismatch：契约版本对不上，展示端显示黄屏而不是崩"
+        }
       }
     }
   },
