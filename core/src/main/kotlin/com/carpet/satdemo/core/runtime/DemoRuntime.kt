@@ -137,6 +137,8 @@ class DemoRuntime(
                 log("展示端 $id 已断开")
             }
         }
+        // 屏发来的帧解不开时，原文进日志。明天烧固件那天，这一行就是唯一的线索
+        server.onContractError = { raw, why -> log("展示端帧解不开：$why｜${raw.take(200)}") }
         devices.subscribe { _devices.value = it }
         engine.onSosProgress = { p ->
             if (p is SosProgress.SatSending && p.attempt > 1) log("SOS 第 ${p.attempt} 次重发")

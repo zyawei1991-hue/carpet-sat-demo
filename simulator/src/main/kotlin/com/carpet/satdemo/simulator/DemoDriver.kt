@@ -6,9 +6,11 @@ import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPolicy
+import com.carpet.satdemo.core.link.SosCopy
 import com.carpet.satdemo.core.modem.MonoClock
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
+import com.carpet.satdemo.core.protocol.CommandType
 import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.runtime.DemoRuntime
@@ -112,6 +114,21 @@ object DemoDriver {
         )
         val runtime = DemoRuntime(engine, server, clock::now, heartbeatEvery = 3)
         server.accepting = true
+        /**
+         * 圆屏指令按 App 同一套接线处理（[com.carpet.satdemo.app.AppRuntime.wireCommands]）。
+         * 驱动器不接这一段，彩排演过的就是"没有这条链路的 App"—— 而明天现场用的恰恰是这条路。
+         */
+        runtime.onCommand = { msg ->
+            val cmd = msg.command?.cmd
+            println("cmd      ${msg.command?.cmd}  args=${msg.command?.args}")
+            when (cmd) {
+                CommandType.sos_press -> runtime.pressSos()
+                CommandType.sos_cancel -> runtime.cancelSos { r ->
+                    println("cancel   ${SosCopy.cancelLine(r.send, r.alreadyHanded)}")
+                }
+                else -> Unit
+            }
+        }
         // 假时钟由下面的脚本推，不能再起内部那圈 1Hz
         runtime.start(autoTick = false)
         val sink = record?.let { ReplaySink(it) }
@@ -161,6 +178,9 @@ object DemoDriver {
     /** App 控制台那几行字，原样打出来：手机没到手之前，这就是装上去会看到的东西 */
     private fun printConsole(runtime: DemoRuntime) {
         runtime.consoleText().trimEnd().lines().forEach { println("        | $it") }
+        // 最近几条运行时日志。工程模式窗在手机上，彩排台这边也得能看到同一批话，
+        // 否则"屏发来的帧解不开"这种只在链路上出现的事件，桌面上永远是盲区
+        runtime.status.value.log.takeLast(3).forEach { println("        > $it") }
     }
 
     private fun Array<String>.argAfter(name: String): Int? {        val i = indexOf(name).takeIf { it >= 0 } ?: return null

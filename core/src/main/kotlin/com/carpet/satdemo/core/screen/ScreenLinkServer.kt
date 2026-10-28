@@ -40,6 +40,14 @@ class ScreenLinkServer(
      */
     var onDisconnect: (String?) -> Unit = {}
 
+    /**
+     * 解不开的帧：(原文, 为什么)。
+     *
+     * 只关连接不吭声是明天现场最难查的一种失败 —— 固件那侧是手写 cJSON，
+     * 第一版一定会发歪某一种帧。把原文和原因交出去，排查从"猜字段"变成"读一行日志"。
+     */
+    var onContractError: (String, String) -> Unit = { _, _ -> }
+
     private val known = ConcurrentHashMap<String, WebSocket>()
 
     val clientCount: Int get() = connections.count { it.isOpen }
@@ -68,7 +76,8 @@ class ScreenLinkServer(
     }
 
     override fun onMessage(conn: WebSocket, message: String) {
-        val msg = runCatching { ScreenMessage.decode(message) }.getOrElse {
+        val msg = runCatching { ScreenMessage.decode(message) }.getOrElse { ex ->
+            onContractError(message, ex.message ?: ex.toString())
             conn.close(CLOSE_POLICY, "bad contract")
             return
         }
