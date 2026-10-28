@@ -112,7 +112,7 @@ L1  连接层          GT1005(UART/BLE) / 车辆(OBD/BLE/车机) / 圆屏(WebSoc
 | 模块 | 优先级 | 现状 | 说明 |
 | --- | --- | --- | --- |
 | 家长端管控（时长 / 内容分级 / 用途授权） | P0 | 无 | **必须先于任何孩子能用的功能上线**，否则过一次监管就下线 |
-| 讲故事 / 问答（圆屏上的人设角色） | P1 | 无 | 圆屏是这个场景最好的一块屏：表情 + 进度 + 谁在说话 |
+| 讲故事 / 问答（圆屏上的人设角色） | P1 | 无 | **不自研语音链路**：展示端按方案文档刷小智 AI 固件（板载双麦 + ES7210 AEC），端侧只做唤醒词与离线命令，对话走服务器（附录 A.3 #3） |
 | 成长记录与记忆 | P1 | 无 | 留存靠"它记得我上次说的话"，不靠内容库 |
 | 走散 / 遗留车内告警 | P0 | 可复用围栏 + 卫星 | **遗留车内是这产品最有社会价值的单点**，且我们真的有独立位置源（模块 GNSS 不依赖手机） |
 | 儿童语音数据最小化 | P0 | 无 | 见 §6 |
@@ -133,16 +133,19 @@ L1  连接层          GT1005(UART/BLE) / 车辆(OBD/BLE/车机) / 圆屏(WebSoc
 
 | 形态 | 底座 | 主屏内容 | 可用模块 | 输入 | 隐私档位 |
 | --- | --- | --- | --- | --- | --- |
-| **车载守护** | 充电 + 支架 | 地图轨迹 + 链路状态 + 一键 SOS | 卫星、车辆、围栏 | 圆屏按键、语音 | 普通 |
-| **育儿陪伴** | 桌面 + 麦克风阵列 | 角色脸 + 对话气泡 + 时长 | AI 网关、成长记录、告警 | 双麦语音、家长手机 | **儿童档**（不录不存、仅本地） |
-| **宠物看家** | 桌面 + 摄像头（后续） | 实时状态 + 喂食/活动统计 | 规则引擎、事件推送 | 按键 | 普通 |
-| **桌面副屏** | 无 | 时钟 + 日程 + 消息摘要 | 通知镜像 | 按键 | 需显式授权，默认不投内容 |
+| **车载守护** | 充电 + 支架 | 环形状态盘 + 链路 + 一键 SOS | 卫星、车辆、围栏 | **触摸** + SOS 硬键 + 语音 | 普通 |
+| **育儿陪伴** | 桌面（板载双麦） | 角色脸 + 对话气泡 + 时长 | AI 网关、成长记录、告警 | **双麦语音** + 触摸 + 家长手机 | **儿童档**（不录不存、仅本地） |
+| **宠物看家** | 桌面 + 摄像头（后续） | 实时状态 + 喂食/活动统计 | 规则引擎、事件推送 | 触摸 + 按键 | 普通 |
+| **桌面副屏** | 无 | 时钟 + 日程 + 消息摘要 | 通知镜像 | 触摸 | 需显式授权，默认不投内容 |
+
+> 这块屏是 **466×466 圆形触摸 AMOLED，逻辑分辨率约 233×233，让出手势带后安全内容区约 165×165 逻辑像素 ≈ 4 行中文**（推导见附录 A.1）。所以每种形态**只允许一屏一个主信息 + 一个动作**，卡片里再套三行说明的设计在这块屏上一律作废。
 
 实现要求（写进协议契约，不靠约定）：
 
 1. App 侧 **不判断硬件型号，只读 `dock_type` + `capabilities`**，能力缺失就降级成一张说明卡，而不是空白或崩溃。
 2. 卡片以"订阅"为单位投放：`{card_id, scene, min_priority, ttl}`，而不是 App 直接推像素。
 3. 隐私档位由**底座 + 家长设置共同决定**，取更严的那个（详见 §6）。
+4. **hello 要补屏幕几何**：`screen: {w, h, round, touch, ppi}`。行业做法是按「面板几何 + 可用输入设备 + 朝向」自适应，`dock_type` 单独一个枚举解决不了布局（附录 A.3 #1）。当前契约里 `dock_type` / `avatar_mode` 都只描述"人设"，不描述"能放几行字"。
 
 ---
 
@@ -216,7 +219,7 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 
 | 阶段 | 目标 | 交付判据 |
 | --- | --- | --- |
-| **R0 演示**（现在） | 链路可信、彩排可重复 | ✅ 43 条 core 单测、8 帧彩排、`v0.3-rehearsal`；⚠️ GT1005 指令表未实测 |
+| **R0 演示**（现在） | 链路可信、彩排可重复 | ✅ 43 条 core 单测、8 帧彩排、`v0.3-rehearsal`；⚠️ GT1005 指令表未实测；⚠️ `simulator/screen.html` 按 466 CSS px 直接画，真机要开 LVGL 2× scale（逻辑约 233），**现在 11–19px 的字号搬到屏上会糊，投放前得按逻辑像素重算**（附录 A.1） |
 | **R1 车宠守护 1.0** | 车载场景闭环，能给吉利真机看 | 设备总线 + 账号 + 真实 UART 通信 + SOS 全流程（长按倒计时可取消、队列补发、用量页）+ 首页卡片流 |
 | **R2 亲子底座** | 形态切换可用，家长管控先上线 | `dock_type` 路由 + 儿童隐私档 + AI 网关 + 遗留车内告警 |
 | **R3 分身与社交** | 叙事与留存 | 人设、消息代回；A2A 只做技术储备 |
@@ -239,94 +242,103 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 | 4 | 1.75 圆屏带外壳版是否随盒带电池、发货时间 | 微雪 | 亲子/桌面底座的形态与 BOM |
 | 5 | 儿童语音是否需要单独备案/认证路径 | 吉利法务 | R2 能不能上线 |
 | 6 | 卫星流量包的定价与结算主体 | 商务 | 收入结构 |
-| 7 | **我们买的这块 1.75 到底是 ESP32-S3 还是 RP2040/RP2350？** V2.0 方案文档 §4 写的是「微雪 ESP32‑S3 Avatar 1.75」，但微雪 1.75 圆屏 wiki 的官方 demo 全是 **RP2040 / RP2350** 两版 | 微雪 + 我们自己核对实物 | **决定语音陪伴的可行性**：ESP-Brocast / 小智（xiaozhi-esp32）整套 AEC 语音栈只跑 ESP32-S3；是 Pico 就得自研或把 ASR 挪到手机侧（见附录 A.6） |
+| 7 | **小智官方支持列表里没有 1.75 圆屏**（只有微雪 AMOLED-1.8）。移植是改 CO5300 QSPI 时序 + CST9217 触摸坐标，工作量多大？还是先用 1.8 打样？ | 我们固件同学 / Spotpear 那块现成 1.75 小智板 | 亲子场景（§3.3）和展示端固件排期 |
 
 ---
 
 ## 附录 A · 圆屏可拓展场景与开源生态调研
 
-### A.1 场景范围（按「有没有人天天看」排序）
+> **先对齐实物口径**（V2.0 方案文档 §4，已核对）：展示端是 **微雪 ESP32-S3-Touch-AMOLED-1.75C** —— 1.75 寸 **466×466 圆形触摸 AMOLED**，CO5300（QSPI）+ CST9217 触摸 + **双麦阵列 + ES7210 回声消除 + ES8311 编解码 + 扬声器** + AXP2101 电源；同族 **-B** 带外壳、**-G** 带 LC76G GNSS。
+> 这三件事直接改写了本附录的结论：**① 有触摸（不用退化成按键导航）；② 双麦 AEC 是板载的（不用自己设计模拟前端）；③ MCU 是 ESP32-S3（乐鑫官方语音栈全部可用）。**
 
-| 优先级 | 场景 | 为什么适合圆屏 |
+### A.1 圆屏可用像素预算（**先算这个，再谈布局**）
+
+| 量 | 数 | 说明 |
 | --- | --- | --- |
-| **P0** | 桌面时钟/日历 + 天气 + 倒计时/番茄钟 | 200px 能放 3–4 行字 + 一个图形，这是所有圆屏项目的默认归宿 |
-| **P0** | **车辆状态仪表盘**（SOC/续航/胎压/充电功率） | 圆环=表盘是零学习成本隐喻；我们已有车 + 已有链路，唯一有商业闭环的场景 |
-| **P0** | 家庭中枢状态卡（在/离家、安防、温控） | Home Assistant 生态直接可取，别自己写协议 |
-| **P1** | 养成型桌宠 / AI 玩具的"脸"（表情 + 语音指示） | **与「车宠」定位正面相撞，是本次演示最该抄的一类** |
-| **P1** | 专注状态灯 / 消息提醒（PC 副屏、Server 监控） | 小尺寸做状态灯刚好 |
-| **P2** | 音乐控制 / 播客 / 翻页器 / NFC 门卡 | 需要 BLE HID 与触控，1.75 寸没触控，只能靠底座按键 |
+| 物理像素 | 466×466 | 圆形区域占外接方框 **78.5%** |
+| 逻辑分辨率 | **≈233×233** | 约 376 PPI，必须开 LVGL 2× scale，否则 12px 字糊成一团 |
+| 最大内接方形内容区 | ~330×330 物理（≈165×165 逻辑） | 放文本/表格的硬上限 |
+| 实际可用内容区 | **~290 物理** | 再让出 15–20px 边缘带做触摸手势，边缘误触率很高 |
+| 圆形遮罩做法 | `radius=CIRCLE` + `clip_corner` | LVGL 9 原生，模拟器 / SquareLine / EEZ 都有圆屏选项 |
 
-### A.2 固件/中间件层（决定我们能不能少写一半代码）
+**结论：一块"看起来很大"的圆屏，能安全放字的地方只有约 165×165 逻辑像素 —— 大约 4 行 14px 中文。** 所以 §4 的呈现层规则必须是**一屏一主信息 + 一个动作**，凡是"卡片里再套三行说明"的设计在这块屏上都是废的。这也解释了为什么 `StatePayload` 要按"字段 + 优先级"下发，而不是让展示端自己排版。
 
-| 项目 | 能复用进 GT1005 + 1.75 这块屏 |
-| --- | --- |
-| **LVGL** v9（Zephyr / RT-Thread / ESP-IDF / Arduino 移植） | ✅ 唯一事实标准。`lv_arc`/`meter` 正好是圆形表盘；`LV_USE_ROTATE_DISPLAY` 自带软旋；9.1 起有 SVG 填充与 NES 调色板 dither。**我们的 200×200 + 无触控必须走 `lv_indev` 按键方案**（encoder/group API） |
-| **M5Stack M5GFX**（Apache-2.0） | 面板驱动抽象思路可借鉴；` autodetect` 对多面板形态有意义；M5Burner 是「浏览器 Web Serial 刷机 + 应用商店」的好范本 |
-| **ESP-Brocast**（乐鑫官方，ESP32-S3） | ✅ **音频走线已官方化**：I2S 接 ES8388 / ES7210（带 AEC 回消）的 1mic/2mic/3mic TX-RX 现成参考，正是 4.1 双麦那件事。**注意：仅 ESP32-S3** |
-| **xiaozhi-esp32**（Open-source AI chatbot，已有 2026.01 技术白皮书） | ✅ 目前最完整的「小智 AI 玩具」开源栈：VAD（vadf/sipeed）+ AEC + 多板型（含 M5Stack CoreS3、S3 Box、M5Stamp、ESP32-S3-LCD-1.47/2.41）。**若走语音陪伴，这是最短路径，别自研打断链路** |
-| **esp_event_network_examples** | ✅ 与本项目形态几乎同构：STA 配网失败自动起 SoftAP + 内置 Web UI，配网完自动关。可直接搬「手机是 AP、屏是 STA」那套 |
-| **RT-Thread / Lumminex** | ❌ 不建议为 GUI 引入 RTOS 重写；仅当 GT1005 侧已有 RTOS 约束时参考其图形栈 |
+### A.2 场景范围（按「有没有人天天看」排序，已按本项目可行性重排）
 
-### A.3 与本项目现有设计的三条硬对应（**不是建议，是缺口**）
+| 优先级 | 场景 | 依据 |
+| --- | --- | --- |
+| **P0** | **车辆/宠物状态仪表盘 + SOS 终端** | 圆环=表盘零学习成本；我们已有链路，是唯一有商业闭环的一屏 |
+| **P0** | **AI 语音陪伴的"脸"**（表情 + 聆听/思考/播报指示） | 方案文档 §1.2 定的就是"1.75C 刷**小智 AI 固件**"，这条不是可选项，是既有决策 |
+| **P1** | 桌面时钟/日历/天气/番茄钟 | 所有圆屏项目的默认归宿，做待机页正好 |
+| **P1** | 智能家居中控状态卡 | 生态成熟（HA Voice PE、M5Dial、esp32-smartdisplay），直接取现成协议，别自研 |
+| **P2** | 腕戴 / 骑行仪表 | Watchy、T-Watch-S3 有大量表盘可参考，但形态与车载冲突 |
+| **❌ 没查到** | 车载 OBD/HUD、老人陪伴、相机取景器的成熟开源实现 | 最接近的 CarPlayBLE 仅 190⭐ 且 2024 年后停更 —— 这几类当"要自己写"来排期 |
 
-1. **`dock_type` 是错的抽象。** ESP32 侧没有 device tree，`dock_type` 只能靠 ADC 分压电阻或 1-WID 芯片识别。行业做法是 **LVGL 侧按「朝向 + 可用输入设备 + 面板几何」三个参数自适应**，把逻辑抽成一次 `panel_profile` 协商 —— 这恰好是我们现在 `screen-link` hello 里缺的字段（现有 `avatar_mode` / `dock_type` 不解决布局问题）。
-2. **`wifilibrary` 方向反了。** 它假设屏是 ESP32、手机是中心。我们的设计里 **屏是 SoftAP / 手机是 STA，或反之**，两种都可行，但要么统一到 ESP-Brocast 的 UDP 多流音频，要么明确保留 WebSocket 文本 JSON。**协议必须择一，不能并存。**
-3. **双麦 AEC 的验证成本被低估，但屏侧驱动不是问题。** 微雪 1.75 官方 demo 是 **RP2040/RP2350**（与方案文档写的 ESP32-S3 冲突，§9 #7 要去核实物）。若是 Pico 系，ESP-Brocast 和 xiaozhi 那套现成语音栈全部用不上，AEC/ASR 只能自研或走手机侧。**好消息**：LVGL 9.5 已官方提供 RP2040/RP2350 驱动（Pico Display 2 例程，DMA 双缓冲 SPI + scan-detect 防撕裂），**GC9A01 只是换 init 表和 offsets，移植量不大**。
-4. **无参考实现：BLE 圆屏 ↔ 手机服务 这个精确组合，GitHub 上零结果**（`M5Stack`+`Android`+`BLE` 搜不到、`watchface`+`phone companion` 搜不到、`Pico Display 2`+`Android` 也搜不到）。所以 `protocol/screen-link.md` 的 `dock_type` / `avatar_mode` **没有上游可抄，只能我们自己维护** —— 好消息是唯一性，坏消息是文档漂移的风险全在我们身上。
+### A.3 固件/框架层（决定我们能少写一半代码）
 
-### A.4 可白嫖的表盘视觉参考
+| 项目 | license / 热度 | 对我们的意义 |
+| --- | --- | --- |
+| **微雪官方 1.75 示例仓库**（`waveshareteam/ESP32-S3-Touch-AMOLED-1.75`） | Apache-2.0，66⭐，有 CI/release/GNSS 例程 | ✅ **同板级支持包，出厂固件源就在这里 —— 启动工程照抄，别从 LVGL 通用文档起步** |
+| **espressif/esp-brookesia** | Apache-2.0，825⭐，活跃 | ✅ **手机式 Launcher 框架**，正是「换底座切场景」需要的桌面层（图标网格 + 页面路由 + 状态栏）。§4 的 `dock_type → 形态` 可以落在 Brookesia 的应用切换上 |
+| **78/xiaozhi-esp32** | MIT，32k⭐，日更 | ✅ **方案文档选定的固件路线**。⚠️ 官方支持列表里有微雪 **AMOLED-1.8 圆屏，1.75 未列**；但 Spotpear 已出 1.75 圆屏"小智开发板"，**移植成本主要在 CO5300 QSPI 时序与触摸坐标，不在语音链路**。配套服务端 `xinnan-tech/xiaozhi-esp32-server`（MIT，11k⭐） |
+| **espressif/esp-sr**（+ esp-skainet） | Espressif MIT，1.5k⭐，活跃 | ✅ **WakeNet 自定义唤醒词 + MultiNet 中文离线命令词**，S3 + PSRAM 可跑。**分工要写死：端侧只做唤醒和少量命令，对话一律走服务器** |
+| **ESP-Brocast**（乐鑫官方） | Apache-2.0 | I2S + ES8388/ES7210 的 1/2/3 麦 TX-RX 现成参考，双麦 AEC 的走线可对照；**仅 ESP32-S3，我们正好是** |
+| **LVGL** v9（≥9.5） | MIT | 唯一事实标准，微雪例程已含，双缓冲 + DMA + 防撕裂 |
+| **esphome/esphome** | GPLv3，12k⭐ | 自带 LVGL 组件 + HA 生态；**P1 家居场景可用，但 GPLv3 不适合进产品固件** |
+| 圆屏表盘社区参照 | **sqfmi/Watchy**（MIT，2.9k⭐）、**espruino/BangleApps**（MIT，581⭐）、`rzeldent/esp32-smartdisplay`（GPL-3.0，705⭐）、`Xinyuan-LilyGO/TTGO_TWatch_Library`（MIT，1k⭐） | ⚠️ **没有现成的"圆形组件库"**，最接近的就是 Watchy / BangleApps —— 圆形排布要自己攒 |
+| **M5Stack**（M5Unified / M5GFX MIT；bmorcelli/Launcher MIT 2.3k⭐） | — | 面板抽象与 Launcher 思路可借鉴；Tab5 是 ESP32-P4 生态，参考价值有限 |
+| `78/xiaozhi` 之外的组网参照：**meshtastic/firmware** | GPL-3.0，8.5k⭐ | LoRa 网状网，**交互模型可看，射频不是北斗**。**北斗短报文 + ESP32 的成熟开源项目：没查到** → 我们的 `core` 协议层没有上游，只能自己维护 |
+
+### A.4 与本项目现有设计的四条硬对应（**不是建议，是缺口**）
+
+1. **`dock_type` 是错的抽象。** ESP32 侧没有 device tree，`dock_type` 只能靠 ADC 分压电阻或 1-Wire 芯片识别。行业做法是**按「面板几何 + 可用输入设备 + 朝向」三参数自适应**（Brookesia 就是这么分层应用的）。这恰好是 `screen-link` hello 里缺的字段 —— 现有 `avatar_mode` / `dock_type` 不解决布局问题。**建议 hello 增补 `screen: {w, h, round, touch, ppi}`。**
+2. **屏有触摸，§4 的输入模型要改。** 之前按"无触控、靠底座按键"设计的卡片路由作废：主输入是触摸（点按 + 边缘手势），底座按键退化成 SOS 硬键和"上一屏/下一屏"两个键。⚠️ 466² 圆屏的**触摸目标不能小于 8–9mm**，车载颠簸场景还要再放大。
+3. **语音链路已经现成，端到端延迟才是问题。** 小智路线：Opus 16k 流式上行，ASR 可选火山 / FunASR-SenseVoice（GPU 上 10s 音频约 70ms），TTS 可选 CosyVoice / 火山 / EdgeTTS，**端到端体感 1–2s**。所以 §3.3 亲子场景的技术风险不在"能不能做"，在**离线/蜂窝断链时的降级体验** —— 卫星链路绝对撑不住语音，必须明确"没网就不聊"的 UI 说法。
+4. **协议方向要择一。** ESP-Brocast 走 UDP 多流音频、`esp_event_network_examples` 走 SoftAP + Web，我们现在走 **WebSocket 文本 JSON**。三种都能配网，但**并存等于三份心跳和三套重连**。建议：控制面保留 WebSocket JSON，音频面另开一条 UDP（小智本来就是 Opus over WebSocket/UDP，可对齐）。
+
+### A.5 表盘视觉参考（**按"能不能直接对照"排序**）
 
 | 项目 | 结论 |
 | --- | --- |
-| **ESP32-C3 Round Dashboard**（241⭐，1.47 GC9A01 200×200，ST7789 + LVGL） | 尺寸/分辨率与我们完全一致 —— **SOC + 电压 + 电流 + 功率 + 容量五项，直接改名即可当「车辆状态表盘」** |
-| **WT-OBD**（OBD-II + ELM327 + ESP32 + LVGL 8.3） | ⚠️ LVGL 8.3 老；价值在 **ELM327 的 PID ↔ 我们协议字段的映射表**，可抄成「车宠」数据源规范 |
-| **center-cluster-esp32-p4**（480² 圆 LCD 数字仪表，双核 + RP2040 遥测） | ⚠️ 非商用授权（source-available）；**只读代码，不复制**，抄布局与刷新策略 |
-| **ESP32 Auto Gauge Cluster**（ELM327→蓝牙→Web 实时显示） | ✅ Web 路线参考：演示日可用浏览器当第二块屏 |
-| **LilyGO T-Display-S3-Long Dash**（OBD2、硬件旋转） | ✅ 现成硬件 + OBD2 生态，若要做独立车载子设备可直接选型 |
-| **ESP32-Home-Assistant-Smart-Display**（Round/2.8”） | ✅ HA 状态卡形态可借；⚠️ 非圆屏专用 |
-| **DIY round digital dash**（128px，弧指针） | 128px 弧指针做法 → 200px 更宽松，但**证明圆弧表盘在小尺寸仍可读**，指针粗细可按 1.5 倍放大 |
+| **微雪 1.75 官方例程 + Brookesia** | ✅ 面板驱动、触摸、QSPI 时序全部现成，**这是唯一"同板"的参考，优先于一切** |
+| **Watchy / BangleApps** | 圆形表盘布局与"圆形组件缺失"的补丁思路，抄排布不抄框架 |
+| **ESP32-C3 Round Dashboard**（241⭐，1.47 GC9A01 200×200 + LVGL） | ⚠️ 分辨率只有我们一半，**布局思路可用，驱动不可用**；SOC/电压/电流/功率/容量五段环直接改名即成"车辆状态表盘" |
+| **WT-OBD**（OBD-II + ELM327 + ESP32 + LVGL 8.3） | 价值在 **ELM327 PID ↔ 协议字段映射表**；⚠️ LVGL 8.3 老 |
+| **center-cluster-esp32-p4**（480² 圆 LCD 仪表，P4 + RP2350 遥测） | ⚠️ source-available **非商用，只读不抄**；它是 P4 平台，与我们的 S3 不同栈 |
+| **LilyGO T-Display-S3-Long Dash** / adafruit R4D-2200 DASH / mrfuchsia esp32-turbo-9 | 现成硬件 + OBD2 生态，若做独立车载子设备可直接选型 |
+| **ESP32-Home-Assistant-Smart-Display**、Home Assistant **Voice PE**、M5 **Dial** | 家居状态卡形态可借 |
 
-### A.5 对「手机 App 当网关」这条路线的直接支持
+### A.6 对「手机 App 当网关」这条路线的直接支持
 
 | 项目 | 意义 |
 | --- | --- |
-| **android-observableandroidpad / DeviceConnectManager**（Apache-2.0，AOSP 官方） | Android 端 USB 串口连外设的官方参考，GT1005 RS232 走 USB 转 TTL 时可读它的权限与热插拔处理 |
-| **BLE GAIGO dashboard + ESP32 Bridge**（MIT） | ✅ **「ESP32 桥接 BLE 设备 + 屏显仪表盘」与我们「手机桥接 GT1005 + 圆屏显示」是同构设计**，其 BLE 状态机与断连重试可直接参考 |
-| **carDash**（MIT）/ Ulanzi OpenMQTTGateway（GPL-3.0）/ D-STVY DIY Smartwatch（CERN-OHL-S）/ ESP32-OpenIPC（TSCLA） | ⚠️ 后三个含 copyleft，**只能读思路、不能复制代码** |
-| **ESP32-BLE-Gamepad**（GPL-2.0，有商业授权渠道） | HID 路线；**GPL-2.0，用前买授权，别当免费组件** |
-| **LVGL 自定义屏 + 实体旋钮** / LVGL Rotary Encoder with BLE HID | 无触控时**旋钮比按键的信息密度高一个量级**，底座按键应优先做旋钮（圆屏场景几乎一致结论） |
-
-### A.6 与本项目 MCU 的匹配度（**微雪 1.75 官方 demo 是 RP2040/RP2350，与方案文档写的 ESP32-S3 不一致，见 §9 #7**）
-
-| 项目 | 与我们的相关性 |
-| --- | --- |
-| **Waveshare 官方 demo wiki**（13.51" Circular LCD on RP2040 / RP2350，含 GC9A01 例程） | ✅ **同 MCU、同面板、同工具链** —— 启动工程照抄即可，比看通用文档快 |
-| **watchga**（MIT，1.39" GC9A01 240² + **三按键** + LVGL + MicroPython） | ✅ 输入模型与 1.75 圆屏一致：**「按键驱动 LVGL 焦点导航」是底座无触控时最直接的参考实现**；⚠️ 它是 BLE  Peripheral 连官方 App，不是我们的架构，**只抄输入与表盘，不抄协议** |
-| **LVGL 9.5.1**（GitHub release） | ✅ **版本下限定在 9.5.1** —— 9.5 才官方提供 RP2040/RP2350 驱动（Pico Display 2，240×240 ST7789，30MHz QSPI DMA 双缓冲 + scan-detect 防撕裂），并且**9.5.1 专门修了 GC9A01 的显示旋转 bug**。换 init 表 + offsets 即可复用到我们的屏 |
-| **Raspberry Pi Pico W 手机 App 控制 LED**（Adafruit Learn，非 GPL） | ✅ **手机 ⇄ MicroPython/Python 设备的双向 JSON 命令示范，正是 `screen-link` 的形态**，可作协议示例参照 |
-| Pico Zero Mini Dashboard（MIT，RP2040 + ST7789 + 三按键 + 电池 + 桩针充电） | 尺寸/按键数完全一致；⚠️ 非圆形且是本地传感器，**只借按键→LVGL 导航的映射** |
-| RT-Thread `dev/rt_gpu`（LVGL 7.4） | ❌ 不要基于它起步，LVGL 7 已被 9.5 的 RP2040 DMA + 旋转方案全面超越 |
+| **AOSP `DeviceConnectManager` / android-observableandroidpad**（Apache-2.0） | Android 端 USB 串口连外设的官方参考，GT1005 RS232 走 USB 转 TTL 时读它的权限与热插拔处理 |
+| **BLE GAIGO dashboard + ESP32 Bridge**（MIT） | 「ESP32 桥接 BLE 设备 + 屏显仪表盘」与我们「手机桥接 GT1005 + 圆屏显示」同构，BLE 状态机与断连重试可参考 |
+| `carDash`（MIT）/ Ulanzi OpenMQTTGateway（GPL-3.0）/ D-STVY Smartwatch（CERN-OHL-S）/ ESP32-OpenIPC（TSCLA） | ⚠️ 后三个含 copyleft，**只读思路、不复制代码** |
+| **ESP32-BLE-Gamepad**（GPL-2.0，有商业授权渠道） | HID 路线用前买授权，别当免费组件 |
+| **旋钮（encoder）+ LVGL group/focus** | 我们屏有触摸，但**车载手套/颠簸下旋钮比触摸可靠**，底座仍建议留一个旋钮 |
 
 ### A.7 三条必须避开的坑
 
-1. **没有现成「车 + BLE + 圆屏」端到端开源项目**。最近的是 OBD-II ESP32 + LVGL 一族（WT-OBD / carDash / ESP32-C3 Round Dashboard）和 BLE→ESP32→屏一族（GAIGO），**两条线的拼接处（协议适配层）必须我们自己维护** —— 也就是现在 `core` 里那层的价值所在。
-2. **`wifilibrary` / SoftAPWebServer 假设屏是「中心」，与手机网关架构相反。** 选它等于把协议方向倒过来，成本 > 收益。
-3. **LVGL 8.x → 9.x 迁移是隐性成本**，WT-OBD / 多数 2024 年前的项目在 8.3，`lv_arc` 与显示旋转 API 有 breaking change，抄代码前先对齐版本。
+1. **`dock_type` / `avatar_mode` 没有上游可抄。** 「BLE/Wi-Fi 圆屏 ⇄ 手机自建服务」这个精确组合在 GitHub 上零结果（`M5Stack`+`Android`+`BLE`、`watchface`+`phone companion` 都搜不到）。唯一性归我们，**文档漂移的风险也全归我们** —— 这也是 DECISIONS.md 里契约版本要写死的原因。
+2. **LVGL 8.x → 9.x 迁移是隐性成本。** WT-OBD 及多数 2024 年前的项目在 8.3，`lv_arc` 与显示旋转 API 有 breaking change，抄代码前先对齐版本（**我们的下限定 LVGL 9.5**）。
+3. **别为图形界面引入第二套 RTOS。** ESP-IDF + LVGL 9.5 在 S3 上已经够；RT-Thread 的 GPU/显示例程停在 LVGL 7.4，从那儿起步等于先还一笔债。
 
 ### A.8 建议抄的三件事
 
-1. 抄 ESP-C3-ROUND-DASHBOARD 的**表盘布局与 LVGL 配置**（我们同为 200×200 GC9A01，面板驱动可直接对照）。
-2. 抄 **ESP-Brocast 的音频走线**（ES8388/ES7210 AEC），把双麦验证周期压到最短 —— **前提是把展示端换成 ESP32-S3**（§9 #7）。继续用微雪 RP2040/RP2350 这块板，这条抄不了。
-3. 抄 **esp_event_network_examples 的 SoftAP 配网状态机**，把「手机热点 + 屏做 STA」那条路做扎实。
+1. **先把微雪官方 1.75 例程 + esp-brookesia 跑起来**（同板、同驱动、同触摸），再谈我们自己的卡片层 —— 这一条能把展示端固件的工作量砍掉一半。
+2. **语音不自研链路**：走小智（`xiaozhi-esp32` + 自建 server），端侧只用 esp-sr 做唤醒词和少量离线命令；**1.75 未在官方支持列表里，移植预算按"屏+触摸适配"估，不要按"语音适配"估**。
+3. **抄 `esp_event_network_examples` 的 SoftAP 配网状态机**：STA 连不上自动起 SoftAP + 内置 Web 配网页，配完自动关 —— 现场没有可用 Wi-Fi 时这就是救场路径。
 
 来源：
-- [LVGL 官网](https://lvgl.io/) · [LVGL GitHub](https://github.com/lvgl/lvgl) · [LVGL 9 移植文档](https://docs.lvgl.io/9.3/porting/index.html)
-- [traviscea/center-cluster-esp32-p4](https://github.com/traviscea/center-cluster-esp32-p4) · [s0lness/awesome-esp32](https://github.com/s0lness/awesome-esp32) · [M5ez/M5ez](https://github.com/M5ez/M5ez) · [LVGL 论坛：Waveshare ESP32-S3 1.46 圆屏 UI](https://forum.lvgl.io/t/waveshare-esp32-s3-1-46-round-lcd/24008)
-- [ESP-Brocast](https://docs.espressif.com/projects/esp-adf-ids-release/en/main-esp32/esp-brocast/index.html) · [ESP-Brocast GitHub](https://github.com/espressif/esp-brocast) · [ESP32-S3-USB-Audio 官方说明](https://dl.espressif.com/dl/speech/V4/zh_cn/esp-va/vadf/zh_CN/latest/_downloads/77b4797d44162380b7e904447969187a/ESP32-S3-USB-Audio.pdf)
-- [xiaozhi-esp32（小智 AI 聊天机器人）](https://github.com/78/xiaozhi-esp32) · [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server)
-- [espressif/esp_event_network_examples](https://github.com/espressif/esp_event_network_examples) · [esp-event-net 文档](https://espressif.github.io/esp-event-net/)
-- [adafruit/ESP32-R4D-2200-02W-DASH](https://github.com/adafruit/ESP32-R4D-2200-02W-DASH) · [mrfuchsia/esp32-turbo-9](https://github.com/mrfuchsia/esp32-turbo-9) · [Lumminex（RT-Thread 圈）](https://device.cirotim.com/zh-CN/docs/rt-smart_display/latest/)
-- [Waveshare 圆屏 RP2040/RP2350 demo wiki](https://www.waveshare.com/wiki/13.51inch_round LCD_(0401906012)#Demo_and_Application?@/13.51inch_round_LCD_(0401906012)/) · [LVGL 9.5.1 release](https://github.com/lvgl/lvgl/releases/tag/v9.5.1) · [watchga（GitHub Topics）](https://github.com/topics/watchga) · [Adafruit：用 Raspberry Pi Pico W 连接移动设备（AppBridge）](https://www.adafruit.com/license?product=4889) · [AppBridge 文档](https://appbridge.dev/documentation)
+- [微雪 ESP32-S3-Touch-AMOLED-1.75 文档与资源](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.75/Resources-And-Documents) · [微雪 1.75 官方示例仓库](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75)
+- [espressif/esp-brookesia](https://github.com/espressif/esp-brookesia) · [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) · [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) · [乐鑫官方小智文档](https://docs.espressif.com/projects/esp-iot-solution/zh_CN/latest/ai/xiaozhi.html) · [Spotpear 1.75 圆屏小智开发板](https://spotpear.cn/wiki/ESP32-S3-1.75-inch-AMOLED-Round-Display-Capacitive-TouchScreen.html)
+- [espressif/esp-sr](https://github.com/espressif/esp-sr) · [esp-skainet](https://github.com/espressif/esp-skainet) · [SenseVoice 集成讨论](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/3197) · [端到端延迟实测](https://blog.csdn.net/gitblog_01175/article/details/151433971)
+- [ESP-Brocast](https://github.com/espressif/esp-brocast) · [espressif/esp_event_network_examples](https://github.com/espressif/esp_event_network_examples) · [LVGL](https://lvgl.io/) · [LVGL 圆屏 issue #7750](https://github.com/lvgl/lvgl/issues/7750) · [LVGL 9.5.1 release](https://github.com/lvgl/lvgl/releases/tag/v9.5.1)
+- [sqfmi/Watchy](https://github.com/sqfmi/Watchy) · [BangleApps](https://github.com/espruino/BangleApps) · [rzeldent/esp32-smartdisplay](https://github.com/rzeldent/esp32-smartdisplay) · [TTGO_TWatch_Library](https://github.com/Xinyuan-LilyGO/TTGO_TWatch_Library) · [Home Assistant Voice PE](https://github.com/esphome/home-assistant-voice-pe) · [M5 Dial](https://shop.m5stack.com/products/m5stack-dial-v1-1)
+- [esphome](https://github.com/esphome/esphome) · [M5Unified / M5GFX](https://github.com/m5stack/M5GFX) · [bmorcelli/Launcher](https://github.com/bmorcelli/Launcher) · [meshtastic/firmware](https://github.com/meshtastic/firmware)
+- [traviscea/center-cluster-esp32-p4](https://github.com/traviscea/center-cluster-esp32-p4) · [s0lness/awesome-esp32](https://github.com/s0lness/awesome-esp32) · [M5ez](https://github.com/M5ez/M5ez) · [adafruit R4D DASH](https://github.com/adafruit/ESP32-R4D-2200-02W-DASH) · [esp32-turbo-9](https://github.com/mrfuchsia/esp32-turbo-9)
+
 
 ---
 
@@ -368,7 +380,7 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 - **KidSafe**（`xMansour/KidSafe`，MIT）：应用屏蔽、时长管控、定位的家长端 IA，**可复用代码**，对应 §3.3 家长管控 P0。
 - ChildScreenTime/cst：**无 license 文件，只能看不能抄**。
 - CDC「Milestone Tracker」：闭源，但**里程碑内容规范是权威参照**，别自己编育儿话术。
-- 语音玩具的 **App 侧配套开源实现没查到**（开源方案基本都在 ESP32 设备端，如 ElatoAI / xiaozhi 一族）→ 意味着亲子场景 App 侧没有捷径。
+- 语音玩具：**设备端和服务端都有成熟开源**（`xiaozhi-esp32` MIT 32k⭐ + `xiaozhi-esp32-server` MIT 11k⭐），但 **Android/iOS 手机侧配套 App 没查到可复用的实现** → 亲子场景里"手机端"这一块是我们自己的活，别指望现成。
 - **COPPA 硬约束**（FTC FAQ）：中性年龄门、13 岁以下需可验证家长同意、默认不收集、语音/图像须承诺即删、禁止行为广告。→ §6 的数据表就是按这条清单写的，**家长账号体系 + 儿童模式独立数据域 + 语音本地或临时处理**，三件缺一不可。
 
 ### B.5 数字分身与 A2A
