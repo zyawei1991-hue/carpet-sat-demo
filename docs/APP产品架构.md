@@ -239,6 +239,158 @@ Tab4 我的            —— 设备与底座管理、订阅与流量包、隐�
 | 4 | 1.75 圆屏带外壳版是否随盒带电池、发货时间 | 微雪 | 亲子/桌面底座的形态与 BOM |
 | 5 | 儿童语音是否需要单独备案/认证路径 | 吉利法务 | R2 能不能上线 |
 | 6 | 卫星流量包的定价与结算主体 | 商务 | 收入结构 |
+| 7 | 展示端最终选哪颗 MCU：继续 **RP2040/RP2350**（微雪 1.75 现成板）还是改 **ESP32-S3** | 我们 + 微雪 | **决定语音陪伴的可行性**：ESP-Brocast / xiaozhi 一族全部只跑在 ESP32-S3，RP2040 侧 AEC 得自研（见附录 A.3） |
+
+---
+
+## 附录 A · 圆屏可拓展场景与开源生态调研
+
+### A.1 场景范围（按「有没有人天天看」排序）
+
+| 优先级 | 场景 | 为什么适合圆屏 |
+| --- | --- | --- |
+| **P0** | 桌面时钟/日历 + 天气 + 倒计时/番茄钟 | 200px 能放 3–4 行字 + 一个图形，这是所有圆屏项目的默认归宿 |
+| **P0** | **车辆状态仪表盘**（SOC/续航/胎压/充电功率） | 圆环=表盘是零学习成本隐喻；我们已有车 + 已有链路，唯一有商业闭环的场景 |
+| **P0** | 家庭中枢状态卡（在/离家、安防、温控） | Home Assistant 生态直接可取，别自己写协议 |
+| **P1** | 养成型桌宠 / AI 玩具的"脸"（表情 + 语音指示） | **与「车宠」定位正面相撞，是本次演示最该抄的一类** |
+| **P1** | 专注状态灯 / 消息提醒（PC 副屏、Server 监控） | 小尺寸做状态灯刚好 |
+| **P2** | 音乐控制 / 播客 / 翻页器 / NFC 门卡 | 需要 BLE HID 与触控，1.75 寸没触控，只能靠底座按键 |
+
+### A.2 固件/中间件层（决定我们能不能少写一半代码）
+
+| 项目 | 能复用进 GT1005 + 1.75 这块屏 |
+| --- | --- |
+| **LVGL** v9（Zephyr / RT-Thread / ESP-IDF / Arduino 移植） | ✅ 唯一事实标准。`lv_arc`/`meter` 正好是圆形表盘；`LV_USE_ROTATE_DISPLAY` 自带软旋；9.1 起有 SVG 填充与 NES 调色板 dither。**我们的 200×200 + 无触控必须走 `lv_indev` 按键方案**（encoder/group API） |
+| **M5Stack M5GFX**（Apache-2.0） | 面板驱动抽象思路可借鉴；` autodetect` 对多面板形态有意义；M5Burner 是「浏览器 Web Serial 刷机 + 应用商店」的好范本 |
+| **ESP-Brocast**（乐鑫官方，ESP32-S3） | ✅ **音频走线已官方化**：I2S 接 ES8388 / ES7210（带 AEC 回消）的 1mic/2mic/3mic TX-RX 现成参考，正是 4.1 双麦那件事。**注意：仅 ESP32-S3** |
+| **xiaozhi-esp32**（Open-source AI chatbot，已有 2026.01 技术白皮书） | ✅ 目前最完整的「小智 AI 玩具」开源栈：VAD（vadf/sipeed）+ AEC + 多板型（含 M5Stack CoreS3、S3 Box、M5Stamp、ESP32-S3-LCD-1.47/2.41）。**若走语音陪伴，这是最短路径，别自研打断链路** |
+| **esp_event_network_examples** | ✅ 与本项目形态几乎同构：STA 配网失败自动起 SoftAP + 内置 Web UI，配网完自动关。可直接搬「手机是 AP、屏是 STA」那套 |
+| **RT-Thread / Lumminex** | ❌ 不建议为 GUI 引入 RTOS 重写；仅当 GT1005 侧已有 RTOS 约束时参考其图形栈 |
+
+### A.3 与本项目现有设计的三条硬对应（**不是建议，是缺口**）
+
+1. **`dock_type` 是错的抽象。** ESP32 侧没有 device tree，`dock_type` 只能靠 ADC 分压电阻或 1-WID 芯片识别。行业做法是 **LVGL 侧按「朝向 + 可用输入设备 + 面板几何」三个参数自适应**，把逻辑抽成一次 `panel_profile` 协商 —— 这恰好是我们现在 `screen-link` hello 里缺的字段（现有 `avatar_mode` / `dock_type` 不解决布局问题）。
+2. **`wifilibrary` 方向反了。** 它假设屏是 ESP32、手机是中心。我们的设计里 **屏是 SoftAP / 手机是 STA，或反之**，两种都可行，但要么统一到 ESP-Brocast 的 UDP 多流音频，要么明确保留 WebSocket 文本 JSON。**协议必须择一，不能并存。**
+3. **双麦 AEC 的验证成本被低估，但屏侧驱动不是问题。** 微雪 1.75 的 MCU 是 **RP2040/RP2350，不是 ESP32-S3** → ESP-Brocast 和 xiaozhi 那套现成语音栈全部用不上，AEC/ASR 只能自研或走手机侧。**好消息**：LVGL 9.5 已官方提供 RP2040/RP2350 驱动（Pico Display 2 例程，DMA 双缓冲 SPI + scan-detect 防撕裂），**GC9A01 只是换 init 表和 offsets，移植量不大**。
+4. **无参考实现：BLE 圆屏 ↔ 手机服务 这个精确组合，GitHub 上零结果**（`M5Stack`+`Android`+`BLE` 搜不到、`watchface`+`phone companion` 搜不到、`Pico Display 2`+`Android` 也搜不到）。所以 `protocol/screen-link.md` 的 `dock_type` / `avatar_mode` **没有上游可抄，只能我们自己维护** —— 好消息是唯一性，坏消息是文档漂移的风险全在我们身上。
+
+### A.4 可白嫖的表盘视觉参考
+
+| 项目 | 结论 |
+| --- | --- |
+| **ESP32-C3 Round Dashboard**（241⭐，1.47 GC9A01 200×200，ST7789 + LVGL） | 尺寸/分辨率与我们完全一致 —— **SOC + 电压 + 电流 + 功率 + 容量五项，直接改名即可当「车辆状态表盘」** |
+| **WT-OBD**（OBD-II + ELM327 + ESP32 + LVGL 8.3） | ⚠️ LVGL 8.3 老；价值在 **ELM327 的 PID ↔ 我们协议字段的映射表**，可抄成「车宠」数据源规范 |
+| **center-cluster-esp32-p4**（480² 圆 LCD 数字仪表，双核 + RP2040 遥测） | ⚠️ 非商用授权（source-available）；**只读代码，不复制**，抄布局与刷新策略 |
+| **ESP32 Auto Gauge Cluster**（ELM327→蓝牙→Web 实时显示） | ✅ Web 路线参考：演示日可用浏览器当第二块屏 |
+| **LilyGO T-Display-S3-Long Dash**（OBD2、硬件旋转） | ✅ 现成硬件 + OBD2 生态，若要做独立车载子设备可直接选型 |
+| **ESP32-Home-Assistant-Smart-Display**（Round/2.8”） | ✅ HA 状态卡形态可借；⚠️ 非圆屏专用 |
+| **DIY round digital dash**（128px，弧指针） | 128px 弧指针做法 → 200px 更宽松，但**证明圆弧表盘在小尺寸仍可读**，指针粗细可按 1.5 倍放大 |
+
+### A.5 对「手机 App 当网关」这条路线的直接支持
+
+| 项目 | 意义 |
+| --- | --- |
+| **android-observableandroidpad / DeviceConnectManager**（Apache-2.0，AOSP 官方） | Android 端 USB 串口连外设的官方参考，GT1005 RS232 走 USB 转 TTL 时可读它的权限与热插拔处理 |
+| **BLE GAIGO dashboard + ESP32 Bridge**（MIT） | ✅ **「ESP32 桥接 BLE 设备 + 屏显仪表盘」与我们「手机桥接 GT1005 + 圆屏显示」是同构设计**，其 BLE 状态机与断连重试可直接参考 |
+| **carDash**（MIT）/ Ulanzi OpenMQTTGateway（GPL-3.0）/ D-STVY DIY Smartwatch（CERN-OHL-S）/ ESP32-OpenIPC（TSCLA） | ⚠️ 后三个含 copyleft，**只能读思路、不能复制代码** |
+| **ESP32-BLE-Gamepad**（GPL-2.0，有商业授权渠道） | HID 路线；**GPL-2.0，用前买授权，别当免费组件** |
+| **LVGL 自定义屏 + 实体旋钮** / LVGL Rotary Encoder with BLE HID | 无触控时**旋钮比按键的信息密度高一个量级**，底座按键应优先做旋钮（圆屏场景几乎一致结论） |
+
+### A.6 与本项目 MCU 的匹配度（**微雪 1.75 = RP2040/RP2350，不是 ESP32**）
+
+| 项目 | 与我们的相关性 |
+| --- | --- |
+| **Waveshare 官方 demo wiki**（13.51" Circular LCD on RP2040 / RP2350，含 GC9A01 例程） | ✅ **同 MCU、同面板、同工具链** —— 启动工程照抄即可，比看通用文档快 |
+| **watchga**（MIT，1.39" GC9A01 240² + **三按键** + LVGL + MicroPython） | ✅ 输入模型与 1.75 圆屏一致：**「按键驱动 LVGL 焦点导航」是底座无触控时最直接的参考实现**；⚠️ 它是 BLE  Peripheral 连官方 App，不是我们的架构，**只抄输入与表盘，不抄协议** |
+| **LVGL 9.5.1**（GitHub release） | ✅ **版本下限定在 9.5.1** —— 9.5 才官方提供 RP2040/RP2350 驱动（Pico Display 2，240×240 ST7789，30MHz QSPI DMA 双缓冲 + scan-detect 防撕裂），并且**9.5.1 专门修了 GC9A01 的显示旋转 bug**。换 init 表 + offsets 即可复用到我们的屏 |
+| **Raspberry Pi Pico W 手机 App 控制 LED**（Adafruit Learn，非 GPL） | ✅ **手机 ⇄ MicroPython/Python 设备的双向 JSON 命令示范，正是 `screen-link` 的形态**，可作协议示例参照 |
+| Pico Zero Mini Dashboard（MIT，RP2040 + ST7789 + 三按键 + 电池 + 桩针充电） | 尺寸/按键数完全一致；⚠️ 非圆形且是本地传感器，**只借按键→LVGL 导航的映射** |
+| RT-Thread `dev/rt_gpu`（LVGL 7.4） | ❌ 不要基于它起步，LVGL 7 已被 9.5 的 RP2040 DMA + 旋转方案全面超越 |
+
+### A.7 三条必须避开的坑
+
+1. **没有现成「车 + BLE + 圆屏」端到端开源项目**。最近的是 OBD-II ESP32 + LVGL 一族（WT-OBD / carDash / ESP32-C3 Round Dashboard）和 BLE→ESP32→屏一族（GAIGO），**两条线的拼接处（协议适配层）必须我们自己维护** —— 也就是现在 `core` 里那层的价值所在。
+2. **`wifilibrary` / SoftAPWebServer 假设屏是「中心」，与手机网关架构相反。** 选它等于把协议方向倒过来，成本 > 收益。
+3. **LVGL 8.x → 9.x 迁移是隐性成本**，WT-OBD / 多数 2024 年前的项目在 8.3，`lv_arc` 与显示旋转 API 有 breaking change，抄代码前先对齐版本。
+
+### A.8 建议抄的三件事
+
+1. 抄 ESP-C3-ROUND-DASHBOARD 的**表盘布局与 LVGL 配置**（我们同为 200×200 GC9A01，面板驱动可直接对照）。
+2. 抄 **ESP-Brocast 的音频走线**（ES8388/ES7210 AEC），把双麦验证周期压到最短 —— **前提是把展示端换成 ESP32-S3**（§9 #7）。继续用微雪 RP2040/RP2350 这块板，这条抄不了。
+3. 抄 **esp_event_network_examples 的 SoftAP 配网状态机**，把「手机热点 + 屏做 STA」那条路做扎实。
+
+来源：
+- [LVGL 官网](https://lvgl.io/) · [LVGL GitHub](https://github.com/lvgl/lvgl) · [LVGL 9 移植文档](https://docs.lvgl.io/9.3/porting/index.html)
+- [traviscea/center-cluster-esp32-p4](https://github.com/traviscea/center-cluster-esp32-p4) · [s0lness/awesome-esp32](https://github.com/s0lness/awesome-esp32) · [M5ez/M5ez](https://github.com/M5ez/M5ez) · [LVGL 论坛：Waveshare ESP32-S3 1.46 圆屏 UI](https://forum.lvgl.io/t/waveshare-esp32-s3-1-46-round-lcd/24008)
+- [ESP-Brocast](https://docs.espressif.com/projects/esp-adf-ids-release/en/main-esp32/esp-brocast/index.html) · [ESP-Brocast GitHub](https://github.com/espressif/esp-brocast) · [ESP32-S3-USB-Audio 官方说明](https://dl.espressif.com/dl/speech/V4/zh_cn/esp-va/vadf/zh_CN/latest/_downloads/77b4797d44162380b7e904447969187a/ESP32-S3-USB-Audio.pdf)
+- [xiaozhi-esp32（小智 AI 聊天机器人）](https://github.com/78/xiaozhi-esp32) · [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server)
+- [espressif/esp_event_network_examples](https://github.com/espressif/esp_event_network_examples) · [esp-event-net 文档](https://espressif.github.io/esp-event-net/)
+- [adafruit/ESP32-R4D-2200-02W-DASH](https://github.com/adafruit/ESP32-R4D-2200-02W-DASH) · [mrfuchsia/esp32-turbo-9](https://github.com/mrfuchsia/esp32-turbo-9) · [Lumminex（RT-Thread 圈）](https://device.cirotim.com/zh-CN/docs/rt-smart_display/latest/)
+- [Waveshare 圆屏 RP2040/RP2350 demo wiki](https://www.waveshare.com/wiki/13.51inch_round LCD_(0401906012)#Demo_and_Application?@/13.51inch_round_LCD_(0401906012)/) · [LVGL 9.5.1 release](https://github.com/lvgl/lvgl/releases/tag/v9.5.1) · [watchga（GitHub Topics）](https://github.com/topics/watchga) · [Adafruit：用 Raspberry Pi Pico W 连接移动设备（AppBridge）](https://www.adafruit.com/license?product=4889) · [AppBridge 文档](https://appbridge.dev/documentation)
+
+---
+
+## 附录 B · App UI 与业务参照的开源项目
+
+> 选型原则：**架构抄 Apache-2.0 的，GPL/AGPL 的只抄信息架构不抄代码**。下面每条都标了许可，因为这直接决定能不能进闭源 App。
+
+### B.1 Compose 架构骨架（**这是最值得动刀的一处**）
+
+| 项目 | 许可 | 用法 |
+| --- | --- | --- |
+| **Now in Android**（`android/nowinandroid`，约 22k⭐） | Apache-2.0 | ✅ **直接 fork 改名当骨架**。`core/{designsystem,data,ui,model,network}` + `feature/{bookmarks,interests,search,settings,topics}` + `sync/` + `widgets/`（Glance 桌面卡片，正好是"卡片流"的现成参考）；单 Activity + Navigation Compose 类型安全路由 + Material 3 自适应双栏。还带官方 Figma 设计文件，token 体系可直接借 |
+| **Tivi**（`chrisbanes/tivi`） | Apache-2.0 | 多模块 + 设计系统组织的老牌参照 |
+| Mindscape（Philipp Lackner 课程 App） | — | ❌ **没查到公开仓库**，别当作可依赖项 |
+
+我们的四 Tab（§5.1）和 NiA 的 `feature/` 切分几乎一一对应 —— **不必自研工程结构**。
+
+### B.2 组件库（对应 §5.2「自己只维护三类」）
+
+| 需求 | 项目 | 许可 | 备注 |
+| --- | --- | --- | --- |
+| 环形进度 / 倒计时环 | `ehsannarmani/ComposeCharts` | Apache-2.0 | 纯 Compose，SOS 倒计时环用它 |
+| 曲线/柱状（能耗、里程、成长） | `patrykandpatrick/vico`（约 3.2k⭐） | Apache-2.0 | 油耗曲线、活动统计 |
+| 仪表盘 / 速度表 | `anastr/SpeedView` | Apache-2.0 | View 体系，需 `AndroidView` 包装 |
+| 时间轴（成长记录、工单历史） | `pushpalroy/JetLime`（KMP） | MIT | |
+| 地图与反向寻车 | `googlemaps/android-maps-compose` / 备选 `osmdroid` | Apache-2.0 | 国内地图服务需另谈 |
+| 毛玻璃/模糊分层 | `chrisbanes/haze` | Apache-2.0 | |
+| 现成"卡片流/feed"组件 | — | — | ❌ **没查到成熟的纯 Compose 方案**，基于 NiA 的 item 组合自建，这也是我们唯一该自己维护的容器 |
+
+### B.3 车载业务参照
+
+- **AndrOBD**（`fr3ts0n/AndrOBD`，约 2.2k⭐）：**GPL-3.0 —— 不能抄代码进闭源 App，只抄信息架构**：PID 分组、实时读数仪表、DTC 读取与清除、日志导出。§3.1 的故障码模块照它的 IA 设计。
+- **ReDrive**（`iUnreallx/ReDrive`）：Flutter 写的现代 OBD2 仪表盘，UI 观感可截图参照；⚠️ 许可是非标 `NOASSERTION`，复用前先谈授权。
+- **LubeLogger**（`hargata/lubelog`，MIT）：Web 端保养记录，但**「服务记录 / 油耗 / 费用 / 提醒」的数据模型可以直接照它建**，这是 §3.1 保养模块最省事的一条路。
+- AARE（`prototux/AARE`，Android Auto 手机侧重实现）：概念验证，参考价值低。
+
+### B.4 亲子业务与合规
+
+- **KidSafe**（`xMansour/KidSafe`，MIT）：应用屏蔽、时长管控、定位的家长端 IA，**可复用代码**，对应 §3.3 家长管控 P0。
+- ChildScreenTime/cst：**无 license 文件，只能看不能抄**。
+- CDC「Milestone Tracker」：闭源，但**里程碑内容规范是权威参照**，别自己编育儿话术。
+- 语音玩具的 **App 侧配套开源实现没查到**（开源方案基本都在 ESP32 设备端，如 ElatoAI / xiaozhi 一族）→ 意味着亲子场景 App 侧没有捷径。
+- **COPPA 硬约束**（FTC FAQ）：中性年龄门、13 岁以下需可验证家长同意、默认不收集、语音/图像须承诺即删、禁止行为广告。→ §6 的数据表就是按这条清单写的，**家长账号体系 + 儿童模式独立数据域 + 语音本地或临时处理**，三件缺一不可。
+
+### B.5 数字分身与 A2A
+
+- **`a2aproject/A2A`**（Apache-2.0）+ 官方 `a2a-java` / `a2a-python` / `a2a-js`；⚠️ **Kotlin SDK 仍在提案讨论阶段（A2A discussion #1049），没有移动端 SDK** → 移动端按 JSON-RPC/HTTP 裸写客户端即可，工作量比想象小。
+- 个人 agent 开源：**Second Me**（`mindverse/Second-Me`，Apache-2.0，约 15.7k⭐，数字分身训练）、**Letta**（Apache-2.0，记忆型 agent）、**Mem0**（Apache-2.0，agent 记忆层）、Khoj（**AGPL-3.0，传染性，只读思路**）。
+- "Agent 间社交"在消费 App 里**没有验证过的交互形态**。业界现状是 ChatList + AgentCard 发现 —— 可把 AgentCard JSON 呈现成 App 里的"分身名片卡"，这是 §3.4 唯一可落地的形态。
+
+### B.6 明日就能动手的清单
+
+1. fork **Now in Android**，Tab 改成本文档 §5.1 的四栏，designsystem 沿用 NiA token + 官方 Figma。
+2. 车辆卡片用 **Vico + SpeedView**，SOS 倒计时环用 **ComposeCharts**，成长时间轴用 **JetLime**。
+3. 保养数据模型抄 **LubeLogger**，故障码 IA 抄 **AndrOBD**（不抄代码）。
+4. 亲子域按 **COPPA 清单**做家长同意流，管控 IA 参考 **KidSafe**。
+5. A2A 先写一个轻量 JSON-RPC 客户端 + AgentCard 卡片 UI，不做社交图谱。
+
+来源：
+- [Now in Android](https://github.com/android/nowinandroid) · [Tivi](https://github.com/chrisbanes/tivi) · [Material 3 自适应布局](https://developer.android.com/jetpack) · [Compose 状态提升实践](https://proandroiddev.com/state-hoisting-in-jetpack-compose-common-mistakes-that-kill-performance-44a1c3bef908)
+- [ComposeCharts](https://github.com/ehsannarmani/ComposeCharts) · [Vico](https://github.com/patrykandpatrick/vico) · [SpeedView](https://github.com/anastr/SpeedView) · [JetLime](https://github.com/pushpalroy/JetLime) · [Haze](https://github.com/chrisbanes/haze)
+- [AndrOBD](https://github.com/fr3ts0n/AndrOBD) · [ReDrive](https://github.com/iUnreallx/ReDrive) · [LubeLogger](https://github.com/hargata/lubelog) · [AARE](https://github.com/prototux/AARE)
+- [KidSafe](https://github.com/xMansour/KidSafe) · [FTC COPPA FAQ](https://www.ftc.gov/business-guidance/resources/complying-coppa-frequently-asked-questions)
+- [A2A 协议仓库](https://github.com/a2aproject/A2A) · [Second Me](https://github.com/mindverse/Second-Me) · [Letta](https://github.com/letta-ai/letta) · [Mem0](https://github.com/mem0ai/mem0)
 
 ---
 
