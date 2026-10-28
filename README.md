@@ -22,7 +22,7 @@
 ## 现在能跑的东西
 
 ```bash
-./gradlew :core:test              # 36 条单测，含与 sos_frame.py 的逐字节对拍
+./gradlew :core:test              # 43 条单测，含与 sos_frame.py 的逐字节对拍
 ./gradlew :app:assembleDebug      # 出 APK（debug 签名，可直接装演示机）
 python protocol/sos_frame.py      # SOS 帧编解码自检
 python tools/validate_protocol.py # 契约示例校验
@@ -57,7 +57,7 @@ simulator/capture.sh 52 6-offline   # 只补一帧：第 52 假秒，存成 shot
 
 按对进度的杀伤力排序：
 
-1. **GT1005 BLE 协议文档**（时空道宇）—— 已有兜底：`ModuleOperation` 传输层可替换，先写 UART 实现跑通全部业务逻辑，BLE 文档到了换注入。见 DECISIONS D3
+1. **GT1005 BLE 协议文档**（时空道宇）—— 已有兜底：`core/.../modem/UartModem.kt` 把串口那一路的传输骨架（一问一答怎么配、超时算哪种失败、主动下行怎么分）写完并单测过了，接上 USB 转 TTL 就能验；具体指令表全在 `Gt1005Verbs` 一个类里，**那一版是按动词名猜的，文档到了只改它**。见 DECISIONS D7
 2. **测试卡 + 测试平台账号**（时空道宇）—— 没有就只能验到 App 侧，上不了星
 3. **ICI 90B 是二进制还是 hex 字符**（时空道宇）—— 决定 SOS 报文和分片大小，见 `sos-payload.md`
 4. **MCQ 的 ACK 超时时长**（时空道宇）—— 决定重发策略，见 `link-policy.md`
