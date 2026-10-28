@@ -11,6 +11,7 @@ import com.carpet.satdemo.core.protocol.EventKind
 import com.carpet.satdemo.core.protocol.EventPayload
 import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.MsgType
+import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.ScreenCodec
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.protocol.StatePayload
@@ -249,6 +250,37 @@ class DemoRuntime(
 
     fun log(line: String) {
         _status.value = _status.value.copy(log = (_status.value.log + line).takeLast(40))
+    }
+
+    /**
+     * App 控制台那几行字。手机和桌面彩排台共用这一份 —— 两边各写一遍的话，
+     * 彩排时看到的和装到手机上看到的就是两个东西了。
+     */
+    fun consoleText(s: Status = _status.value): String {
+        val snap = s.snapshot
+        val sat = snap?.sat
+        // 没锁到星时唯一有用的信息就是还有多少秒过顶；锁上了再显示倒计时就是噪声
+        val waitPass =
+            if (sat != null && sat.phase != SatPhase.locked) sat.nextPassInS?.takeIf { it > 0 } else null
+        val satLine = when {
+            sat == null -> "-"
+            !sat.moduleOk -> "GT1005 离线"
+            else -> listOfNotNull(
+                sat.phase.toString() + (sat.satName?.let { " $it" } ?: ""),
+                waitPass?.let { "距下次过顶 ${it}s" },
+            ).joinToString("   ")
+        }
+        return buildString {
+            appendLine("链路  ${s.phase}   展示端 ${s.clients} 台   ${s.localIp ?: "-"}")
+            appendLine("卫星  $satLine")
+            appendLine(
+                "定位  ${
+                    snap?.let { "%.5f, %.5f  (%s)".format(it.gnss.lat, it.gnss.lon, it.gnss.source) } ?: "无"
+                }",
+            )
+            appendLine("SOS   ${snap?.sos?.level ?: "-"}  上次结果 ${s.lastSos ?: "-"}")
+            appendLine("服务  ${if (s.running) "运行中" else "未启动"}   离线待补发 ${engine.pending.size} 条")
+        }
     }
 
     companion object {

@@ -14,7 +14,6 @@ import android.widget.TextView
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.protocol.CommandType
-import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -144,31 +143,9 @@ class MainActivity : Activity() {
         setOnCheckedChangeListener { _, checked -> onChange(checked) }
     }
 
+    /** 那几行字的排版在 core 的 DemoRuntime.consoleText 里，和桌面彩排台共用一份 */
     private fun render(s: DemoRuntime.Status) {
-        val snap = s.snapshot
-        val sat = snap?.sat
-        // 没锁到星时唯一有用的信息就是还有多少秒过顶；锁上了再显示倒计时就是噪声
-        val waitPass =
-            if (sat != null && sat.phase != SatPhase.locked) sat.nextPassInS?.takeIf { it > 0 } else null
-        val satLine = when {
-            sat == null -> "-"
-            !sat.moduleOk -> "GT1005 离线"
-            else -> listOfNotNull(
-                sat.phase.toString() + (sat.satName?.let { " $it" } ?: ""),
-                waitPass?.let { "距下次过顶 ${it}s" },
-            ).joinToString("   ")
-        }
-        statusView.text = buildString {
-            appendLine("链路  ${s.phase}   展示端 ${s.clients} 台   ${s.localIp ?: "-"}")
-            appendLine("卫星  $satLine")
-            appendLine(
-                "定位  ${
-                    snap?.let { "%.5f, %.5f  (%s)".format(it.gnss.lat, it.gnss.lon, it.gnss.source) } ?: "无"
-                }",
-            )
-            appendLine("SOS   ${snap?.sos?.level ?: "-"}  上次结果 ${s.lastSos ?: "-"}")
-            appendLine("服务  ${if (s.running) "运行中" else "未启动"}   离线待补发 ${runtime.engine.pending.size} 条")
-        }
+        statusView.text = runtime.consoleText(s)
         logView.text = s.log.joinToString("\n")
     }
 

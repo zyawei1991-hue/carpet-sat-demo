@@ -117,11 +117,13 @@ object DemoDriver {
                     clock.advance(1_000)
                     if (freezeAt != null && (clock.ms - T0) / 1000 >= freezeAt) {
                         println("定格在 t=${(clock.ms - T0) / 1000}s（第 ${i + 1} 步：${step.label}）相位 ${engine.phase}")
+                        printConsole(runtime)
                         holdScreen(runtime)
                     }
                     delay(TICK_MS)
                 }
                 println("step ${i + 1}  t=${(clock.ms - T0) / 1000}s  ${step.label}  ->  ${engine.phase}")
+                printConsole(runtime)
                 if (step.label.contains("SOS")) runtime.pressSos().join()
                 if (hold == i + 1) {
                     println("定格在第 ${i + 1} 步：${step.label}。界面保持这一帧。")
@@ -133,8 +135,12 @@ object DemoDriver {
         }
     }
 
-    private fun Array<String>.argAfter(name: String): Int? {
-        val i = indexOf(name).takeIf { it >= 0 } ?: return null
+    /** App 控制台那几行字，原样打出来：手机没到手之前，这就是装上去会看到的东西 */
+    private fun printConsole(runtime: DemoRuntime) {
+        runtime.consoleText().trimEnd().lines().forEach { println("        | $it") }
+    }
+
+    private fun Array<String>.argAfter(name: String): Int? {        val i = indexOf(name).takeIf { it >= 0 } ?: return null
         return getOrNull(i + 1)?.toIntOrNull()
     }
 
