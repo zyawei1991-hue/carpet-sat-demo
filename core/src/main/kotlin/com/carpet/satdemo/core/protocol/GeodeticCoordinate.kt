@@ -2,8 +2,13 @@ package com.carpet.satdemo.core.protocol
 
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * TPI / DII 里的度分坐标：纬度 `ddmm.mmmm`、经度 `dddmm.mmmm`（〔规 §3.1.7〕，前面的 0 也要传输）。
@@ -60,7 +65,23 @@ data class GeodeticPosition(
             return runCatching { of(lat, lon) }.getOrNull()
         }
     }
+
+    /**
+     * 两点间大圆距离（米）。球面近似够用 —— 唯一的调用点是〔SDK文 §5.2〕
+     * "位置变化超过 20 公里要主动重算星历"，那个阈值本来就不精确。
+     */
+    fun distanceMetersTo(other: GeodeticPosition): Double {
+        val phi1 = Math.toRadians(latitude.degrees)
+        val phi2 = Math.toRadians(other.latitude.degrees)
+        val dPhi = phi2 - phi1
+        val dLambda = Math.toRadians(other.longitude.degrees - longitude.degrees)
+        val h = sin(dPhi / 2) * sin(dPhi / 2) + cos(phi1) * cos(phi2) * sin(dLambda / 2) * sin(dLambda / 2)
+        return 2 * EARTH_RADIUS_M * asin(min(1.0, sqrt(h)))
+    }
 }
+
+/** 球半径。只服务于上面那个"20 公里算不算挪窝"的判断，精度要求很低 */
+private const val EARTH_RADIUS_M = 6_371_000.0
 
 /**
  * 十进制度 → 度分串。小数部分保留 4 位（= 亚米级，够用了）。

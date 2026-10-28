@@ -1,9 +1,14 @@
 package com.carpet.satdemo.simulator
 
 import com.carpet.satdemo.core.engine.DemoEngine
+import com.carpet.satdemo.core.ephemeris.EphemerisTracker
+import com.carpet.satdemo.core.ephemeris.EphState
+import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPolicy
+import com.carpet.satdemo.core.modem.MonoClock
 import com.carpet.satdemo.core.modem.SimulatedModem
+import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.runtime.DemoRuntime
@@ -88,7 +93,23 @@ object DemoDriver {
             sleep = { },
         )
         val server = ScreenLinkServer()
-        val engine = DemoEngine(modem, ownerId = 12_061L, policy = demoPolicy())
+        // TPI 和星历都得有人持有，否则彩排演的是"没有这两条规则的 App"（E.10 #5/#7）
+        val tpi = TpiTracker(modem, MonoClock { clock.ms })
+        val ephemeris = SimulatedEphemerisSource(
+            clock = MonoClock { clock.ms },
+            passPeriodMs = PASS_PERIOD_MS,
+            passWindowMs = if (blocked) 0 else PASS_WINDOW_MS,
+            // --eph-offline 演 E.9 那条最容易说错的话：星历过期 ≠ 没卫星信号
+            state = if (args.contains("--eph-offline")) EphState.NETWORK_ERROR else EphState.SUCCESS,
+            online = !args.contains("--update-fail"),
+        )
+        val engine = DemoEngine(
+            modem,
+            ownerId = 12_061L,
+            policy = demoPolicy(),
+            tpi = tpi,
+            ephemeris = EphemerisTracker(ephemeris, MonoClock { clock.ms }),
+        )
         val runtime = DemoRuntime(engine, server, clock::now, heartbeatEvery = 3)
         server.accepting = true
         // 假时钟由下面的脚本推，不能再起内部那圈 1Hz
@@ -100,6 +121,8 @@ object DemoDriver {
         println("展示端  http://127.0.0.1:$port/   (ws 接入点 ws://127.0.0.1:${ScreenLinkServer.PORT})")
         if (record != null) println("回放    http://127.0.0.1:$port/?replay=${record.fileName}   录到 ${record}")
         if (blocked) println("模式：卫星未过顶，所有 MCQ 都拿不到 ACK")
+        if (args.contains("--eph-offline")) println("模式：星历 NETWORK_ERROR —— 屏上应该说「请联网更新」，不能说「没卫星信号」")
+        if (args.contains("--update-fail")) println("模式：星历下载失败，只能靠本地缓存算窗口")
 
         runtime.onFix(30.2741, 120.1551, GnssSource.phone, 1.2, 2.0)
         runtime.setFence(true, "西湖景区")

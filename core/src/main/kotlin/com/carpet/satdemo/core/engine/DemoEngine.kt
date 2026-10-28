@@ -1,5 +1,7 @@
 package com.carpet.satdemo.core.engine
 
+import com.carpet.satdemo.core.ephemeris.EphemerisTracker
+import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkEvent
 import com.carpet.satdemo.core.link.LinkPhase
@@ -54,6 +56,11 @@ class DemoEngine(
      * 所以这件事得有专门的持有者；不给就是"这条链路没有 TPI 概念"（场景层替身、单测）。
      */
     private val tpi: TpiTracker? = null,
+    /**
+     * 星历（E.10 #7）。厂商给的是**窗口 + 进出方位角 + 最大仰角**，
+     * 比模组那个"还有 N 秒"信息量大，所以它一可用就以它为准。
+     */
+    private val ephemeris: EphemerisTracker? = null,
 ) {
     private val machine = LinkStateMachine(policy)
     private val encoder = SosFrameEncoder(ownerId)
@@ -261,6 +268,23 @@ class DemoEngine(
     suspend fun tickTpi(): TpiTracker.Status? = tpi?.tick()
 
     /**
+     * 星历这一轮该不该重算，由 [EphemerisTracker] 自己判断（每日 update、挪了 20 公里、窗口走完）。
+     *
+     * 倒计时以星历为准（它是厂商口径，还多给窗口长度和方位角）；**只有算不出来才**退回模组那个粗估，
+     * 并且把"为什么算不出来"一起带上屏 —— 说成"没卫星信号"是 E.9 点名的错法。
+     */
+    suspend fun tickEphemeris(): EphemerisTracker.Status? {
+        val tracker = ephemeris ?: return null
+        val status = tracker.refresh(fix?.let { GeodeticPosition.of(it.lat, it.lon) })
+        nextPassInS = if (status.state == EphState.SUCCESS) {
+            status.nextPassInS
+        } else {
+            runCatching { modem.secondsToNextPass() }.getOrNull()
+        }
+        return status
+    }
+
+    /**
      * 平台侧回执到了（4G 下行或卫星下行里的救援受理确认）。
      *
      * 名字故意不叫 `onAck`：**星上 ACK 不算**（〔规 §3.1.4 注6〕卫星应答只代表卫星收到），
@@ -309,6 +333,7 @@ class DemoEngine(
 
     fun snapshot(): StatePayload {
         val tpiStatus = tpi?.status()
+        val ephStatus = ephemeris?.status()
         return StatePayload(
             link = LinkState(
                 primary = if (phase == LinkPhase.CELL || phase == LinkPhase.RECOVER) LinkPrimary.cell else LinkPrimary.sat,
@@ -330,6 +355,12 @@ class DemoEngine(
                 tpiStale = tpiStatus?.let { it.state == TpiTracker.State.STALE || it.state == TpiTracker.State.NO_SOURCE },
                 // 升级进度直接读写锁，屏上那排按钮的禁用态看这个（§5.2）
                 upgradePct = modem.gate.progressPct,
+                // 星历（E.10 #7）。文案在 App 侧就定稿，固件只负责画——它一编就可能把"去联网"说成"没卫星"
+                ephState = ephStatus?.state,
+                ephFail = ephStatus?.failMessage,
+                nextPassDurS = ephStatus?.nextPass?.windowSec?.toInt(),
+                nextPassMaxEl = ephStatus?.nextPass?.maxElevationDeg,
+                aimAz = ephStatus?.aimAzimuthDeg,
             ),
             gnss = fix ?: GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
             fence = fence,

@@ -64,7 +64,15 @@
             "queue_pending": { "type": "integer", "minimum": 0, "description": "App 侧攒着待补发的条数，掉线期间一直涨" },
             "tpi_age_s": { "type": "integer", "minimum": 0, "description": "距上次成功把位置推给模组（TPI）过了多少秒。〔规 §3.1.7〕要求 1~10 分钟推一次，模组掉电即丢 —— 这个数就是那根线的余量" },
             "tpi_stale": { "type": "boolean", "description": "位置陈旧到不能再信（默认 15 分钟，或压根没有位置源）。true 时展示端要打红字「位置已过期 N 分钟，卫星可能投递失败」，因为经纬度直接决定平台下行能不能收到" },
-            "upgrade_pct": { "type": "integer", "minimum": 0, "maximum": 99, "description": "模组固件升级进度（updateSOC 的 0~99）。非 null = 正在升级 = 全局写锁生效，期间所有发送按钮置灰：〔SDK文 §9-2〕'正在更新模组任务时，所有数据发送和自定义任务都不可用'" }
+            "upgrade_pct": { "type": "integer", "minimum": 0, "maximum": 99, "description": "模组固件升级进度（updateSOC 的 0~99）。非 null = 正在升级 = 全局写锁生效，期间所有发送按钮置灰：〔SDK文 §9-2〕'正在更新模组任务时，所有数据发送和自定义任务都不可用'" },
+            "eph_state": {
+              "enum": ["SUCCESS", "NETWORK_ERROR", "TIME_OUT", "CALCULATION_FAILED", "NO_FIX", null],
+              "description": "星历计算结果状态，值和〔SDK文 §5.1.2〕的 resultState 一一对应（NO_FIX 是我们自己加的：没定位不该去问 SDK）。**它说的是'我们不知什么时候有窗'，不是'天上没卫星'** —— 两件事不能画在同一个提示里（E.10 #7）"
+            },
+            "eph_fail": { "type": ["string", "null"], "description": "星历不可用时那行人话，**由 App 出成品文案**：〔E.9〕最容易犯的错是把 NETWORK_ERROR 显示成「无卫星信号」，用户会举着天线在空旷处干等，而真正该做的是连一次网。固件不要再自己编这句" },
+            "next_pass_dur_s": { "type": ["integer", "null"], "minimum": 0, "description": "当前（或下个）窗口长度秒数，厂商给的 endTime-startTime。比'还有 N 秒'能用的地方多：能判断这条窗口够不够发完队列" },
+            "next_pass_max_el": { "type": ["number", "null"], "description": "这次过境的最大仰角，度。低仰角那颗容易被楼和山体挡掉，野外选址就看这个" },
+            "aim_az": { "type": ["number", "null"], "minimum": 0, "maximum": 360, "description": "该把车头/天线朝哪边：正北 0° 顺时针 0~360。窗口内是按进出方位角线性插值出来的瞬时值 —— 画指针够用，别拿它当测算依据" }
           }
         },
         "gnss": {

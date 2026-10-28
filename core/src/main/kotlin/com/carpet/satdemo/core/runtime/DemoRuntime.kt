@@ -1,6 +1,8 @@
 package com.carpet.satdemo.core.runtime
 
 import com.carpet.satdemo.core.engine.DemoEngine
+import com.carpet.satdemo.core.ephemeris.EphState
+import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.modem.SatResult
@@ -209,7 +211,9 @@ class DemoRuntime(
         engine.tickTpi()?.let { noteTpi(it.state) }
         push(engine.drainProbe(now))
         push(engine.drainPending(now))
-        engine.nextPassInS = runCatching { engine.modem.secondsToNextPass() }.getOrNull()
+        // 倒计时以厂商星历为准，算不出来才退回模组粗估 —— 这条优先序在 DemoEngine 里，这里只管记一行
+        val eph = engine.tickEphemeris()
+        if (eph != null) noteEph(eph) else engine.nextPassInS = runCatching { engine.modem.secondsToNextPass() }.getOrNull()
         counter++
         if (counter % heartbeatEvery == 0 && !engine.heartbeat(nowSec = now / 1000, cellOk = cellOk())) {
             log("心跳进离线队列，共 ${engine.pending.size} 条")
@@ -257,6 +261,16 @@ class DemoRuntime(
                 else -> "TPI 正常"
             },
         )
+    }
+
+    private var lastEphState: EphState? = null
+
+    /** 星历状态同样只在跳变时记一行。**措辞用 EphemerisCopy 那一句**，别在这里另写一遍 */
+    private fun noteEph(status: EphemerisTracker.Status) {
+        if (status.state == lastEphState) return
+        lastEphState = status.state
+        val window = status.nextPass?.let { "，${it.starName} 窗口 ${it.windowSec}s" } ?: ""
+        log((status.failMessage ?: "星历正常") + window)
     }
 
     private fun push(

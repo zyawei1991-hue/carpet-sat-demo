@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.protocol
 
+import com.carpet.satdemo.core.ephemeris.EphState
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -92,6 +93,23 @@ data class SatState(
     @SerialName("tpi_stale") val tpiStale: Boolean? = null,
     /** 模组固件升级进度 0~99；没在升级为 null。升级期间所有发送都被写锁挡下（E.10 #6） */
     @SerialName("upgrade_pct") val upgradePct: Int? = null,
+    /**
+     * 星历算得出来吗（E.10 #7）。和"锁没锁到星"是两件事：
+     * 星历没了只是**不知道**什么时候有窗，天上周期的窗口照样在。
+     */
+    @SerialName("eph_state") val ephState: EphState? = null,
+    /**
+     * 星历不可用时那行人话。文案必须由 App 出、**不给固件自己编** ——
+     * 〔E.9〕最容易犯的错就是把 `NETWORK_ERROR` 显示成"无卫星信号"，
+     * 用户会举着天线在空旷处等，而真正该做的是连一次网。
+     */
+    @SerialName("eph_fail") val ephFail: String? = null,
+    /** 当前（或下个）窗口长度，秒。厂商给的 endTime-startTime，比"还有 N 秒"能用的地方多 */
+    @SerialName("next_pass_dur_s") val nextPassDurS: Int? = null,
+    /** 这次过境的最大仰角，度。低仰角那颗容易被楼和山体挡掉 */
+    @SerialName("next_pass_max_el") val nextPassMaxEl: Double? = null,
+    /** 该把车头/天线朝哪边：正北 0° 顺时针。窗口内是插值出来的瞬时方位角 */
+    @SerialName("aim_az") val aimAz: Double? = null,
 )
 
 @Serializable
