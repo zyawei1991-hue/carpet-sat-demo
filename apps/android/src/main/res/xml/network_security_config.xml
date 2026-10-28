@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文（http/ws）白名单。E.10 #9。
+
+  两件事必须同时成立，少一条都是白写：
+
+  1) **星历那个 aar 的 AndroidManifest 里写了 `android:usesCleartextTraffic="true"`**。
+     manifest merger 会把它并进我们的应用，等于全局放开明文 —— 于是"只按域名开明文"这条
+     在构建产物里根本不成立。所以 AndroidManifest.xml 里用
+     `tools:replace="android:usesCleartextTraffic"` 把它顶回 false，这里只留域名白名单这一条路。
+
+  2) 平台域名厂商还没给（〔架构 §9〕待确认清单里那条"上报地址/端口"）。
+     所以下面这些条目**默认全注释**：宁可不放行，也不要我在构建里编一个域名当事实。
+     拿到答案就取消注释、填真域名，一处改动，不动代码。
+
+  规则：只列具体主机，不写 `*`，不写网段。`includeSubdomains` 对明文没意义就别加。
+-->
+<network-security-config>
+    <!-- 默认一律禁明文。证书配好了才谈例外 -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+      平台上报 + 星历下载（同一批地址，时空道宇给谁就填谁）：
+      <domain-config cleartextTrafficPermitted="true">
+          <domain includeSubdomains="false">平台主机名</domain>
+      </domain-config>
+    -->
+
+    <!--
+      圆屏展示终端在局域网里是 ws://，手机是服务端，这个文件管不着（只管出站）。
+      真要放开的是"App 主动连展示端"那种形态，届时按同样的规矩列具体 IP，不放整段。
+    -->
+</network-security-config>
