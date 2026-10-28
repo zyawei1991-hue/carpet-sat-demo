@@ -1,6 +1,7 @@
 package com.carpet.satdemo.app
 
 import android.app.Application
+import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisSource
@@ -17,10 +18,14 @@ import com.carpet.satdemo.app.ui.PrivacyTier
 import com.carpet.satdemo.app.ui.Scene
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import com.carpet.satdemo.core.link.SosCopy
 
 /**
  * **连接层持有者，不属于任何页面。**
@@ -29,8 +34,9 @@ import kotlinx.coroutines.flow.StateFlow
  * 展示端服务器都挂在这里，Tab 和场景怎么换都不重建它们。原来那版把这些字段直接写在
  * MainActivity 里，于是旋转一次屏幕就得重连一次 —— 演示时那一下正好会把展示端踢下线。
  *
- * 还差一步没做，如实写在这里：这层在**进程内 Activity 之上**，但还不是前台服务。
- * 锁屏久了系统会把进程冻住，那时候链路照样断。等设备总线（core/devices）那一步一起解决。
+ * 前台服务那一层现在接上了（[DemoGuardService]）：守护开关打开时它把进程钉住，
+ * 常驻通知念的就是台账上那两件事 —— 链路和额度。只挂到 Activity 之上是不够的，
+ * 锁屏久了系统会把进程冻住，那时候 1Hz 那一圈会停、圆屏那头会变灰。
  */
 class AppRuntime(private val host: Application) {
 
@@ -166,7 +172,7 @@ class AppRuntime(private val host: Application) {
     fun startMonitors() {
         // 起来就把 1Hz 那圈跑上：状态卡要在首屏自己动，等用户按"启动服务"就变成又要学一遍旧控制台的操作。
         // 退到后台会被 stop 掉，所以这一句在 monitorsUp 之外，每次回到前台都能把自己接回来
-        if (!runtime.status.value.running) runtime.start()
+        if (!runtime.status.value.running) setGuard(true)
         if (!monitorsUp) {
             monitorsUp = true
             location = LocationMonitor(host) { lat, lon, source, hdop, age ->
@@ -214,7 +220,93 @@ class AppRuntime(private val host: Application) {
     }
 
     fun pressSos() {
+        _cancelLine.value = null
         runtime.pressSos()
+    }
+
+    /**
+     * SOS 长按的三段倒计时。
+     *
+     * 状态**扣在 AppRuntime 而不是 Composable 里**：手指按着的时候切了 Tab，
+     * 倒计时如果被一起销毁，用户会读成"按失败了"，然后真的再按一次 ——
+     * 而那一次可能已经发出去了。§6.1 要求这条线可取消，可取消的前提是它有个不随页面消失的家。
+     */
+    data class Arm(val leftMs: Long) {
+        val active: Boolean get() = leftMs > 0
+
+        /** 已经走完的比例，给环用 */
+        val fraction: Float get() = 1f - (leftMs.toFloat() / ARM_MS).coerceIn(0f, 1f)
+
+        /** 三段里现在该亮到第几段（0=一段都没走完） */
+        val segment: Int get() = ((ARM_MS - leftMs + SEG_MS - 1) / SEG_MS).toInt().coerceIn(0, 3)
+    }
+
+    private val _arm = MutableStateFlow(Arm(0))
+    val arm: StateFlow<Arm> = _arm
+
+    private var armJob: Job? = null
+
+    /** 手指按下。走到 0 才算触发，中途抬手一律当没按过 */
+    fun pressDownSos() {
+        if (armJob != null) return
+        armJob = scope.launch {
+            var left = ARM_MS
+            while (left > 0) {
+                _arm.value = Arm(left)
+                delay(TICK_MS)
+                left -= TICK_MS
+            }
+            armJob = null
+            _arm.value = Arm(0)
+            pressSos()
+        }
+    }
+
+    /** 抬手、划出、被系统抢走焦点 —— 三种中断走同一条路 */
+    fun releaseSos() {
+        val wasArmed = _arm.value.active
+        armJob?.cancel()
+        armJob = null
+        _arm.value = Arm(0)
+        if (wasArmed) runtime.log("长按中断，SOS 没发出")
+    }
+
+    /**
+     * 撤销 SOS。结果那行人话存成 [cancelLine]（同样出自 [SosCopy]），
+     * 它必须活在页面之外：撤销要等一次过境，用户中途去看别的 Tab 是常态。
+     */
+    private val _cancelLine = MutableStateFlow<String?>(null)
+    val cancelLine: StateFlow<String?> = _cancelLine
+
+    fun cancelSos() {
+        _cancelLine.value = null
+        runtime.cancelSos { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
+    }
+
+    /** 设备台账（§8 R1 第一件事）。切 Tab、切场景都不会让它空一格 */
+    val devices: StateFlow<List<Device>> get() = runtime.devicesSnapshot
+
+    /** 额度与队列水位。**现场读模组**，不是写死的数（§9 #12/#16 那两个口径未定，所以只能读） */
+    fun usage(): DemoEngine.Usage = runtime.engine.usage()
+
+    fun allowScreen(screenId: String): Boolean = runtime.allowScreen(screenId)
+
+    fun revokeScreen(screenId: String) = runtime.revokeScreen(screenId)
+
+    fun allowedScreens(): Set<String> = runtime.allowedScreens()
+
+    /**
+     * 守护服务的总闸。**开的时候同时把进程钉住**（[DemoGuardService]）：
+     * 连接层只挂在 Application 上时，锁屏久了系统照样冻住进程，1Hz 那一圈会停。
+     */
+    fun setGuard(on: Boolean) {
+        if (on) {
+            runtime.start()
+            DemoGuardService.start(host)
+        } else {
+            DemoGuardService.stop(host)
+            runtime.stop()
+        }
     }
 
     fun setSentinel(on: Boolean) = runtime.armSentinel(on)
@@ -243,8 +335,15 @@ class AppRuntime(private val host: Application) {
     /** 圆屏上的按键动作。在 App 启动服务之后才会被填上 */
     internal fun wireCommands() {
         runtime.onCommand = { msg ->
-            runtime.log("展示端指令 ${msg.command?.cmd}")
-            if (msg.command?.cmd == CommandType.sos_press) runtime.pressSos()
+            val cmd = msg.command?.cmd
+            runtime.log("展示端指令 $cmd")
+            when (cmd) {
+                CommandType.sos_press -> runtime.pressSos()
+                // 圆屏那颗键能长按 3 秒触发，就必须也能撤销：两边能力不对称时，
+                // 用户在圆屏上按完会发现 App 里找不到那条"取消"
+                CommandType.sos_cancel -> cancelSos()
+                else -> Unit
+            }
         }
     }
 
@@ -260,6 +359,11 @@ class AppRuntime(private val host: Application) {
         /** 假模块的"永远在过境窗口内"。真机的窗口由星历算，不靠这个数 */
         private const val ALWAYS_VISIBLE = Long.MAX_VALUE / 4
         private const val KEY_VENDOR_EPH = "vendor_eph"
+
+        /** 长按总量与"三段"。3 秒是〔规〕里那颗侧键的口径，三段是给眼睛看的进度 */
+        const val ARM_MS = 3_000L
+        const val SEG_MS = 1_000L
+        private const val TICK_MS = 100L
 
         /**
          * 首屏钉死的两张卡（§5.1：SOS 和链路状态在 Tab1 首屏，不在设置里）。

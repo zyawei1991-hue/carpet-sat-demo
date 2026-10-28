@@ -7,11 +7,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.devices.Device
+import com.carpet.satdemo.core.devices.DeviceLink
+import com.carpet.satdemo.core.devices.Tone as CoreTone
+import com.carpet.satdemo.core.screen.ScreenLinkServer
 
 /**
  * 用车养车 / 亲子 / 健康 / 数字分身 四个场景包的卡片。
@@ -207,15 +214,25 @@ fun ShareObjectsCard(s: CardScope) {
     }
 }
 
+/**
+ * 订阅与流量包。**资费套餐是桩（等 §11 的 P0 答复），额度这一行不是** ——
+ * 它读的是用量页同一个 [AppRuntime.usage]。两张卡对同一个数说出两句话，
+ * 是 §5.2 最后一条明令禁止的那种事，所以这里宁可空着也不写 180/300。
+ */
 @Composable
 fun SubscriptionCard(s: CardScope) {
+    val u = s.app.usage()
     InkCard(mock = s.mock(Capability.Account)) {
         CardTitle("订阅与流量包")
-        ValueRow("卫星报文额度", "180 / 300 条")
-        ProgressBar(0.6f, Tone.Wait)
-        ValueRow("到期", "2026-12-01")
+        ValueRow(
+            "卫星报文额度",
+            if (u.capacity > 0) "${u.handedOver} / ${u.capacity} 条" else "还没读到模组型号",
+            if (u.pressure >= 0.9f) Tone.Alert else Tone.Neutral,
+        )
+        ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
+        ValueRow("到期", "2026-12-01（示意）")
         ValueRow("套餐", "守护版（示意）")
-        Text("额度和资费都等时空道宇给口径（§11 的 P0）。现在这张卡只定版式", style = Type.Caption, color = Ink.TextLow)
+        Text("额度和用量页同源，读的是终端现场；套餐与资费都等时空道宇给口径（§11 的 P0）", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -264,21 +281,87 @@ private fun TierRow(label: String, tier: PrivacyTier, onPick: ((PrivacyTier) -> 
     }
 }
 
-/** 设备与底座管理：接入台数、模组能力档都是真的 */
+/**
+ * 设备与底座。**这一张念的是台账（[com.carpet.satdemo.core.devices.DeviceBus]），不是卡片自己编的状态**：
+ * 卫星终端、圆屏、手机传感器各自一行，掉线的那行留在原地写清"最后一次见到是几点"。
+ *
+ * 台账放在场景之外，所以切场景、切 Tab 都不会让一台设备从页面上消失再出现（§5.3 硬要求 #2）。
+ */
 @Composable
 fun DeviceManagerCard(s: CardScope) {
     val st = s.status
-    val caps = s.app.runtime.engine.modem.caps
+    val list = s.app.devices.collectAsState().value
+    val now = System.currentTimeMillis()
+    val allowed = s.app.allowedScreens()
     InkCard {
-        CardTitle("设备与底座", trailing = if (st.running) "服务运行中" else "服务未启动")
-        ValueRow("卫星终端", if (st.snapshot?.sat?.moduleOk == false) "GT1005 离线" else "GT1005 就绪")
-        ValueRow("能力档", caps?.let { "${it.model} · 等级${it.lengthLevel.level} · ${it.service}" }, mono = true)
-        ValueRow("展示端", "${st.clients} 台")
-        ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)
+        CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")
+        if (list.isEmpty()) {
+            Text("台账还是空的。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)
+        }
+        list.forEach { d -> LedgerRow(s.app, d, now) }
+        ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)
+        ValueRow("白名单", if (allowed.isEmpty()) "空" else allowed.joinToString())
+        // 出厂那个 id 一旦被移出白名单，现场就没有第二台屏能顶上来了，所以这里必须能放回去
+        if (!allowed.contains(ScreenLinkServer.DEFAULT_SCREEN_ID)) {
+            Button(
+                onClick = { s.app.allowScreen(ScreenLinkServer.DEFAULT_SCREEN_ID) },
+                colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
+            ) { Text("放回出厂屏的 screen_id", style = Type.Caption) }
+        }
         Text(
             "工程模式（开关台、线路原文）在下面的入口，演示救场时用",
             style = Type.Caption,
             color = Ink.TextLow,
         )
     }
+}
+
+@Composable
+private fun LedgerRow(app: AppRuntime, d: Device, now: Long) {
+    Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(d.title, style = Type.Body)
+            Badge(linkLabel(d.link), uiTone(d.tone))
+        }
+        d.detail.forEach { Text(it, style = Type.Caption, color = Ink.TextMid) }
+        when (val l = d.link) {
+            is DeviceLink.Offline -> Text(l.why ?: "已离线", style = Type.Caption, color = Ink.Alert)
+            is DeviceLink.Degraded -> Text(l.why, style = Type.Caption, color = Ink.Wait)
+            is DeviceLink.Online -> Text("在线 ${elapsed(now - l.since)}", style = Type.Caption)
+            is DeviceLink.Connecting -> Text("接入中 ${elapsed(now - l.since)}", style = Type.Caption)
+            DeviceLink.Absent -> Unit
+        }
+        if (d.actions.contains("revoke")) {
+            Button(
+                onClick = { app.revokeScreen(d.title) },
+                colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
+            ) { Text("移出白名单并断开", style = Type.Caption) }
+        }
+    }
+}
+
+private fun linkLabel(l: DeviceLink): String = when (l) {
+    is DeviceLink.Online -> "在线"
+    is DeviceLink.Degraded -> "在线但不健康"
+    is DeviceLink.Connecting -> "接入中"
+    is DeviceLink.Offline -> "离线"
+    DeviceLink.Absent -> "不在场"
+}
+
+/** 台账那一行的颜色语义只能从 [Device.tone] 出，卡片这边只做一次枚举换算 */
+private fun uiTone(t: CoreTone): Tone = when (t) {
+    CoreTone.Ok -> Tone.Ok
+    CoreTone.Wait -> Tone.Wait
+    CoreTone.Alert -> Tone.Alert
+    CoreTone.Neutral -> Tone.Neutral
+}
+
+private fun elapsed(ms: Long): String {
+    val sec = (ms / 1000).coerceAtLeast(0)
+    val m = sec / 60
+    return if (m > 0) "$m 分 ${sec % 60} 秒" else "$sec 秒"
 }

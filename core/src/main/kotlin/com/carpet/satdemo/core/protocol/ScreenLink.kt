@@ -39,7 +39,7 @@ enum class SosLevel { normal, armed, pending, sent, acked }
 
 @Serializable
 enum class EventKind {
-    sos_triggered, sos_acked, sos_failed,
+    sos_triggered, sos_acked, sos_failed, sos_cancelled,
     fence_enter, fence_exit,
     sentinel_motion,
     link_switched, sat_visible,
@@ -48,7 +48,7 @@ enum class EventKind {
 }
 
 @Serializable
-enum class CommandType { sos_press, track_pull, set_demo_mode, set_fence, reboot_ui }
+enum class CommandType { sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui }
 
 @Serializable
 data class HelloPayload(

@@ -1,17 +1,28 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.dp
+import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.link.SosCopy
@@ -84,13 +95,21 @@ fun LinkCard(s: CardScope) {
 /**
  * SOS 卡。状态那行字**只能来自 [SosCopy]**（§6.1 红线一），
  * 而卫星 ACK 和平台回执在这张卡上是两件事，不许并成一句。
+ *
+ * 触发方式是**长按 3 秒、分三段**，不是单击：这颗钮长在首屏，兜里蹭一下就触发一次求救，
+ * 比按不出来严重得多。三段是为了让手指知道"还剩多少"，光一个环在震动时看不出来。
+ * 松手即取消，取消那件事必须在钮上写明白 —— 隐藏在中断动作里的取消等于没有取消。
  */
 @Composable
 fun SosCard(s: CardScope) {
+    val app = s.app
     val snap = s.snap
-    val send = s.app.runtime.engine.sosSend
+    val arm by app.arm.collectAsState()
+    val cancelLine by app.cancelLine.collectAsState()
+    val send = app.runtime.engine.sosSend
     val platformAcked = snap?.sos?.level == SosLevel.acked
     val level = snap?.sos?.level
+    val fired = level == SosLevel.sent || level == SosLevel.pending || level == SosLevel.acked
     val tone = when {
         platformAcked -> Tone.Ok
         level == SosLevel.pending -> Tone.Alert
@@ -113,21 +132,106 @@ fun SosCard(s: CardScope) {
         // 没按过就不该有"这次怎么样"那一句：engine 里的 sosSend 有初始值，
         // 直接念出来会让首屏一上来就挂一行失败结论
         if (level == null || level == SosLevel.normal) {
-            Text("还没触发过。按上面那颗钮，或长按圆屏侧键 3 秒", style = Type.Body, color = Ink.TextMid)
+            Text("还没触发过。按住下面那颗钮 3 秒，或长按圆屏侧键", style = Type.Body, color = Ink.TextMid)
         } else {
             Text(SosCopy.statusLine(send, snap?.sat?.countdown(), platformAcked), style = Type.Body, color = Ink.TextMid)
         }
-        // 按钮长在卡里而不是长在场景动作条上：Kids / Health / Social 三个场景的动作里没有 SOS，
-        // 而这张卡是钉在首屏的 —— 求救不能依赖"当前场景恰好配了这个动作"（§5.1）
-        Button(
-            onClick = { s.app.pressSos() },
-            colors = ButtonDefaults.buttonColors(containerColor = Ink.Alert, contentColor = Color.White),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("SOS", style = Type.Hero) }
+        // 撤销的结果单独一行，和上面那句并存：那两件事说的是两个报文，并成一句就分不清撤销赶上了没有
+        cancelLine?.let { Text(it, style = Type.Body, color = Ink.Wait) }
+
+        if (arm.active) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CountdownRing(
+                    // 环=剩余（§5.2 第 4 条）。传"已经过了多少"会让倒计时看起来在变大
+                    fraction = 1f - arm.fraction,
+                    center = ((arm.leftMs + 999) / 1000).toString(),
+                    tone = Tone.Alert,
+                    sub = "松手即取消",
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
+                    ArmSegments(arm.segment)
+                    Text(
+                        "已按住 ${(AppRuntime.ARM_MS - arm.leftMs) / AppRuntime.SEG_MS} 秒",
+                        style = Type.Caption,
+                    )
+                }
+            }
+        } else {
+            // 按钮长在卡里而不是长在场景动作条上：Kids / Health / Social 三个场景的动作里没有 SOS，
+            // 而这张卡是钉在首屏的 —— 求救不能依赖"当前场景恰好配了这个动作"（§5.1）
+            HoldToFire(
+                onDown = { app.pressDownSos() },
+                onUp = { app.releaseSos() },
+            )
+        }
+        if (fired) {
+            Button(
+                onClick = { app.cancelSos() },
+                colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("撤销这次 SOS") }
+        }
         Text(
-            "圆屏侧键长按 3 秒同样能触发。没确认时换到开阔处再按一次，比等下次过境快",
+            "圆屏侧键长按同样能触发。没确认时换到开阔处再按一次，比等下次过境快",
             style = Type.Caption,
             color = Ink.TextLow,
+        )
+    }
+}
+
+/** 三段进度。第一段亮 = 已经按住 1 秒，三段全亮 = 报文已经交给队列 */
+@Composable
+private fun ArmSegments(done: Int) {
+    Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        repeat(3) { i ->
+            Box(
+                modifier = Modifier
+                    .width(48.dp)
+                    .height(Grid.x8)
+                    .background(
+                        if (i < done) Ink.Alert else Ink.Track,
+                        RoundedCornerShape(Grid.x4),
+                    ),
+            )
+        }
+    }
+}
+
+/**
+ * 按住才生效的那颗钮。**没用 Material 的 Button**：Button 自带 clickable，
+ * 会和长按的手势抢事件，抢输的那一方会把"按住"变成"点一下就没了"。
+ * 求救钮宁可样式土一点，也不能在关键时刻不按手势办事。
+ *
+ * `detectTapGestures(onPress = …)` + `tryAwaitRelease()` 是这条路唯一不留歧义的写法：
+ * 抬手返回 true，被父级滚动抢走返回 false —— 两种都要走到 onUp，
+ * 因为"没发出去"和"被页面滚动打断"对用户是同一件事：松手了，什么都没发生。
+ */
+@Composable
+private fun HoldToFire(onDown: () -> Unit, onUp: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Ink.Alert, RoundedCornerShape(Grid.x12))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        onDown()
+                        tryAwaitRelease()
+                        onUp()
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "长按 3 秒触发 SOS",
+            style = Type.Hero,
+            color = Color.White,
+            modifier = Modifier.padding(vertical = Grid.x16),
         )
     }
 }
@@ -354,6 +458,47 @@ fun DockCard(s: CardScope) {
         ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)
         Text(
             "圆屏和 App 渲染同一份 StatePayload，所以两边看到的说法一样",
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
+    }
+}
+
+/**
+ * 卫星用量。**§8 R1 点名要的那一页**：额度水位、长度等级、丢弃数，全从模组现场读。
+ *
+ * 三个口径必须写在脸上，否则这张卡会在演示时骗人：
+ *  - 额度分母按型号给（GM1001 500 / GM1003 50），〔§9 #12〕还没跟厂商确认，所以真读到型号之前这里空着；
+ *  - 长度等级只念 ICI 回的那个原始数字，折算成字节要依赖单位口径（〔§9 #16〕），未确认前按最坏的一档算；
+ *  - "已交出"不等于"已发出"：交进模组队列就算占了一个槽，那是它会不会被发走我们管不着。
+ */
+@Composable
+fun UsageCard(s: CardScope) {
+    val u = s.app.usage()
+    val tone = when {
+        u.invalidCard -> Tone.Alert
+        u.pressure >= 0.9f -> Tone.Alert
+        u.dropped > 0 -> Tone.Wait
+        else -> Tone.Neutral
+    }
+    InkCard(tone = tone) {
+        CardTitle("卫星用量", trailing = u.model?.name)
+        if (u.invalidCard) {
+            // 无效卡的时候连额度都不能信：那组数是从没就绪的模组里读出来的
+            Text("这张卡没就绪（ICI 回 1）。额度、等级都不可信，先查卡是否插反", style = Type.Body, color = Ink.Alert)
+        }
+        ValueRow("长度等级", u.level?.let { "等级 ${it.level} · ${it.maxBytes} B" }, mono = true)
+        ValueRow("单条可用载荷", "${u.budget.dataFieldBytes} B（按最坏口径折算）")
+        ValueRow("业务类型", u.service?.name, mono = true)
+        ValueRow("卡号", u.cardId?.takeIf { it != "1" }, mono = true)
+        ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
+        ValueRow("已交终端 / 额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 未知")
+        QueueDots(u.waiting, u.capacity.takeIf { it > 0 }, Tone.Sat)
+        ValueRow("App 侧丢弃", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
+        ValueRow("过境后收回", "${u.reclaimed} 条")
+        Text(
+            if (u.model == null) "还没读到模组型号，所以额度总数空着 —— 空着比写一个猜出来的数好"
+            else "额度按型号口径算，这个分母〔§9 #12〕还没和厂商确认；「已交出去」的报文算占位，不代表已经发走",
             style = Type.Caption,
             color = Ink.TextLow,
         )

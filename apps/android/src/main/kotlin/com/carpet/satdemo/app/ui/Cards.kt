@@ -15,6 +15,7 @@ object Cards {
             CardDescriptor("pass", "下次过境", setOf(Capability.Ephemeris)) { PassWindowCard(it) },
             CardDescriptor("terminal", "卫星终端", setOf(Capability.SatelliteLink)) { TerminalCard(it) },
             CardDescriptor("queue", "待发队列", setOf(Capability.SatelliteLink)) { QueueCard(it) },
+            CardDescriptor("usage", "卫星用量", setOf(Capability.SatelliteLink)) { UsageCard(it) },
             CardDescriptor("tpi", "终端位置", setOf(Capability.SatelliteLink)) { TpiCard(it) },
             CardDescriptor("position", "位置", setOf(Capability.PositionSource)) { PositionCard(it) },
             CardDescriptor("fence", "电子围栏", setOf(Capability.Geofence)) { FenceCard(it) },

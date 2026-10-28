@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         // 真正退出（返回键退干净）才停服务。转屏和深色切换走到这里时 isFinishing 是 false，
         // 那种情况下停服务就等于自己把展示端踢了
-        if (isFinishing) state.runtime.stop()
+        if (isFinishing) state.setGuard(false)
         super.onDestroy()
     }
 

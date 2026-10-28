@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.screen
 
+import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
@@ -32,9 +33,31 @@ class ScreenLinkServer(
     /** hello 过了白名单之后回调，参数是整条消息（回执要引用它的 seq） */
     var onHello: (ScreenMessage) -> Unit = {}
 
+    /**
+     * 断开回调。参数是 screen_id，**识别不出来时给 null**（连上没发 hello 就走的连接）。
+     * 设备总线要靠这一句把屏标成离线 —— 只靠 clientCount 变化的话，
+     * 三台屏里断一台，台账上会留下两台"刚才还在"的幽灵。
+     */
+    var onDisconnect: (String?) -> Unit = {}
+
     private val known = ConcurrentHashMap<String, WebSocket>()
 
     val clientCount: Int get() = connections.count { it.isOpen }
+
+    /**
+     * 现场改白名单。出厂烧死一个 id 这件事在演示现场是必错的：
+     * 屏是量产固件、id 由卖方写，烧错了今天就没有展示端。
+     * 加进来的同时**把它连上**（如果它已经在重试），所以这里不清 accepting。
+     */
+    fun allow(screenId: String): Boolean = whitelist.add(screenId.trim())
+
+    fun revoke(screenId: String) {
+        whitelist.remove(screenId)
+        known.remove(screenId)?.let { runCatching { it.close(CLOSE_POLICY, "revoked") } }
+    }
+
+    /** 台账要显示"允许哪几台接入"，所以这一份得能被读 */
+    fun allowed(): Set<String> = whitelist.toSet()
 
     override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
         if (!accepting) {
@@ -58,6 +81,15 @@ class ScreenLinkServer(
             known[hello.screenId] = conn
             onHello(msg)
         }
+        // 展示端主动告别：固件在重启/换底座前会发一条。当场把它从台账摘掉，
+        // 不用等 TCP FIN —— 演示现场拔电是常态，等 FIN 会让那台屏在页面上挂几十秒
+        if (msg.t == MsgType.bye && hello == null) {
+            known.entries.filter { it.value === conn }.forEach { (id, c) ->
+                known.remove(id)
+                runCatching { c.close(CLOSE_POLICY, "bye") }
+                onDisconnect(id)
+            }
+        }
         onMessage(msg)
     }
 
@@ -66,7 +98,16 @@ class ScreenLinkServer(
     }
 
     override fun onClose(conn: WebSocket, code: Int, reason: String, remote: Boolean) {
-        known.entries.removeIf { it.value === conn }
+        var gone: String? = null
+        val it2 = known.entries.iterator()
+        while (it2.hasNext()) {
+            val e = it2.next()
+            if (e.value === conn) {
+                it2.remove()
+                gone = e.key
+            }
+        }
+        onDisconnect(gone)
     }
 
     override fun onError(conn: WebSocket?, ex: Exception?) {

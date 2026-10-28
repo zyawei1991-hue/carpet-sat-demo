@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- 34 起前台服务必须逐项申报类型。GT1005 走 BLE，所以要 connectedDevice -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Android 12 起的 BLE 扫描/连接权限；neverForLocation 让它不必再要模糊定位 -->
@@ -34,6 +36,7 @@
 
     <application
         android:name=".CarpetApp"
+        android:icon="@drawable/ic_launcher"
         android:label="车宠卫星 Demo"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.Carpet"
@@ -49,5 +52,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          守护前台服务：定位（围栏、TPI）+ 连着 GT1005（BLE）这两件事就是它的常驻理由。
+          类型按 API 分档在 DemoGuardService 里做，低版本传 connectedDevice 会当场抛异常。
+        -->
+        <service
+            android:name=".DemoGuardService"
+            android:exported="false"
+            android:foregroundServiceType="location|connectedDevice" />
     </application>
 </manifest>

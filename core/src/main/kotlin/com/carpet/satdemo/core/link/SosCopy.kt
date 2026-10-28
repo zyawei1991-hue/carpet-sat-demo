@@ -41,6 +41,20 @@ object SosCopy {
         return listOfNotNull(base, wait).joinToString("｜")
     }
 
+    /**
+     * 撤销那句话。**分三档，而且不许合并成一档**：
+     * 撤销报文本身可能也发不出去，也可能原 SOS 已经进了模组队列 —— 后一种情况
+     * 说"已取消"就是让用户以为不用管了，而那条 SOS 马上就会过顶发出去。
+     * 这一条是 [BANNED] 那张表的另一半：红线不只防"说过头"，也要防"撤过头"。
+     */
+    fun cancelLine(send: SatSend, alreadyHanded: Boolean): String = when {
+        !send.accepted -> "撤销没送出去：" + failPhrase(send.reason) + "｜原报文仍在终端里，请再试一次"
+        alreadyHanded -> "撤销报文已排队，但原 SOS 已交给终端，不保证赶在它前面｜请留意平台是否仍然来电"
+        send.result == SatResult.COMPLETE -> "撤销已发出，卫星已收到撤销报文｜正等平台确认"
+        send.via == SatPath.QUEUED -> "撤销已存入终端队列，过境时随原报文一起发"
+        else -> "撤销报文已发出，未获卫星确认｜若平台联系，请说明误触"
+    }
+
     fun failPhrase(reason: SatFailReason?): String = when (reason) {
         SatFailReason.NO_REPLY -> "终端没有回应，检查供电和连线"
         SatFailReason.TOO_LONG -> "报文超出终端报的长度等级上限"

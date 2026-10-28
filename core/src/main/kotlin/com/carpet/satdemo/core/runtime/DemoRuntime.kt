@@ -2,6 +2,11 @@ package com.carpet.satdemo.core.runtime
 
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.diagnostic.PassthroughLog
+import com.carpet.satdemo.core.devices.Device
+import com.carpet.satdemo.core.devices.DeviceBus
+import com.carpet.satdemo.core.devices.DeviceKind
+import com.carpet.satdemo.core.devices.DeviceLink
+import com.carpet.satdemo.core.devices.Transport
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.link.CellStatus
@@ -52,12 +57,20 @@ class DemoRuntime(
     private val clockMs: () -> Long = System::currentTimeMillis,
     /** 心跳间隔（tick 数，1 tick = 1 秒）。演示时调小，否则观众等不到一条心跳 */
     private val heartbeatEvery: Int = 60,
+    /**
+     * 设备台账（§5.3 硬要求 #2 的落地位置）。**它在场景之外**，
+     * 所以切场景、切 Tab 都不会让一台设备从页面上消失再出现。
+     */
+    val devices: DeviceBus = DeviceBus(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var loop: Job? = null
 
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status
+
+    private val _devices = MutableStateFlow<List<Device>>(emptyList())
+    val devicesSnapshot: StateFlow<List<Device>> = _devices
 
     /**
      * 工程模式日志窗（E.10 #10）。屏上/App 上那个窗口只读这一个对象 ——
@@ -96,6 +109,17 @@ class DemoRuntime(
             val hello = requireNotNull(msg.hello)
             val ok = hello.protocols?.contains(ScreenCodec.CONTRACT_VERSION) ?: true
             log("展示端接入 ${hello.screenId} fw=${hello.fw}" + if (ok) "" else "（契约不匹配）")
+            devices.upsert(
+                Device(
+                    id = "screen:${hello.screenId}",
+                    kind = DeviceKind.DisplayScreen,
+                    title = hello.screenId,
+                    transport = Transport.LanWs,
+                    link = if (ok) DeviceLink.Online(clockMs()) else DeviceLink.Degraded(clockMs(), "契约版本不匹配"),
+                    detail = screenDetail(hello),
+                    actions = listOf("revoke"),
+                ),
+            )
             ackNow(
                 forSeq = msg.seq,
                 screenId = hello.screenId,
@@ -103,6 +127,17 @@ class DemoRuntime(
             )
             pushState()
         }
+        // 断开不能只减计数：台账上那台屏要立刻变成"离线，最后一次见到是几点"，
+        // 否则现场会让人以为还连着
+        server.onDisconnect = { id ->
+            if (id == null) {
+                log("展示端断开（没报过 screen_id）")
+            } else {
+                devices.relink("screen:$id", DeviceLink.Offline(clockMs(), "链路断开"))
+                log("展示端 $id 已断开")
+            }
+        }
+        devices.subscribe { _devices.value = it }
         engine.onSosProgress = { p ->
             if (p is SosProgress.SatSending && p.attempt > 1) log("SOS 第 ${p.attempt} 次重发")
         }
@@ -135,6 +170,43 @@ class DemoRuntime(
         engine.modem.caps?.let { "${it.model} · 等级${it.lengthLevel.level}(${it.maxMessageBytes}B) · ${it.service}" },
         engine.outbox.summary(),
     )
+
+    /**
+     * 卫星终端进台账。**GT1005 掉线是 [DeviceLink.Offline] 不是 [DeviceLink.Absent]**（§5.3 注）：
+     * 用户最需要看到这一行的，正是掉线那一刻。
+     *
+     * id 固定成 `sat:gt1005`，**型号进了 id 会在换型号那次留成两行**（台账上出现一台
+     * "上次见过的 GM1003"是纯粹的噪声）。型号写在 detail 里。
+     */
+    private fun noteModemDevice(now: Long) {
+        val caps = engine.modem.caps
+        val up = runCatching { engine.modem.available }.getOrDefault(false)
+        val link = if (up) {
+            lastModemSeen = now
+            if (caps?.isInvalidCard == true) DeviceLink.Degraded(now, "无效卡，额度与长度都不能信")
+            else DeviceLink.Online(now)
+        } else {
+            DeviceLink.Offline(lastModemSeen, "终端没有回应：查供电、串口、蓝牙")
+        }
+        devices.merge(
+            Device(
+                id = "sat:gt1005",
+                kind = DeviceKind.SatelliteModule,
+                title = caps?.model?.name ?: "卫星终端",
+                transport = Transport.Uart,
+                link = link,
+                detail = listOfNotNull(
+                    caps?.let { "长度等级 ${it.lengthLevel.level}（上限 ${it.maxMessageBytes}B）" },
+                    caps?.let { "业务 ${it.service}" },
+                    caps?.let { if (it.isInvalidCard) "卡号无效" else "卡号 ${it.cardId}" },
+                    "队列 ${engine.outbox.handedSize}/${engine.outbox.policy.capacity} 已交模组，待补发 ${engine.outbox.size}",
+                    "驱动 ${engine.modem::class.simpleName}",
+                ),
+            ),
+        )
+    }
+
+    private var lastModemSeen = 0L
 
     /** NetworkMonitor 每秒的落点。状态机只认这里进来的蜂窝观测。 */
     fun onCellSample(sample: CellStatus) {
@@ -184,6 +256,55 @@ class DemoRuntime(
 
     private fun cellOk() = lastCell.usable
 
+    /**
+     * 误触撤销。App 上那个"撤销 SOS"按钮走这里，圆屏上的按钮也走这里。
+     *
+     * 结果的话只能由 [SosCopy.cancelLine] 生成 —— 撤销比发送更容易说错，
+     * 因为"按了撤销"和"救回来了"是两件事（§6.1 红线一的另一半）。
+     */
+    fun cancelSos(onResult: (DemoEngine.CancelResult) -> Unit = {}): Job = scope.launch {
+        val out = engine.cancelSos(nowSec = clockMs() / 1000, cellOk = cellOk())
+        log("SOS 撤销 ${SosCopy.cancelLine(out.send, out.alreadyHanded)} ${out.cancelFrameHex}")
+        push(
+            MsgType.event,
+            if (out.accepted) EventKind.sos_cancelled else EventKind.sos_failed,
+            "frame_hex" to JsonPrimitive(out.cancelFrameHex),
+            "sat_result" to JsonPrimitive(out.send.result.name.lowercase()),
+            "already_handed" to JsonPrimitive(out.alreadyHanded),
+        )
+        onResult(out)
+    }
+
+    /** 台账上那台屏的说明行。措辞集中在这儿，固件那边只需把 hello 报全 */
+    private fun screenDetail(hello: com.carpet.satdemo.core.protocol.HelloPayload): List<String> =
+        listOfNotNull(
+            "固件 ${hello.fw}",
+            "底座 ${hello.dockType}",
+            hello.wifiRssi?.let { "Wi-Fi ${it} dBm" },
+            hello.batteryMv?.let { "电池 ${it / 1000.0} V" } ?: "外接供电",
+            "契约 ${hello.protocols?.joinToString("/") ?: "-"}",
+            "接入点 ws://${_status.value.localIp ?: "-"}:${ScreenLinkServer.PORT}",
+        )
+
+    /**
+     * 现场加一台屏。出厂烧死 screen_id 在演示现场是必错的（屏是卖方发的，id 我们改不了），
+     * 所以这里必须能当场放行 —— 但**放行不等于放开总闸**，accepting 仍是那道门。
+     */
+    fun allowScreen(screenId: String): Boolean {
+        val added = server.allow(screenId)
+        log(if (added) "已把 $screenId 加进白名单" else "$screenId 本来就在白名单里")
+        return added
+    }
+
+    fun allowedScreens(): Set<String> = server.allowed()
+
+    /** 撤掉一台。立刻断开它，不是等超时（§ screen-link.md 安全边界那条） */
+    fun revokeScreen(screenId: String) {
+        server.revoke(screenId)
+        devices.relink("screen:$screenId", DeviceLink.Offline(clockMs(), "已被车主移出白名单"))
+        log("已移出白名单：$screenId")
+    }
+
     private var lastCell = CellStatus(hasInternetCapability = false, validated = false, signalLevel = 0)
 
     /** hello 的回执在 WebSocket 线程上发，tick 在主循环发，所以序号得是原子的 */
@@ -226,6 +347,7 @@ class DemoRuntime(
     suspend fun tickOnce() {
         val now = clockMs()
         push(engine.onTick(now))
+        noteModemDevice(now)
         // TPI 是分钟级的活，但每秒问一句"到点了没"很便宜；状态一变就上日志，
         // 现场看到"下行收不到"时至少能回溯到位置喂没喂进去（E.5）
         engine.tickTpi()?.let { noteTpi(it.state) }

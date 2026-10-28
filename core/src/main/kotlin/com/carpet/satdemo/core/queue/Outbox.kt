@@ -107,6 +107,13 @@ class Outbox(
     val size: Int get() = waiting.size
     val handedSize: Int get() = handed.size
 
+    /**
+     * 已经交给模组盯梢的报文 hex。撤销 SOS 时要用它判断
+     * **"原报文还在我们手里"还是"已经到模组那边了"** —— 这两种情况的文案不一样，
+     * 前一种可以说"已取消"，后一种只能说"撤销报文已排队，不保证赶在原报文前面"。
+     */
+    val handedHexes: List<String> get() = handed.map { it.hex }
+
     /** 测试和日志看的队首顺序（优先级高的在前，同档按入队先后） */
     val hexes: List<String> get() = ordered(waiting).map { it.hex }
 

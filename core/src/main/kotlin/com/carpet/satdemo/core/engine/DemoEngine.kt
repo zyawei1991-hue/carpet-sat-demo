@@ -27,6 +27,10 @@ import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.LinkState
 import com.carpet.satdemo.core.protocol.ModuleCaps
 import com.carpet.satdemo.core.protocol.MsgType
+import com.carpet.satdemo.core.protocol.AccessService
+import com.carpet.satdemo.core.protocol.MessageBudget
+import com.carpet.satdemo.core.protocol.ModuleModel
+import com.carpet.satdemo.core.protocol.MsgLengthLevel
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.SatState
 import com.carpet.satdemo.core.protocol.ScreenMessage
@@ -311,6 +315,99 @@ class DemoEngine(
         // 星上确认发出去了 = 模组队列里已经没有它，盯梢副本撤掉
         if (send.result == SatResult.COMPLETE) outbox.confirm(lastSosHex)
         return SosResult(send, lastSosHex, f != null, sosAttempts, sosNextPassInS)
+    }
+
+    /**
+     * **误触撤销**（§3 那张表里标"引擎层已实现、UI 层还没做"的那一条）。
+     *
+     * 说清它能做到什么、做不到什么，比实现它更重要：
+     *  - 原 SOS **还在 App 队列里没交出去**时，撤销是真的拦住了 —— 顺手把盯梢副本 release 掉；
+     *  - 原 SOS **已经进了模组队列**时，撤销只是又排了一条 `MSG_SOS_CANCEL` 上去，
+     *    谁先过顶发出去不由我们决定。这时候界面上写"已取消"就是撒谎。
+     * 所以返回值里带 [CancelOutcome.Blocked]，UI 必须按这一档措辞（走 [com.carpet.satdemo.core.link.SosCopy.cancelLine]）。
+     */
+    suspend fun cancelSos(nowSec: Long, cellOk: Boolean): CancelResult {
+        val f = fix
+        val handed = outbox.handedHexes.contains(lastSosHex)
+        val out = runCatching {
+            sos.cancel(
+                lat = f?.lat ?: 0.0,
+                lon = f?.lon ?: 0.0,
+                whenSec = nowSec,
+                batteryPct = phoneBatteryPct,
+                flags = frameFlags(cellOk),
+            )
+        }.getOrDefault(
+            SosCoordinator.CancelOutcome(
+                SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY),
+                lastSosHex,
+            ),
+        )
+        val send = out.send
+
+        if (send.accepted) {
+            // 撤销能被模组收下，就把原 SOS 的 App 侧副本清掉，否则它会被一直补发、越撤越多
+            outbox.release(lastSosHex)
+            sosParked = false
+            if (!handed) {
+                sosLevel = SosLevel.normal
+                sosSinceTs = null
+                sosAttempts = 0
+            }
+        }
+        lastSosSend = send
+        return CancelResult(send, handed, out.frameHex)
+    }
+
+    /** 撤销的结果。[alreadyHanded] 为真代表原 SOS 已经在模组那边了，撤销只是又发一条 */
+    data class CancelResult(
+        val send: SatSend,
+        val alreadyHanded: Boolean,
+        val cancelFrameHex: String,
+    ) {
+        val accepted: Boolean get() = send.accepted
+    }
+
+    /**
+     * 用量台账（§8 R1 那条"用量页"的数据源）。
+     *
+     * 全部现读，不留副本：**额度是型号口径**（GM1001 500 / GM1003 50，§9 #12 还没确认），
+     * 长度等级是**卡口径**（ICI 现场报的），写死一个数就会在换卡/换型号那天变成假数据。
+     */
+    fun usage(): Usage = Usage(
+        model = modem.caps?.model,
+        level = modem.caps?.lengthLevel,
+        service = modem.caps?.service,
+        cardId = modem.caps?.cardId,
+        capacity = outbox.policy.capacity,
+        waiting = outbox.size,
+        handedOver = outbox.handedSize,
+        dropped = outbox.dropped,
+        reclaimed = outbox.reclaimed,
+        budget = MessageBudget.from(modem.caps),
+    )
+
+    /** 见 [usage]。空值一律是"没读到"，UI 要显示 `--` 而不是 0 */
+    data class Usage(
+        val model: ModuleModel?,
+        val level: MsgLengthLevel?,
+        val service: AccessService?,
+        val cardId: String?,
+        val capacity: Int,
+        val waiting: Int,
+        val handedOver: Int,
+        val dropped: Int,
+        val reclaimed: Int,
+        val budget: MessageBudget,
+    ) {
+        /** 模组那侧还剩几个槽。已交出去的都算占位，因为它们可能还没发走 */
+        val slotsLeft: Int get() = (capacity - handedOver).coerceAtLeast(0)
+
+        /** 水位，0f..1f。给那条进度条 —— §5.2「图形必须带语义」：这条画的就额度压力 */
+        val pressure: Float get() = if (capacity <= 0) 0f else (handedOver.toFloat() / capacity).coerceIn(0f, 1f)
+
+        /** 无效卡（ICI 回 1）：这时候连额度都不能信，用量页要说"这张卡没就绪" */
+        val invalidCard: Boolean get() = cardId == ModuleCaps.INVALID_CARD_ID
     }
 
     /** 到点就把位置推给模组。App 的 1Hz 循环调它，没有 TPI 任务时返回 null */

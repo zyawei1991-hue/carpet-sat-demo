@@ -79,12 +79,27 @@ class SosCoordinator(
         return last
     }
 
-    /** 误触撤销。走同一条卫星链路，所以也要等确认才算真撤了 */
-    suspend fun cancel(lat: Double, lon: Double, whenSec: Long, batteryPct: Int, flags: Int): SatSend {
+    /**
+     * 误触撤销。走同一条卫星链路，所以也要等确认才算真撤了。
+     *
+     * 返回里带 [CancelOutcome.frameHex]：撤销**不发 progress**（它不是三次重发那套流程），
+     * 调用方拿不到 hex 就没法在日志和协议事件里说清"撤的是哪一帧"。
+     */
+    suspend fun cancel(
+        lat: Double,
+        lon: Double,
+        whenSec: Long,
+        batteryPct: Int,
+        flags: Int,
+    ): CancelOutcome {
         val hex = encoder.encode(SosFrame.MSG_SOS_CANCEL, lat, lon, whenSec, batteryPct, flags).toHex()
         val via = if (modem.supportsImmediateSend) SatPath.IMMEDIATE else SatPath.QUEUED
-        return runCatching {
+        val send = runCatching {
             if (via == SatPath.IMMEDIATE) modem.sendMcq(hex) else modem.enqueueSfq(hex)
         }.getOrDefault(SatSend.failed(via, SatFailReason.NO_REPLY))
+        return CancelOutcome(send, hex)
     }
+
+    /** 撤销的结果：报文本身 + 它是哪一帧 */
+    data class CancelOutcome(val send: SatSend, val frameHex: String)
 }

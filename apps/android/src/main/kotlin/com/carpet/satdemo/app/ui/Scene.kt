@@ -66,7 +66,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         "用车养车 · 卫星链路",
         SceneProfile(
             headline = "link",
-            cards = listOf("sos", "link", "pass", "terminal", "vehicle.status", "vehicle.energy", "fence", "queue", "position", "vehicle.find"),
+            cards = listOf("sos", "link", "pass", "terminal", "vehicle.status", "vehicle.energy", "fence", "queue", "usage", "position", "vehicle.find"),
             actions = listOf("一键 SOS", "寻车", "远程熄火", "上报车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
@@ -79,7 +79,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         "无人区 · 徒步 · 救援",
         SceneProfile(
             headline = "pass",
-            cards = listOf("sos", "pass", "position", "tpi", "queue", "sentinel", "terminal"),
+            cards = listOf("sos", "pass", "position", "tpi", "queue", "usage", "sentinel", "terminal"),
             actions = listOf("一键 SOS", "上报轨迹", "静默心跳"),
             input = InputMode.Touch,
             basePrivacy = PrivacyTier.Guarded,

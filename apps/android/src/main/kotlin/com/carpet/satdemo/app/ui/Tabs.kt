@@ -87,8 +87,8 @@ fun MeTab(
             ToggleRow(
                 "守护服务",
                 status.running,
-                "关掉会断开与圆屏的连接，App 队列里欠的报文留着",
-            ) { on -> if (on) app.runtime.start() else app.runtime.stop() }
+                "常驻通知会钉住进程，锁屏后 1Hz 那一圈照跑；关掉就断开与圆屏的连接",
+            ) { on -> app.setGuard(on) }
             ToggleRow("允许展示端接入", flags.acceptScreens, "默认关。演示现场才放开") {
                 app.setFlag(flags.copy(acceptScreens = it))
             }
@@ -107,6 +107,7 @@ fun MeTab(
                 status.snapshot?.fence?.active == true,
                 "越界走卫星发一条，不等蜂窝") { app.setFence(it, "西湖景区") }
         }
+        RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
         Button(

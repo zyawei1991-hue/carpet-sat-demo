@@ -94,6 +94,12 @@ class SimulatedModem(
     var capsOverride: ModuleCaps = ModuleCaps.worstKnown()
     override val caps: ModuleCaps? get() = if (reachable) capsOverride else null
 
+    /**
+     * 替身也能演"这颗模组不支持即时发送"—— 语句级实现（[SentenceModem]）就是这个档，
+     * 真机到货初期同样走排队那一路。SOS 的"已交模组"和"星上确认"两种结果只有在这里才演得出来。
+     */
+    override var supportsImmediateSend: Boolean = true
+
     override suspend fun readFix(): Fix? = lastFix
 
     override suspend fun sendMcq(hex: String): SatSend = guarded(SatPath.IMMEDIATE) {

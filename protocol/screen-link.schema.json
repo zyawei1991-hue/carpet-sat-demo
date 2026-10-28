@@ -130,7 +130,7 @@
       "properties": {
         "kind": {
           "enum": [
-            "sos_triggered", "sos_acked", "sos_failed",
+            "sos_triggered", "sos_acked", "sos_failed", "sos_cancelled",
             "fence_enter", "fence_exit",
             "sentinel_motion",
             "link_switched", "sat_visible",
@@ -151,7 +151,7 @@
       "required": ["cmd"],
       "properties": {
         "cmd": {
-          "enum": ["sos_press", "track_pull", "set_demo_mode", "set_fence", "reboot_ui"],
+          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui"],
           "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹"
         },
         "args": { "type": "object" }
