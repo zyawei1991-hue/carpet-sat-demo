@@ -83,6 +83,15 @@ data class SatState(
     @SerialName("module_ok") val moduleOk: Boolean = true,
     /** App 侧攒着待补发的条数。掉线期间这个数字一直涨，就是"一条不能丢"的凭据 */
     @SerialName("queue_pending") val queuePending: Int = 0,
+    /**
+     * 距上次成功推送 TPI 多少秒（E.5）。模组那边的位置是**我们喂给它的**，
+     * 它过期就代表下行可能收不到 —— 这不再是可省的遥测。
+     */
+    @SerialName("tpi_age_s") val tpiAgeS: Long? = null,
+    /** TPI 陈旧到不能信。展示端据此打「位置已过期 N 分钟，卫星可能投递失败」。null = 这条链路没有 TPI 概念（比如场景层替身） */
+    @SerialName("tpi_stale") val tpiStale: Boolean? = null,
+    /** 模组固件升级进度 0~99；没在升级为 null。升级期间所有发送都被写锁挡下（E.10 #6） */
+    @SerialName("upgrade_pct") val upgradePct: Int? = null,
 )
 
 @Serializable

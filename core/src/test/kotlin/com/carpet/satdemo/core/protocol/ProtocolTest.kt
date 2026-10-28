@@ -157,6 +157,11 @@ class ScreenLinkContractTest {
         assertFalse(state.fence.inside)
         assertEquals(-86.3, state.fence.distM!!, 1e-9)
         assertEquals(SosLevel.sent, state.sos.level)
+        // 红线一在样例里就得示范清楚：这一帧是"星上收了、平台还没回执"
+        assertTrue(state.sos.satAck == true, "sent 这一档必须带 sat_ack=true，否则展示端分不清星上和平台")
+        assertEquals(120L, state.sat.tpiAgeS, "TPI 年龄是圆屏那行「位置已过期 N 分钟」的输入（E.10 #5）")
+        assertEquals(false, state.sat.tpiStale)
+        assertEquals(null, state.sat.upgradePct, "正常帧不该带升级进度")
         assertTrue(state.demoMode)
     }
 

@@ -40,6 +40,13 @@ enum class SatFailReason {
 
     /** 上电会话没走完 / 无效卡：这时候连预算都不知道，发什么都可能是白发 */
     NOT_PROVISIONED,
+
+    /**
+     * 模组正在升级固件，写锁把这一条挡在门外（〔SDK文 §9-2〕）。
+     * 语义上是**一个字节都没写出去**，所以调用方要把报文留在 App 侧队列，
+     * 绝不能当成"发了没回"去重发 —— 那是 [SatResult.NO_ACK] 的活儿。
+     */
+    UPGRADING,
     ;
 
     companion object {

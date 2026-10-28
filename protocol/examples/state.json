@@ -11,11 +11,15 @@
       "cnr": 42.5,
       "next_pass_in_s": 143,
       "module_battery": 87,
-      "fw": "GM1001_v1.2.3"
+      "fw": "GM1001_v1.2.3",
+      "module_ok": true,
+      "queue_pending": 2,
+      "tpi_age_s": 120,
+      "tpi_stale": false
     },
     "gnss": { "lat": 30.2741000, "lon": 120.1551000, "alt_m": 12.4, "hdop": 0.9, "source": "gt1005", "fix_age_s": 4.2 },
     "fence": { "active": true, "inside": false, "name": "西湖景区", "dist_m": -86.3 },
-    "sos": { "level": "sent", "since_ts": 1795199940000, "attempts": 1 },
+    "sos": { "level": "sent", "since_ts": 1795199940000, "attempts": 1, "sat_ack": true },
     "sentinel": { "armed": true, "last_motion_ts": 1795199900000, "drift_m": 86.3 },
     "phone_battery": 63,
     "demo_mode": true

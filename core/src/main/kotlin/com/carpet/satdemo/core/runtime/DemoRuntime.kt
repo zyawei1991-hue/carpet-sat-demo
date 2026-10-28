@@ -5,6 +5,7 @@ import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.modem.SatResult
 import com.carpet.satdemo.core.modem.SimulatedModem
+import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.link.SosCopy
 import com.carpet.satdemo.core.modem.SosProgress
 import com.carpet.satdemo.core.protocol.AckPayload
@@ -203,6 +204,9 @@ class DemoRuntime(
     suspend fun tickOnce() {
         val now = clockMs()
         push(engine.onTick(now))
+        // TPI 是分钟级的活，但每秒问一句"到点了没"很便宜；状态一变就上日志，
+        // 现场看到"下行收不到"时至少能回溯到位置喂没喂进去（E.5）
+        engine.tickTpi()?.let { noteTpi(it.state) }
         push(engine.drainProbe(now))
         push(engine.drainPending(now))
         engine.nextPassInS = runCatching { engine.modem.secondsToNextPass() }.getOrNull()
@@ -220,11 +224,47 @@ class DemoRuntime(
         )
     }
 
+    /**
+     * 演一次模组固件升级：占住全局写锁，期间 TPI、心跳、补发、SOS 全被挡下（E.10 #6）。
+     * 厂商侧的依据是〔SDK文 §9-2〕"正在更新模组任务时所有数据发送都不可用"。
+     * 屏上那排按钮的禁用态看 `sat.upgrade_pct`（§5.2）。
+     */
+    fun firmwareUpgrade(onProgress: (Int) -> Unit = {}, steps: Int = 3): Job = scope.launch {
+        val done = engine.modem.gate.runUpgrade(clockMs()) { progress ->
+            repeat(steps) { i ->
+                val pct = (i + 1) * 99 / steps
+                progress(pct)
+                onProgress(pct)
+                delay(UPGRADE_STEP_MS)
+            }
+        }
+        log(if (done == null) "升级没开始：已有一场在跑" else "升级结束，写锁已释放，被挡下的报文会补发")
+    }
+
+    private var lastTpiState: TpiTracker.State? = null
+
+    /** TPI 状态只在跳变时记一行，否则 1Hz 会把日志刷满 */
+    private fun noteTpi(state: TpiTracker.State) {
+        if (state == lastTpiState) return
+        lastTpiState = state
+        log(
+            when (state) {
+                TpiTracker.State.NO_SOURCE -> "没有位置源，模组里是空的，下行大概率收不到"
+                TpiTracker.State.STALE -> "位置已过期，卫星可能投递失败"
+                TpiTracker.State.BLOCKED -> "TPI 被升级写锁挡下"
+                TpiTracker.State.REJECTED -> "TPI 模组没有回显"
+                TpiTracker.State.DUE -> "TPI 到点，推送位置"
+                else -> "TPI 正常"
+            },
+        )
+    }
+
     private fun push(
         t: MsgType,
         kind: EventKind,
         vararg fields: Pair<String, JsonElement>,
     ) {
+
         push(
             listOf(
                 ScreenMessage(
@@ -289,6 +329,9 @@ class DemoRuntime(
     companion object {
         /** 占位。真实值等时空道宇分配车主 ID 段位，见 docs/DECISIONS.md D3 的外部依赖 */
         const val DEFAULT_OWNER_ID = 12_061L
+
+        /** 演示用的一场升级分几段、每段多久。真机上这个数由厂商的 updateSOC 进度决定 */
+        private const val UPGRADE_STEP_MS = 400L
 
         fun firstLanAddress(): String? = NetworkInterface.getNetworkInterfaces().asSequence()
             .filter { it.isUp && !it.isLoopback }

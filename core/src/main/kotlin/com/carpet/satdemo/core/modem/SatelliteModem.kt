@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.ModuleCaps
 
 /** SDK 的 MCQ 回调只有这三种终局，这里原样映射出来，不额外造概念。 */
@@ -72,8 +73,20 @@ interface SatelliteModem {
     /**
      * 手机位置反向喂给模组（E.5）。SDK 侧对应 `updateLocation(经度, 纬度)`。
      * 上电一次、之后 1~10 分钟一次；模组复位/掉电即丢；**经纬度直接影响下行能不能收到**。
+     *
+     * 参数是 [GeodeticPosition] 而不是两个 double：SDK 的 `(经, 纬)` 和语句里的 `(纬, 经)`
+     * 顺序正好相反，裸 double 传参编译器抓不住（E.5 末尾那条坑）。
+     *
+     * @return 模组是否认了这条（回显了 TPI）。false 表示升级写锁挡下或模组没应答。
      */
-    suspend fun updateLocation(lon: Double, lat: Double)
+    suspend fun updateLocation(position: GeodeticPosition): Boolean
+
+    /**
+     * 升级期间的全局写锁（E.10 #6）。〔SDK文 §9-2〕"正在更新模组任务时所有数据发送都不可用"，
+     * 所以这不是可选保险。没有升级概念的替身实现给 [ModemGate.IDLE] 就行。
+     */
+    val gate: ModemGate
+        get() = ModemGate.IDLE
 
     /**
      * 取走并清空"模组收下之后又主动丢弃"的报文（GM1003 的 4 分钟超时，〔规 §3.1.13 注〕）。
@@ -97,7 +110,11 @@ interface SatelliteModem {
     fun close()
 }
 
-data class Fix(val lon: Double, val lat: Double, val hdop: Double?, val ageSec: Double?)
+/**
+ * 从模组读回来的位置。坐标用带字段名的类型（理由见 [updateLocation]），
+ * 顺带把"这是 TPI 回显、不是模组自己定位的"那层含义留在调用方的注释里（〔规 §3.1.2 注〕）。
+ */
+data class Fix(val position: GeodeticPosition, val hdop: Double?, val ageSec: Double?)
 
 /** null 表示当前没有锁定任何星（搜星中或地平线以下） */
 data class SatLock(val name: String, val cnr: Double)

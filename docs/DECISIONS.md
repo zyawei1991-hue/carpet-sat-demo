@@ -68,6 +68,15 @@ App 不直接调 SDK 的 `DispatchManager`，中间加一层 `SatelliteModem`（
 猜的，没有一条经过真机确认**。串口文档到了只改 `Gt1005Verbs`，`UartModemTest` 的断言应该原样通过 ——
 通不过就说明骨架里混进了猜测，那是要改骨架。
 
+**2026-10 的后续：这条预言应验了，但应验的方式是整张表被删。** 时空道宇 SDK（两个 aar + 28 页《通用数据接口规范 V1.0》）到手解完后确认：协议是 **NMEA 风格 ASCII 语句**（`$CCXXX,…*hh<CR><LF>`，`$` 与 `*` 之间逐字节异或），不是我们以为的二进制帧。于是：
+
+- `Gt1005Verbs` **整张删除**，语句组包/校验/解析由 `GsatSentence` + 厂商 `DispatchManager` 负责；
+- `UartModem` **退化成纯字节管道**（`send(byte[])` / `receive(byte[])`），正是 D7 当初预留的那个形状 —— SDK 自己不做 IO，所以 UART 路线合法，BLE 只是官方 demo 的一种实现；
+- 协议语义上移到 `SentenceModem`（上电会话 DII→ICI→TPI→PDI、按 ICI 的 `serviceType` 分叉收信状态机、升级期全局写锁 `ModemGate`、TPI 周期任务 `TpiTracker`），业务侧仍只认 `SatelliteModem`；
+- `FakeGsatModule` 按规范的字段序号组包，`SentenceModemTest` 因此同时是**那份 28 页文档的一次可执行翻译** —— 真机到货那天变的只有管道。
+
+值得单独记一笔的两个"没硬件才撞得出来"的坑：① SDK 的 `updateLocation(经, 纬)` 和语句里的 `(纬, 经)` **顺序正好相反**，传反了编译不报错，要到外场才发现定位在地球对面 —— 所以坐标现在只允许以 `GeodeticPosition` 这种**带字段名的类型**传递，裸 `double` 入口全部封掉；② 星上 ACK ≠ 核心网收到 ≠ 平台受理（〔规 §3.1.4 注6〕），判序写成 `contains("ACK")` 就会把"没确认"演成"已送达"，这是 §6.1 红线一的由来。
+
 写这一步时踩到过一个真会咬人的坑：`NO_ACK` 以 `ACK` 结尾，判序反了就把"星上没确认"读成"已送达"。
 这类错误只有在没硬件时先把骨架写出来、再拿假口去撞才会暴露，等接上真机就是现场翻车。
 

@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.ModuleCaps
 import kotlinx.coroutines.delay
 
@@ -60,6 +61,13 @@ class SimulatedModem(
 
     override val available: Boolean get() = reachable
 
+    /** 演示里要"正在升级"这一档，直接对它 [runUpgrade] 就行，不用真等 flash */
+    override val gate: ModemGate = ModemGate()
+
+    /** 演一次模组固件升级：占住写锁，进度 0~99。升级期间所有发送应该被拒 */
+    suspend fun runUpgrade(body: suspend (progress: (Int) -> Unit) -> Unit = { it(50) }): Boolean =
+        gate.runUpgrade(clock.nowMs(), body) != null
+
     /**
      * 场景层替身默认给**最坏档**能力（等级 1 = ≤90 B、短接入、GM1003），
      * 因为演示里跑出来的结论必须能扛住真机的坏情况；要演好结果就显式换掉它。
@@ -69,25 +77,31 @@ class SimulatedModem(
 
     override suspend fun readFix(): Fix? = lastFix
 
-    override suspend fun sendMcq(hex: String): SatSend {
-        if (!reachable) return SatSend.failed(SatPath.IMMEDIATE, SatFailReason.NO_REPLY)
+    override suspend fun sendMcq(hex: String): SatSend = guarded(SatPath.IMMEDIATE) {
+        if (!reachable) return@guarded SatSend.failed(SatPath.IMMEDIATE, SatFailReason.NO_REPLY)
         sent += hex
         sleep(txLatencyMs)
         val result = if (inPassWindow()) SatResult.COMPLETE else SatResult.NO_ACK
         lockHandler?.invoke(if (inPassWindow()) SatLock(nextPassName(), CNR) else null)
-        return SatSend(result, SatPath.IMMEDIATE)
+        SatSend(result, SatPath.IMMEDIATE)
     }
 
-    override suspend fun enqueueSfq(hex: String): SatSend {
-        if (!reachable) return SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY)
+    override suspend fun enqueueSfq(hex: String): SatSend = guarded(SatPath.QUEUED) {
+        if (!reachable) return@guarded SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY)
         sent += hex
         // 场景层不建模"模组队列被超时丢弃"，那条口径由 SentenceModemTest 钉
-        return SatSend(SatResult.NO_ACK, SatPath.QUEUED)
+        SatSend(SatResult.NO_ACK, SatPath.QUEUED)
     }
 
-    override suspend fun updateLocation(lon: Double, lat: Double) {
-        lastFix = Fix(lon, lat, hdop = 2.5, ageSec = 1.0)
-    }
+    /** 升级写锁挡下的发送统一给 [SatFailReason.UPGRADING]：这是"没写出去"，不是"写了没人认" */
+    private suspend fun guarded(via: SatPath, block: suspend () -> SatSend): SatSend =
+        gate.write(via.name) { block() } ?: SatSend.failed(via, SatFailReason.UPGRADING)
+
+    override suspend fun updateLocation(position: GeodeticPosition): Boolean =
+        gate.write("TPI") {
+            lastFix = Fix(position, hdop = 2.5, ageSec = 1.0)
+            true
+        } ?: false
 
     override fun onDownlink(handler: (String) -> Unit) {
         downlink = handler
@@ -122,6 +136,6 @@ class SimulatedModem(
 
     companion object {
         private const val CNR = 42.5
-        private val DEFAULT_FIX = Fix(120.1551, 30.2741, hdop = 2.5, ageSec = 2.0)
+        private val DEFAULT_FIX = Fix(GeodeticPosition.of(30.2741, 120.1551), hdop = 2.5, ageSec = 2.0)
     }
 }

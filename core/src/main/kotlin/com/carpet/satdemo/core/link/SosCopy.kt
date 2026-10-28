@@ -48,6 +48,7 @@ object SosCopy {
         SatFailReason.DROPPED_BY_TIMEOUT -> "上次过境没发出去，已重新排队"
         SatFailReason.TRANSMIT_FAILED -> "终端发射失败"
         SatFailReason.NOT_PROVISIONED -> "终端还没就绪，正在建立会话"
+        SatFailReason.UPGRADING -> "终端正在升级固件，升级期间发不出去，完成后会自动补发"
         null -> "原因未知"
     }
 

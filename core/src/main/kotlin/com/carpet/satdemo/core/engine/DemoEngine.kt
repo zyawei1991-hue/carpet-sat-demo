@@ -14,9 +14,11 @@ import com.carpet.satdemo.core.modem.SatSend
 import com.carpet.satdemo.core.modem.SatelliteModem
 import com.carpet.satdemo.core.modem.SosCoordinator
 import com.carpet.satdemo.core.modem.SosProgress
+import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.EventKind
 import com.carpet.satdemo.core.protocol.EventPayload
 import com.carpet.satdemo.core.protocol.FenceState
+import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.GnssState
 import com.carpet.satdemo.core.protocol.LinkPrimary
@@ -47,6 +49,11 @@ class DemoEngine(
     val modem: SatelliteModem,
     ownerId: Long,
     val policy: LinkPolicy = LinkPolicy(),
+    /**
+     * TPI 周期任务（E.10 #5）。位置是**喂给**模组的，模组那边过期就收不到下行，
+     * 所以这件事得有专门的持有者；不给就是"这条链路没有 TPI 概念"（场景层替身、单测）。
+     */
+    private val tpi: TpiTracker? = null,
 ) {
     private val machine = LinkStateMachine(policy)
     private val encoder = SosFrameEncoder(ownerId)
@@ -90,6 +97,9 @@ class DemoEngine(
     private var sosNextPassInS: Long? = null
     private var lastSosSend = SatSend(SatResult.FAIL, SatPath.IMMEDIATE, SatFailReason.NO_REPLY)
     private var lastSosHex = ""
+
+    /** SOS 被写锁/没电挡在门外，整条还留在 App 队列里。等模组一空就要立刻冲出去，不等 RECOVER */
+    private var sosParked = false
     private var fix: GnssState? = null
     private var phoneBatteryPct = 100
     private var fence = FenceState(active = false, inside = true)
@@ -149,6 +159,8 @@ class DemoEngine(
     /** 手机 GPS 或 GT1005 GNSS 出了个定位 */
     fun onFix(lat: Double, lon: Double, source: GnssSource, hdop: Double?, fixAgeSec: Double?) {
         fix = GnssState(lat, lon, altM = null, hdop = hdop, source = source, fixAgeS = fixAgeSec)
+        // 位置一有新值就交给 TPI 任务：模组那边只认我们推过去的这一份（E.5）
+        tpi?.onPosition(GeodeticPosition.of(lat, lon))
     }
 
     fun onPhoneBattery(pct: Int) {
@@ -197,15 +209,19 @@ class DemoEngine(
      */
     suspend fun drainPending(nowMs: Long): List<ScreenMessage> {
         reclaimDropped()
-        if (phase != LinkPhase.RECOVER) return emptyList()
+        // 被写锁挡下的 SOS 不等 RECOVER：升级一结束就该冲出去，晚了就是人命。
+        // 普通心跳仍然只在 RECOVER 刷，CELL 态下不该去碰卫星链路
+        if (phase != LinkPhase.RECOVER && !sosParked) return emptyList()
         var flushed = 0
         while (flushed < DRAIN_BURST && pending.isNotEmpty()) {
             val hex = pending.first()
             if (!modem.enqueueSfq(hex).accepted) break
             pending.removeFirst()
+            if (sosParked && hex == lastSosHex) sosParked = false
             flushed++
         }
-        return if (pending.isEmpty()) emit(machine.onSignal(LinkSignal.QueueDrained(nowMs)), nowMs) else emptyList()
+        return if (pending.isEmpty() && phase == LinkPhase.RECOVER)
+            emit(machine.onSignal(LinkSignal.QueueDrained(nowMs)), nowMs) else emptyList()
     }
 
     /**
@@ -232,8 +248,17 @@ class DemoEngine(
 
         // §6.1 红线一：星上 ACK 不能把状态推到 acked。acked 只由平台回执触发，见 onPlatformAck()
         sosLevel = if (send.accepted) SosLevel.sent else SosLevel.pending
+        // 一个字节都没写出去的（升级写锁、没电、缓存满），留在 App 侧队列等补发。
+        // 已经存进模组队列的（accepted）不能重复留：GM1003 只有 50 个槽，重三条就是 6%
+        if (!send.accepted && send.reason in REQUEUE_REASONS) {
+            pending.addFirst(lastSosHex)
+            sosParked = true
+        }
         return SosResult(send, lastSosHex, f != null, sosAttempts, sosNextPassInS)
     }
+
+    /** 到点就把位置推给模组。App 的 1Hz 循环调它，没有 TPI 任务时返回 null */
+    suspend fun tickTpi(): TpiTracker.Status? = tpi?.tick()
 
     /**
      * 平台侧回执到了（4G 下行或卫星下行里的救援受理确认）。
@@ -282,37 +307,45 @@ class DemoEngine(
      */
     val sosSend: SatSend get() = lastSosSend
 
-    fun snapshot(): StatePayload = StatePayload(
-        link = LinkState(
-            primary = if (phase == LinkPhase.CELL || phase == LinkPhase.RECOVER) LinkPrimary.cell else LinkPrimary.sat,
-            cellOk = phase == LinkPhase.CELL || phase == LinkPhase.RECOVER,
-            cellDbm = null,
-            satOk = modem.available && lock != null,
-        ),
-        sat = SatState(
-            phase = satPhase(),
-            // 终端都没了，上一次锁定的星名和 CNR 就是旧数据，再画出来等于骗人
-            satName = if (modem.available) lock?.name else null,
-            cnr = if (modem.available) lock?.cnr else null,
-            nextPassInS = nextPassInS?.toInt(),
-            moduleBattery = null,
-            moduleOk = modem.available,
-            queuePending = pending.size,
-        ),
-        gnss = fix ?: GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
-        fence = fence,
-        sos = SosState(
-            sosLevel,
-            sosSinceTs,
-            sosAttempts.takeIf { it > 0 },
-            // 星上收没收到 ≠ 平台收没收到，屏上要把这两件事分开画（§6.1 红线一）
-            satAck = lastSosSend.result == SatResult.COMPLETE,
-            fail = lastSosSend.reason?.name?.lowercase(),
-        ),
-        sentinel = sentinel,
-        phoneBattery = phoneBatteryPct,
-        demoMode = demoMode,
-    )
+    fun snapshot(): StatePayload {
+        val tpiStatus = tpi?.status()
+        return StatePayload(
+            link = LinkState(
+                primary = if (phase == LinkPhase.CELL || phase == LinkPhase.RECOVER) LinkPrimary.cell else LinkPrimary.sat,
+                cellOk = phase == LinkPhase.CELL || phase == LinkPhase.RECOVER,
+                cellDbm = null,
+                satOk = modem.available && lock != null,
+            ),
+            sat = SatState(
+                phase = satPhase(),
+                // 终端都没了，上一次锁定的星名和 CNR 就是旧数据，再画出来等于骗人
+                satName = if (modem.available) lock?.name else null,
+                cnr = if (modem.available) lock?.cnr else null,
+                nextPassInS = nextPassInS?.toInt(),
+                moduleBattery = null,
+                moduleOk = modem.available,
+                queuePending = pending.size,
+                // TPI 陈旧度是新的 §4 呈现字段：模组的位置是我们喂的，过期了下行就收不到（E.5）
+                tpiAgeS = tpiStatus?.ageMs?.let { it / 1000 },
+                tpiStale = tpiStatus?.let { it.state == TpiTracker.State.STALE || it.state == TpiTracker.State.NO_SOURCE },
+                // 升级进度直接读写锁，屏上那排按钮的禁用态看这个（§5.2）
+                upgradePct = modem.gate.progressPct,
+            ),
+            gnss = fix ?: GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
+            fence = fence,
+            sos = SosState(
+                sosLevel,
+                sosSinceTs,
+                sosAttempts.takeIf { it > 0 },
+                // 星上收没收到 ≠ 平台收没收到，屏上要把这两件事分开画（§6.1 红线一）
+                satAck = lastSosSend.result == SatResult.COMPLETE,
+                fail = lastSosSend.reason?.name?.lowercase(),
+            ),
+            sentinel = sentinel,
+            phoneBattery = phoneBatteryPct,
+            demoMode = demoMode,
+        )
+    }
 
     private fun satPhase(): SatPhase = when {
         !modem.available -> SatPhase.idle
@@ -377,5 +410,18 @@ class DemoEngine(
 
         /** SOS 确认横幅在展示端停留多久后收回 */
         private const val ACKED_BANNER_HOLD_MS = 12_000L
+
+        /**
+         * SOS 失败后**值得**留在 App 队列里等补发的成因 —— 判据是"一个字节都没写出去"。
+         * [SatFailReason.TOO_LONG] 不在里面：报文超预算是内容问题，重排一百次也还是超，
+         * 留在队列里只会一直堵着队首。
+         */
+        private val REQUEUE_REASONS = setOf(
+            SatFailReason.UPGRADING,
+            SatFailReason.NOT_PROVISIONED,
+            SatFailReason.NO_REPLY,
+            SatFailReason.QUEUE_FULL,
+            SatFailReason.DROPPED_BY_TIMEOUT,
+        )
     }
 }

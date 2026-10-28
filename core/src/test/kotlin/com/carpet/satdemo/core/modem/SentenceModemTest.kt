@@ -54,7 +54,7 @@ class SentenceModemTest {
         }
 
         fun bringUpLocated(): SentenceModem.BringUpOutcome = runBlocking {
-            modem.updateLocation(120.1551, 30.2741)
+            modem.updateLocation(GeodeticPosition.of(30.2741, 120.1551))
             modem.bringUp()
         }
     }
@@ -73,7 +73,7 @@ class SentenceModemTest {
     @Test
     fun `会话顺序是 读DII 读ICI 推位置 开PDI`() = runBlocking {
         val fx = Fixture()
-        fx.modem.updateLocation(120.1551, 30.2741)
+        fx.modem.updateLocation(GeodeticPosition.of(30.2741, 120.1551))
         assertIs<SentenceModem.BringUpOutcome.Ready>(fx.modem.bringUp())
 
         // 模组侧收到的语句序列。updateLocation 当场就发一条 TPI，bringUp 里还会再保证一次
@@ -116,7 +116,7 @@ class SentenceModemTest {
     fun `模组不回话时报出是哪一条没回`() = runTest {
         val fx = Fixture()
         fx.fake.responsive = false
-        fx.modem.updateLocation(120.1551, 30.2741)
+        fx.modem.updateLocation(GeodeticPosition.of(30.2741, 120.1551))
         val outcome = fx.modem.bringUp()
         assertIs<SentenceModem.BringUpOutcome.NoReply>(outcome)
         assertEquals("DII", outcome.verb, "现场要能区分\"线没接好\"和\"模组没回某一条\"")
@@ -248,7 +248,7 @@ class SentenceModemTest {
         fx.bringUpLocated()
         val before = fx.fake.received.size
         val fix = assertNotNull(fx.modem.readFix())
-        assertEquals(30.2741, fix.lat, 1e-3)
+        assertEquals(30.2741, fix.position.latitude.degrees, 1e-3)
         // hdop 拿不到 —— 真机这颗如果没有自带 GNSS，这个函数读到的只是我们自己推的值
         assertNull(fix.hdop)
         assertTrue(fx.fake.received.size > before, "读位置要现问一次 DII，上电那份缓存里必然还没有位置")
@@ -415,7 +415,7 @@ class SentenceModemTest {
         val modem = SentenceModem(pipe, clock = MutableClock())
         try {
             runBlocking {
-                modem.updateLocation(120.1551, 30.2741)
+                modem.updateLocation(GeodeticPosition.of(30.2741, 120.1551))
                 assertIs<SentenceModem.BringUpOutcome.Ready>(modem.bringUp())
                 assertTrue(modem.enqueueSfq("0102A1A2").accepted)
             }

@@ -61,7 +61,10 @@
             "module_battery": { "type": "integer", "description": "来自 PDI" },
             "fw": { "type": "string", "description": "来自 DII" },
             "module_ok": { "type": "boolean", "description": "GT1005 是否在。掉线≠没锁到星：前者展示「终端离线」，后者展示「等过顶」" },
-            "queue_pending": { "type": "integer", "minimum": 0, "description": "App 侧攒着待补发的条数，掉线期间一直涨" }
+            "queue_pending": { "type": "integer", "minimum": 0, "description": "App 侧攒着待补发的条数，掉线期间一直涨" },
+            "tpi_age_s": { "type": "integer", "minimum": 0, "description": "距上次成功把位置推给模组（TPI）过了多少秒。〔规 §3.1.7〕要求 1~10 分钟推一次，模组掉电即丢 —— 这个数就是那根线的余量" },
+            "tpi_stale": { "type": "boolean", "description": "位置陈旧到不能再信（默认 15 分钟，或压根没有位置源）。true 时展示端要打红字「位置已过期 N 分钟，卫星可能投递失败」，因为经纬度直接决定平台下行能不能收到" },
+            "upgrade_pct": { "type": "integer", "minimum": 0, "maximum": 99, "description": "模组固件升级进度（updateSOC 的 0~99）。非 null = 正在升级 = 全局写锁生效，期间所有发送按钮置灰：〔SDK文 §9-2〕'正在更新模组任务时，所有数据发送和自定义任务都不可用'" }
           }
         },
         "gnss": {
@@ -90,9 +93,11 @@
           "type": "object",
           "required": ["level"],
           "properties": {
-            "level": { "enum": ["normal", "armed", "pending", "sent", "acked"], "description": "armed=哨兵模式已布防 pending=已触发等待 ACK" },
+            "level": { "enum": ["normal", "armed", "pending", "sent", "acked"], "description": "armed=哨兵模式已布防 pending=已触发等待应答 sent=星上已应答但平台还没回执 acked=平台回执到了 —— §6.1 红线一：只有 acked 能说「已回执」，sent 只能说「卫星已收到」" },
             "since_ts": { "type": "integer" },
-            "attempts": { "type": "integer", "minimum": 0 }
+            "attempts": { "type": "integer", "minimum": 0 },
+            "sat_ack": { "type": "boolean", "description": "卫星（MCQ 回调 COMPLETE）有没有应答。和 level==acked 是两件事：星上收到 ≠ 核心网收到 ≠ 平台受理〔规 §3.1.4 注6〕，屏上必须分开画" },
+            "fail": { "enum": ["no_reply", "too_long", "queue_full", "dropped_by_timeout", "transmit_failed", "not_provisioned", "upgrading", null], "description": "失败成因小写名，正常时为 null。upgrading 表示一个字节都没写出去（被全局写锁挡下），不是发送失败；dropped_by_timeout 是 GM1003 那条 4 分钟丢弃，App 侧要重新排队" }
           }
         },
         "sentinel": {
@@ -122,7 +127,7 @@
             "downlink_msg",
             "track_reset"
           ],
-          "description": "sat_visible=卫星进入过境窗口，可发 SOS，展示端应弹提示；downlink_msg=收到 MCI 下行"
+          "description": "sat_visible=卫星进入过境窗口，可发 SOS，展示端应弹提示；downlink_msg=收到 MCI 下行。注意 sos_acked 指的是**卫星应答**（MCQ COMPLETE），平台回执是另一件事，只能靠 state.sos.level==acked 表达 —— 见 §6.1 红线一"
         },
         "event_id": { "type": "string", "description": "UUID，展示端 ack 时回填，App 据此判断哪些事件展示端没收到" },
         "payload": { "type": "object", "description": "kind 相关的负载，见下方各 kind 定义" },

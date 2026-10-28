@@ -41,6 +41,9 @@ class SentenceModem(
      * 而 MCQ 的线格式不在规范正文里（§9 #13）。等厂商答复后再加，别留一个没人用的参数。
      */
     private val cmdTimeoutMs: Long = 3_000,
+    /** 升级期间的全局写锁（E.10 #6）。真机上厂商 SDK 的 `updateSOC` 会在升级中把发送判成
+     * `INITIALIZE_ERROR`，这里在写语句之前自己挡，免得以为发出去了 */
+    override val gate: ModemGate = ModemGate(),
 ) : SatelliteModem {
 
     /**
@@ -116,6 +119,8 @@ class SentenceModem(
      */
     suspend fun bringUp(): BringUpOutcome {
         if (!pipe.isOpen) return BringUpOutcome.PipeClosed
+        // 升级中不开会话：读回来的 ICI/等级这时候本就不可信（〔SDK文 §4.1〕INITIALIZE_ERROR 含这一档）
+        if (gate.isUpgrading) return BringUpOutcome.Upgrading
         // 复位残留：上一轮没读完的半行不能带进新一轮
         framer.reset()
         sessionReady = false
@@ -140,6 +145,9 @@ class SentenceModem(
 
         /** 还没拿到任何位置源。TPI 是必配项，缺了它不能宣称链路可用 */
         data object NeedsLocation : BringUpOutcome
+
+        /** 模组正在升级，会话根本不该开（E.10 #6） */
+        data object Upgrading : BringUpOutcome
         data object PipeClosed : BringUpOutcome
     }
 
@@ -167,6 +175,9 @@ class SentenceModem(
         // 会话没就绪就连"入队"都不发：位置没推进去时模组存了也发不出去，
         // 还会占掉一个队列位（GM1003 只有 50 个），App 侧那份补发反倒被架空
         if (!sessionReady) return SatSend.failed(SatPath.QUEUED, SatFailReason.NOT_PROVISIONED)
+        // 升级期间单独报成因：这是"一个字节都没写出去"，调用方要把报文留在 App 队列里，
+        // 而不是当成"发了没人认"去重发（E.10 #6）
+        if (gate.isUpgrading) return SatSend.failed(SatPath.QUEUED, SatFailReason.UPGRADING)
         val payload = runCatching { hexToBytesSafe(hex) }.getOrNull()
             ?: return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
         // 预算在这里拦：等级不是常量，是上电读到的（E.4）
@@ -218,10 +229,9 @@ class SentenceModem(
      * 注意 **SDK 的 `updateLocation(经度, 纬度)` 参数顺序和语句里的字段顺序（纬在前）相反**，
      * 这里用带名字的类型走一遍，接口层就不可能传反。
      */
-    override suspend fun updateLocation(lon: Double, lat: Double) {
-        val p = GeodeticPosition.of(lat, lon)
-        pendingTpi = p
-        pushTpi(p)
+    override suspend fun updateLocation(position: GeodeticPosition): Boolean {
+        pendingTpi = position
+        return pushTpi(position)
     }
 
     private var pendingTpi: GeodeticPosition? = null
@@ -255,7 +265,7 @@ class SentenceModem(
         val d = requestOnce("DII", "DII") { GsatDecoder.dii(it) } ?: return null
         val pos = d.reportedPosition ?: return null
         val age = lastTpiAtMs?.let { (clock.nowMs() - it) / 1000.0 }
-        return Fix(pos.longitude.degrees, pos.latitude.degrees, hdop = null, ageSec = age)
+        return Fix(pos, hdop = null, ageSec = age)
     }
 
     override fun onDownlink(handler: (String) -> Unit) {
@@ -319,7 +329,10 @@ class SentenceModem(
         val prev = awaiting
         awaiting = a
         try {
-            write()
+            // 写这一路要过升级写锁：升级期间模组会把发进去的语句当错误丢掉（〔SDK文 §9-2〕）。
+            // 必须先挂槽再写：内存管道是同步的，应答可能在这一步里就直接送进来
+            val wrote = gate.write(verb) { write(); true } ?: return null
+            if (!wrote) return null
             val deadline = clock.nowMs() + timeoutMs
             while (true) {
                 val left = deadline - clock.nowMs()
