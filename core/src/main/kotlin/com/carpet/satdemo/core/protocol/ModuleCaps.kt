@@ -60,6 +60,8 @@ enum class AccessService {
 /**
  * `ICI` 字段 9「通信单元发送消息长度」的等级。
  * 〔规 §3.1.4 注7〕：此字段长度限制对应通信申请语句中通信数据字段的**字节**长度。
+ * 但厂商传的是 hex 字符串，这个数按字节还是字符算没答（§9 #13）——
+ * 所以 [maxBytes] 只是原始数值，**要判断发不发得出去请用 [MessageBudget]**。
  */
 enum class MsgLengthLevel(val level: Int, val maxBytes: Int) {
     L1(1, 90),
@@ -68,12 +70,6 @@ enum class MsgLengthLevel(val level: Int, val maxBytes: Int) {
     L4(4, 430),
     L5(5, 1900),
     ;
-
-    /**
-     * 一次 SOS 要发多少字节由这里给出，**不许出现常量 1900**。
-     * 等级越高越宽松，所以报文骨架按 L1 设计才安全（E.4 的架构结论）。
-     */
-    fun fits(payloadBytes: Int): Boolean = payloadBytes <= maxBytes
 
     companion object {
         fun fromLevel(level: Int): MsgLengthLevel? = entries.firstOrNull { it.level == level }
@@ -124,19 +120,22 @@ data class ModuleCaps(
 ) {
     val isInvalidCard: Boolean get() = cardId == INVALID_CARD_ID
 
-    /** 单条报文的数据字段上限（字节） */
+    /**
+     * 单条报文的数据字段上限（字节）。
+     *
+     * ⚠️ 这是 `ICI` 字段的**原始数值**。「这个数到底按字节还是按 hex 字符算」文档没定死（§9 #13），
+     * 所以发不发得出去**不要直接比它**，走 [budget] —— 那里有最坏口径。
+     */
     val maxMessageBytes: Int get() = lengthLevel.maxBytes
+
+    /** 运行时注入的报文预算：等级 + 单位口径 → 一帧/一片能用多少字节 */
+    fun budget(unit: LengthUnit = LengthUnit.WORST_KNOWN): MessageBudget = MessageBudget(lengthLevel, unit)
 
     /**
      * 能不能向用户承诺"星上确认"。
      * 注意即使 true，**卫星 ACK 也只代表卫星收到，不代表核心网收到**（§6.1 红线一）。
      */
     val canExpectSatelliteAck: Boolean get() = satelliteAckAvailable
-
-    /** 发一条 payload 需要占用多少队列位（当前一条一帧，留接口给分片） */
-    fun queueSlots(payloadBytes: Int): Int = if (payloadBytes <= maxMessageBytes) 1 else error(
-        "payload ${payloadBytes}B 超过 ICI 等级 $lengthLevel 的上限 ${maxMessageBytes}B —— 该缩减或分片，不能硬发",
-    )
 
     companion object {
         /** 〔规 §3.1.4 注1〕1 为无效卡，无效卡的通信单元不进行选星操作 */

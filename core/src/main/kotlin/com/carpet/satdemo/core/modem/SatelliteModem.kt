@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.ModuleCaps
 
@@ -106,6 +107,19 @@ interface SatelliteModem {
      * SOS 三次无 ACK 时展示端要显示这个数，否则用户只能干等。
      */
     suspend fun secondsToNextPass(): Long? = null
+
+    /**
+     * 把模组接进**工程模式日志窗**（E.10 #10）。
+     *
+     * 这一条是现场排障的救命稻草：出问题时要一眼分清"模组没回"还是"我们没发"，
+     * 那句话只有原始语句能回答。真机上这一路接的是厂商的 `DispatchManager.passthrough(String)`，
+     * 语句层实现接的是自己那根字节管道 —— 两条路喂同一个窗口，屏上不用区分实现。
+     *
+     * 场景层替身没有线路概念，默认什么都不做；别为了"演示里也有行"去伪造语句。
+     */
+    fun attachPassthrough(log: PassthroughLog) {
+        // 替身实现没有线路可记
+    }
 
     fun close()
 }

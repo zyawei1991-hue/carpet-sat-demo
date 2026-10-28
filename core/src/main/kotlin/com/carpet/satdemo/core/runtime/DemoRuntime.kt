@@ -1,10 +1,12 @@
 package com.carpet.satdemo.core.runtime
 
 import com.carpet.satdemo.core.engine.DemoEngine
+import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.link.LinkPhase
+import com.carpet.satdemo.core.modem.MonoClock
 import com.carpet.satdemo.core.modem.SatResult
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
@@ -57,6 +59,12 @@ class DemoRuntime(
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status
 
+    /**
+     * 工程模式日志窗（E.10 #10）。屏上/App 上那个窗口只读这一个对象 ——
+     * 谁再攒一份，两条时间线就对不上了（窗里的时刻必须和事件流同一个钟）。
+     */
+    val passthrough = PassthroughLog(clock = MonoClock { clockMs() })
+
     /** 展示端推上来的动作（圆屏上的按键、语音意图），由 Activity 接线 */
     var onCommand: (ScreenMessage) -> Unit = {}
 
@@ -79,6 +87,7 @@ class DemoRuntime(
      */
     fun start(autoTick: Boolean = true) {
         if (loop != null) return
+        engine.modem.attachPassthrough(passthrough)
         server.onMessage = { msg ->
             if (msg.t == MsgType.command) onCommand(msg)
             _status.value = _status.value.copy(clients = server.clientCount)
@@ -115,6 +124,17 @@ class DemoRuntime(
         stop()
         scope.cancel()
     }
+
+    /**
+     * 工程模式窗的标题行（E.10 #10）。下面那些原始行怎么解释，取决于这三样：
+     * 哪颗模组、报文长度等级读到了几、队列里还压着几条。
+     * 等级只报 ICI 那个原始数值 —— 折算后的字节数依赖还没定死的单位口径（§9 #13），
+     * 窗里报一个"猜出来的数"比不报更糟。
+     */
+    fun engineeringWindowHeader(): String = passthrough.header(
+        engine.modem.caps?.let { "${it.model} · 等级${it.lengthLevel.level}(${it.maxMessageBytes}B) · ${it.service}" },
+        engine.outbox.summary(),
+    )
 
     /** NetworkMonitor 每秒的落点。状态机只认这里进来的蜂窝观测。 */
     fun onCellSample(sample: CellStatus) {

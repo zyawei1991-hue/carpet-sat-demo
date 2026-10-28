@@ -20,7 +20,7 @@ class UartBytePipe(
 ) : ModemBytePipe {
 
     private var byteHandler: ((ByteArray) -> Unit)? = null
-    private var traceHandler: ((String) -> Unit)? = null
+    private var rawHandler: ((RawLine) -> Unit)? = null
 
     @Volatile
     private var running = false
@@ -39,7 +39,7 @@ class UartBytePipe(
             while (running) {
                 val line = runCatching { port.readLine(pollMs) }.getOrNull() ?: continue
                 val bytes = (line + "\r\n").toByteArray(StandardCharsets.US_ASCII)
-                traceHandler?.invoke("RX ${line.trim()}")
+                rawHandler?.invoke(RawLine(RawLine.Direction.FROM_MODULE, line.trim()))
                 byteHandler?.invoke(bytes)
             }
         }, "uart-read").apply {
@@ -48,10 +48,17 @@ class UartBytePipe(
         }
     }
 
+    /**
+     * 只有**真的写上线路**才记一行。
+     *
+     * 窗口的口径是"线路上来过什么"，不是"App 想发什么"：串口没开时那次写根本没上路，
+     * 记进去工程师就会以为模组收到了。"想发没发成"由 [com.carpet.satdemo.core.queue.Outbox]
+     * 的计数回答，两边各说各的才不打架。
+     */
     override fun write(bytes: ByteArray) {
         val text = String(bytes, StandardCharsets.US_ASCII).trim()
         if (!port.isOpen) return
-        runCatching { port.writeLine(text) }.onSuccess { traceHandler?.invoke("TX $text") }
+        runCatching { port.writeLine(text) }.onSuccess { rawHandler?.invoke(RawLine(RawLine.Direction.TO_MODULE, text)) }
     }
 
     override fun onBytes(handler: (ByteArray) -> Unit) {
@@ -61,8 +68,8 @@ class UartBytePipe(
         startReading()
     }
 
-    override fun onTrace(handler: (String) -> Unit) {
-        traceHandler = handler
+    override fun onRawLine(handler: (RawLine) -> Unit) {
+        rawHandler = handler
     }
 
     override fun close() {

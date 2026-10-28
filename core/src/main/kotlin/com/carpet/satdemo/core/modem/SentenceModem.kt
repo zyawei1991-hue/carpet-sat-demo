@@ -1,11 +1,14 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.protocol.AccessService
 import com.carpet.satdemo.core.protocol.DiiInfo
 import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.GsatDecoder
 import com.carpet.satdemo.core.protocol.GsatSentence
 import com.carpet.satdemo.core.protocol.GsatSpeaker
+import com.carpet.satdemo.core.protocol.LengthUnit
+import com.carpet.satdemo.core.protocol.MessageBudget
 import com.carpet.satdemo.core.protocol.ModuleCaps
 import com.carpet.satdemo.core.protocol.PdiInfo
 import com.carpet.satdemo.core.protocol.ModuleModel
@@ -41,6 +44,11 @@ class SentenceModem(
      * 而 MCQ 的线格式不在规范正文里（§9 #13）。等厂商答复后再加，别留一个没人用的参数。
      */
     private val cmdTimeoutMs: Long = 3_000,
+    /**
+     * 报文长度的单位口径。默认按最坏的那一头（hex 字符）折，
+     * §9 #13 有了厂商答复只需要在这里换成 [LengthUnit.BYTES]。
+     */
+    private val lengthUnit: LengthUnit = LengthUnit.WORST_KNOWN,
     /** 升级期间的全局写锁（E.10 #6）。真机上厂商 SDK 的 `updateSOC` 会在升级中把发送判成
      * `INITIALIZE_ERROR`，这里在写语句之前自己挡，免得以为发出去了 */
     override val gate: ModemGate = ModemGate(),
@@ -66,6 +74,7 @@ class SentenceModem(
     private val downlinkHandlers = ArrayList<(String) -> Unit>()
     private val lockHandlers = ArrayList<(SatLock?) -> Unit>()
     private val traceHandlers = ArrayList<(String) -> Unit>()
+    private val rawHandlers = ArrayList<(RawLine) -> Unit>()
 
     /** 上电会话读到的能力档。没读完为 null，此时**不允许**任何发送 */
     override var caps: ModuleCaps? = null
@@ -79,6 +88,12 @@ class SentenceModem(
      */
     var sessionReady: Boolean = false
         private set
+
+    /**
+     * 当前生效的报文预算（等级 + 单位口径）。没读到 ICI 就是 null ——
+     * 分片和展示都要问它，不许自己拿 90/1900 去猜（E.4 / E.10 #10）。
+     */
+    val budget: MessageBudget? get() = caps?.budget(lengthUnit)
 
     private var lastPdi: PdiInfo? = null
     private var lastLock: SatLock? = null
@@ -100,7 +115,7 @@ class SentenceModem(
 
     init {
         pipe.onBytes { framer.push(it) }
-        pipe.onTrace { line -> traceHandlers.forEach { it(line) } }
+        pipe.onRawLine { line -> rawHandlers.forEach { it(line) } }
     }
 
     override val available: Boolean get() = pipe.isOpen
@@ -180,8 +195,11 @@ class SentenceModem(
         if (gate.isUpgrading) return SatSend.failed(SatPath.QUEUED, SatFailReason.UPGRADING)
         val payload = runCatching { hexToBytesSafe(hex) }.getOrNull()
             ?: return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
-        // 预算在这里拦：等级不是常量，是上电读到的（E.4）
-        if (payload.size > c.maxMessageBytes) return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
+        // 预算在这里拦：等级和单位口径都不是常量，是上电读到的 / 注入的（E.4 / E.10 #10）。
+        // 比的是 MessageBudget 折出来的字节数，不是 ICI 那个原始数值 —— 见 [LengthUnit]
+        if (!c.budget(lengthUnit).fitsFrame(payload.size)) {
+            return SatSend.failed(SatPath.QUEUED, SatFailReason.TOO_LONG)
+        }
         val stored = io.withLock {
             // 〔规 §3.1.12 注1〕收信方填 0 = 发给平台；注2 优先级仅 GM1003 支持，GM1001 固定 0。
             // 目前所有报文都是普通优先级，所以两种型号都发 0 —— 需要抢占时再改这里。
@@ -308,7 +326,8 @@ class SentenceModem(
     /** 只允许对"能被 GMO 开关的输出语句"用这个名字 */
     private fun send(verb: String, fields: List<String>) {
         pipe.write(GsatSentence.build(GsatSpeaker.HOST, verb, fields).toByteArray(Charsets.US_ASCII))
-        trace("TX $verb")
+        // 这里**不再** trace 一条"TX $verb"：管道那头的原文行已经带上了这条语句本身，
+        // 再记一遍会让窗口里每个发送出现两行，工程师分不清哪行是真的
     }
 
     private suspend fun <T> requestOnce(verb: String, gmoTarget: String, map: (GsatSentence) -> T?): T? =
@@ -384,8 +403,26 @@ class SentenceModem(
     /** 当前跟踪状态快照，给展示端画"对星中/已锁定/信道忙" */
     fun lastTrack(): PdiInfo? = lastPdi
 
+    /**
+     * 线路原文，工程模式日志窗的数据源（E.10 #10）。
+     * 和 [onTrace] 的分工：这一路是"线路上确实来过这一行"，那一路是"我们对它的看法"。
+     */
+    fun onRawLine(handler: (RawLine) -> Unit) {
+        rawHandlers += handler
+    }
+
+    /** 我们自己的注解：坏帧计数、模组超时丢弃。窗口里作为第二路，方向标 `--` */
     fun onTrace(handler: (String) -> Unit) {
         traceHandlers += handler
+    }
+
+    /**
+     * 线路原文 + 我们的注解，两路都灌进同一个窗口（E.10 #10）。
+     * 分两路是因为要分清"线路上来过这一行"和"我们判断它坏了"，屏上一眼能对上时间线。
+     */
+    override fun attachPassthrough(log: PassthroughLog) {
+        onRawLine { log.record(it) }
+        onTrace { log.note(it) }
     }
 
     private fun trace(line: String) = traceHandlers.forEach { it(line) }

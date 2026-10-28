@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.protocol.AccessService
 import com.carpet.satdemo.core.protocol.SfiFailReason
 import com.carpet.satdemo.core.protocol.SfiState
@@ -300,6 +301,29 @@ class SentenceModemTest {
         val before = fx.modem.badFrames
         fx.appPipe.injectFromPeer("\$GSSFI,2,9,*00\r\n".toByteArray())
         assertEquals(before + 1, fx.modem.badFrames, "读串一位必须能被看到，不能静默丢")
+    }
+
+    @Test
+    fun `工程模式窗拿到双向原文 坏帧也在里面`() = runBlocking {
+        val fx = Fixture()
+        // 窗口是接在模组上的，不是接在界面上：谁建了模组谁就该能把它灌进同一个窗（E.10 #10）
+        val log = PassthroughLog(clock = fx.clock)
+        fx.modem.attachPassthrough(log)
+        fx.bringUpLocated()
+        fx.appPipe.injectFromPeer("\$GSSFI,2,9,*00\r\n".toByteArray())
+
+        val lines = log.snapshot()
+        assertTrue(lines.isNotEmpty())
+        // 线路原文两路都要有；第三条是窗口的注解（"坏帧…"），方向标 UNCLASSIFIED —— 它不是线上来的
+        assertEquals(
+            setOf(RawLine.Direction.TO_MODULE, RawLine.Direction.FROM_MODULE),
+            lines.filter { it.direction != RawLine.Direction.UNCLASSIFIED }.map { it.direction }.toSet(),
+        )
+        val broken = lines.filter { it.checksumOk == false }
+        assertEquals(1, broken.size, "校验和错的行必须留在窗里，它正是「读串一位」的物证")
+        assertTrue("SFI" in broken.single().text)
+        // 窗里不该出现我们内部那种"TX SFQ"注解：每条发送会出现两行，工程师分不清哪行是真的
+        assertTrue(lines.none { it.text.startsWith("TX ") }, "发送只留线路原文：${lines.map { it.text }}")
     }
 
     @Test

@@ -24,9 +24,36 @@ interface ModemBytePipe {
     fun onBytes(handler: (ByteArray) -> Unit)
 
     /** 原始收发流水，给工程模式日志窗（E.10 #10 / §8 近期四件事 #3）。不做解析、不做过滤 */
-    fun onTrace(handler: (String) -> Unit)
+    fun onRawLine(handler: (RawLine) -> Unit)
 
     fun close()
+}
+
+/**
+ * 管道上**真实来过的一行原文**，给工程模式日志窗（E.10 #10 / §8 近期四件事 #3）。
+ *
+ * 刻意带着方向：排障时"我们写出去了但模组没回"和"模组自己推了一条没人问的"
+ * 是完全不同的两件事，只看文本分不出来。
+ * 方向以 **App 侧**为准 —— 接给 [SentenceModem] 的那根管道永远是 App 侧那根，
+ * 假模组自己那半截不注册回调，否则 `$GS…` 会被标成 TX。
+ */
+data class RawLine(val direction: Direction, val text: String) {
+
+    enum class Direction(val label: String) {
+        /** 外设 → 通信单元，屏上标 TX */
+        TO_MODULE("TX"),
+
+        /** 通信单元 → 外设，屏上标 RX */
+        FROM_MODULE("RX"),
+
+        /**
+         * 厂商 SDK `passthrough(String)` 的输出。
+         * 方向由模组自己决定、内容也不是协议语句（开机打印、调试输出都在这里面），
+         * 所以**不许硬归到 TX/RX** —— 归错了工程师就会以为我们真发过那条。
+         */
+        UNCLASSIFIED("--"),
+        ;
+    }
 }
 
 /**
@@ -34,7 +61,6 @@ interface ModemBytePipe {
  * 一边 write 的字节会原样出现在另一边的回调里。
  */
 class InMemoryBytePipe private constructor(
-    private val name: String,
     private val peerRef: PeerRef,
 ) : ModemBytePipe {
 
@@ -44,14 +70,19 @@ class InMemoryBytePipe private constructor(
     }
 
     private var byteHandler: ((ByteArray) -> Unit)? = null
-    private var traceHandler: ((String) -> Unit)? = null
+    private var rawHandler: ((RawLine) -> Unit)? = null
     private var open = true
 
     override val isOpen: Boolean get() = open
 
     override fun write(bytes: ByteArray) {
         if (!open) return
-        traceHandler?.invoke("$name → ${String(bytes, StandardCharsets.US_ASCII).trim()}")
+        raw(
+            RawLine(
+                RawLine.Direction.TO_MODULE,
+                String(bytes, StandardCharsets.US_ASCII).trim(),
+            ),
+        )
         peerRef.peer?.deliver(bytes)
     }
 
@@ -59,8 +90,8 @@ class InMemoryBytePipe private constructor(
         byteHandler = handler
     }
 
-    override fun onTrace(handler: (String) -> Unit) {
-        traceHandler = handler
+    override fun onRawLine(handler: (RawLine) -> Unit) {
+        rawHandler = handler
     }
 
     override fun close() {
@@ -68,7 +99,18 @@ class InMemoryBytePipe private constructor(
     }
 
     private fun deliver(bytes: ByteArray) {
-        if (open) byteHandler?.invoke(bytes)
+        if (!open) return
+        raw(
+            RawLine(
+                RawLine.Direction.FROM_MODULE,
+                String(bytes, StandardCharsets.US_ASCII).trim(),
+            ),
+        )
+        byteHandler?.invoke(bytes)
+    }
+
+    private fun raw(line: RawLine) {
+        rawHandler?.invoke(line)
     }
 
     /** 测试内部再注入一条模组主动上报，模拟"没问就推上来" */
@@ -79,8 +121,8 @@ class InMemoryBytePipe private constructor(
         fun pair(): Pair<InMemoryBytePipe, InMemoryBytePipe> {
             val toApp = PeerRef()
             val toModule = PeerRef()
-            val app = InMemoryBytePipe("APP", toModule)
-            val module = InMemoryBytePipe("MODULE", toApp)
+            val app = InMemoryBytePipe(toModule)
+            val module = InMemoryBytePipe(toApp)
             toApp.peer = app
             toModule.peer = module
             return app to module

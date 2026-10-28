@@ -28,9 +28,6 @@ object SosFrame {
     const val FLAG_STALE_FIX = 0x04
     const val FLAG_SRC_GT1005 = 0x08
 
-    /** 分片单片载荷。按 ICI 90 = hex 字符数的最坏情况算：90/2 - 21 = 24 */
-    const val DEFAULT_MAX_CHUNK = 24
-
     private val CRC8_POLY_REVERSED = 0x8C
 }
 
@@ -94,18 +91,26 @@ class SosFrameEncoder(private val ownerId: Long) {
         return body + crc8Maxim(body).toByte()
     }
 
-    /** 扩展数据分片。首片承载 total，其余片只带 index。 */
+    /**
+     * 扩展数据分片。首片承载 total，其余片只带 index。
+     *
+     * 一片装多少字节由 [MessageBudget] 决定 —— 它来自上电读到的 `ICI` 等级，
+     * 不是这里的常数（E.4：报文骨架按最坏的一档设计，等级换了骨架自己跟着换）。
+     */
     fun encodeExt(
         payload: ByteArray,
         lat: Double,
         lon: Double,
         whenSec: Long,
         batteryPct: Int,
-        maxChunk: Int = SosFrame.DEFAULT_MAX_CHUNK,
+        budget: MessageBudget = MessageBudget.WORST_KNOWN,
     ): List<ByteArray> {
         if (payload.isEmpty()) return emptyList()
-        val chunks = payload.asList().chunked(maxChunk).map { it.toByteArray() }
-        require(chunks.size <= 15) { "${chunks.size} fragments exceeds 4-bit total field" }
+        require(budget.canFragment) { "预算 ${budget.dataFieldBytes}B 连一帧骨架都装不下，分片没有意义" }
+        val chunks = payload.asList().chunked(budget.chunkBytes).map { it.toByteArray() }
+        require(chunks.size <= MessageBudget.MAX_FRAGMENTS) {
+            "${chunks.size} fragments exceeds 4-bit total field (载荷 ${payload.size}B > 上限 ${budget.maxPayloadBytes}B)"
+        }
 
         return chunks.mapIndexed { idx, chunk ->
             val body = encode(SosFrame.MSG_EXT_CHUNK, lat, lon, whenSec, batteryPct).copyOf(19)

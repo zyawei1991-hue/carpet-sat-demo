@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.modem
 
+import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.protocol.ModuleCaps
 import kotlinx.coroutines.delay
@@ -46,11 +47,29 @@ class SimulatedModem(
     private val dropped = ArrayList<String>()
 
     /**
+     * 工程模式窗（E.10 #10）。这里没有线路，所以只灌**注解**，方向一律 `--`：
+     * 彩排时窗口的价值是"看见那条静默的失败"，不是伪造出像真语句的东西 ——
+     * 演示里看着像协议、真机上没有，比窗口空着更危险。
+     */
+    private var passthrough: PassthroughLog? = null
+
+    override fun attachPassthrough(log: PassthroughLog) {
+        passthrough = log
+        note("模组=模拟 等级=${capsOverride.lengthLevel} 型号=${capsOverride.model}（没有线路，只有注解）")
+    }
+
+    /** 谁被写锁挡下了：这行在窗口里就是"我们没发"那一侧的证据 */
+    private fun note(text: String) {
+        passthrough?.note(text, clock.nowMs())
+    }
+
+    /**
      * 演"存进模组队列之后又被丢掉"（GM1003 的 4 分钟超时，〔规 §3.1.13 注〕）。
      * 真机那条口径由 [SentenceModem] 从 SFI 里读出来，这里给演示脚本一个手动注入的口子。
      */
     fun simulateDropped(hex: String) {
         dropped += hex
+        note("模组丢弃：$hex 已交回 App 队列")
     }
 
     override fun drainDropped(): List<String> {
@@ -94,8 +113,11 @@ class SimulatedModem(
     }
 
     /** 升级写锁挡下的发送统一给 [SatFailReason.UPGRADING]：这是"没写出去"，不是"写了没人认" */
-    private suspend fun guarded(via: SatPath, block: suspend () -> SatSend): SatSend =
-        gate.write(via.name) { block() } ?: SatSend.failed(via, SatFailReason.UPGRADING)
+    private suspend fun guarded(via: SatPath, block: suspend () -> SatSend): SatSend {
+        val out = gate.write(via.name) { block() } ?: SatSend.failed(via, SatFailReason.UPGRADING)
+        if (out.reason == SatFailReason.UPGRADING) note("写锁挡下：升级期间拒发 $via")
+        return out
+    }
 
     override suspend fun updateLocation(position: GeodeticPosition): Boolean =
         gate.write("TPI") {
