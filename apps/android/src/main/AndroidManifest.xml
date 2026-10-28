@@ -33,9 +33,10 @@
         android:required="true" />
 
     <application
+        android:name=".CarpetApp"
         android:label="车宠卫星 Demo"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Theme.Carpet"
         android:usesCleartextTraffic="false"
         tools:replace="android:usesCleartextTraffic">
 

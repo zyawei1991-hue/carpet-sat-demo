@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色是主场景（车载夜间），所以主题直接继承平台的深色 Theme。
+      windowBackground 一定要填：Compose 第一帧画上来之前，那 200ms 是系统在用这个值刷屏，
+      留默认的深灰 (#303030) 会闪一下，和 Ink.Deep 明显是两个颜色。
+    -->
+    <style name="Theme.Carpet" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E1116</item>
+        <item name="android:statusBarColor">#0E1116</item>
+        <item name="android:navigationBarColor">#0E1116</item>
+        <item name="android:colorBackground">#0E1116</item>
+    </style>
+</resources>

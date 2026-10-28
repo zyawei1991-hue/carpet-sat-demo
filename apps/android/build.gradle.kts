@@ -72,6 +72,20 @@ android {
         jvmTarget = "17"
     }
 
+    /**
+     * §5.2 的技术选型：**Jetpack Compose + Material 3，深色为默认**（车载夜间是主场景）。
+     * 之前这一版 App 是纯代码搭的 View —— 那是演示控制台的形状，不是产品的形状。
+     * Compose 编译器扩展的版本号**和 Kotlin 版本绑死**（1.9.24 → 1.5.14），
+     * 升 Kotlin 必须一起来这里改，否则报的是"compose compiler version not compatible"这种最难猜的错。
+     */
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+
     packaging {
         resources.excludes += setOf("META-INF/*.kotlin_module", "META-INF/DEPENDENCIES")
     }
@@ -91,6 +105,16 @@ dependencies {
     implementation("io.reactivex.rxjava3:rxjava:3.1.12")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // §5.2 选型：Compose + Material 3。BOM 统一版本，别在单个 artifact 上写版本号（写了也不生效）
+    implementation(platform("androidx.compose:compose-bom:2024.05.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
