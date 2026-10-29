@@ -8,9 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -137,40 +135,5 @@ fun CardManager(app: AppRuntime, keys: List<String>) {
                 }
             }
         }
-    }
-}
-
-/** Tab1 首页：场景切换器 + 首屏固定的状态卡 + 场景动作 + 场景卡片流 */
-@Composable
-fun SceneShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
-    val scene by app.scene.collectAsState()
-    val scope = CardScope(app, status)
-    var editing by remember { mutableStateOf(false) }
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = Grid.x16, vertical = Grid.x12).padding(bottom = Grid.x32),
-        verticalArrangement = Arrangement.spacedBy(Grid.x16),
-    ) {
-        SceneSwitcher(app)
-        // SOS 和链路固定在首屏，不进场景卡片流、也不许被隐藏（§5.1：藏在设置里的求救按钮等于没有）
-        RenderCard("sos", scope)
-        RenderCard("link", scope)
-        SceneActions(scene.profile.actions, app)
-        CardStream(app.orderedCards(scene), scope)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                if (editing) "完成" else "编辑卡片流",
-                style = Type.Caption,
-                color = Ink.Sat,
-                modifier = Modifier.clickable { editing = !editing },
-            )
-            Text("SOS 与链路不参与排序", style = Type.Caption, color = Ink.TextLow)
-        }
-        if (editing) CardManager(app, app.managedCards(scene))
     }
 }
