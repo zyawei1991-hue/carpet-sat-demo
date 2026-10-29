@@ -1,3 +1,4 @@
+import java.io.ByteArrayOutputStream
 import java.util.Properties
 
 plugins {
@@ -152,6 +153,41 @@ tasks.register("verifyCleartextPolicy") {
 
 // 出包顺带就把这条查了，别指望人记得单独跑
 tasks.matching { it.name == "assembleDebug" }.configureEach { finalizedBy("verifyCleartextPolicy") }
+
+/**
+ * **这条是给 V1.8 那次闪退补的**。根因是 `:core` 里用了 JDK 11 的 `java.net.http.HttpClient`
+ * —— Android 没有这个包，而它在 `Application.onCreate` 的装配链上，一点开就 `NoClassDefFoundError`。
+ * 编译、`:core` 单测、桌面彩排台、`:app:lintDebug` 四层全拦不住（前三层跑在 JDK 17 上，
+ * lint 不分析依赖模块的 Kotlin 源）。**这道鸿沟只在"打完包"之后才存在**，所以尺子必须挂在出包之后，
+ * 拿 APK 的字节去对厂商的 android.jar —— 靠人记得单独跑，就一定会有那天不跑。
+ */
+val verifyApkAndroidCompat by tasks.registering {
+    group = "verification"
+    description = "对 APK 字节核 android.jar：包里出现 Android 没有的 java.*/javax.* 就红"
+    doLast {
+        val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+        require(apk.exists()) { "还没有 debug 包可查：先跑 :app:assembleDebug" }
+        val jar = File(android.sdkDirectory, "platforms/android-${android.compileSdk}/android.jar")
+        require(jar.exists()) { "找不到 $jar —— 它是这条核验的对照组，缺它就是没查" }
+        val script = rootProject.file("tools/dex_vs_android.py")
+        // 没 python 的机器（CI、别人笔记本）上不能把出包顶死，但必须喊出来，不能让"跳过"长得像"通过"
+        val py = listOf("python", "python3", "py").firstOrNull { name ->
+            runCatching {
+                project.exec {
+                    commandLine(name, "--version")
+                    standardOutput = ByteArrayOutputStream()
+                }
+            }.isSuccess
+        }
+        if (py == null) {
+            logger.warn("!! 这台机器上没有 python，APK↔android.jar 的核验**没跑**。别把它当成过了。")
+        } else {
+            project.exec { commandLine(py, script.absolutePath, apk.absolutePath, jar.absolutePath) }
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach { finalizedBy("verifyApkAndroidCompat") }
 
 /**
  * 出包前把"不许平台签名"这条钉住：`./gradlew :app:verifyReleaseSigning assembleRelease`。
