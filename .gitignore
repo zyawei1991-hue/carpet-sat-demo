@@ -9,3 +9,5 @@ shots/
 keystore.properties
 *.keystore
 *.jks
+note-v*.md
+*.apk
