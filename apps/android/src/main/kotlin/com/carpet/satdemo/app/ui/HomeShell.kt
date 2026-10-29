@@ -124,7 +124,15 @@ private fun DockHero(app: AppRuntime, st: DemoRuntime.Status) {
 
     // 这张卡不额外挂图标：HeroStat 自己带一个 48dp 的，同左边界再叠一个是重复
     InkCard(tone = tone) {
-        CardTitle("圆屏", trailing = if (st.running) "服务运行中" else "服务未启动", icon = null)
+        CardTitle(
+            "圆屏",
+            trailing = when {
+                st.serverError != null -> "接入点起不来"
+                st.running -> "服务运行中"
+                else -> "服务未启动"
+            },
+            icon = null,
+        )
         HeroStat(
             icon = if (online) MIcons.dock else MIcons.pairing,
             value = "${st.clients}",
@@ -133,7 +141,11 @@ private fun DockHero(app: AppRuntime, st: DemoRuntime.Status) {
             else "还没连上。先把下面那个接入开关放开，再把它那串 screen_id 加进白名单",
             tone = tone,
         )
-        ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)
+        ValueRow(
+            "接入点",
+            st.serverError?.let { "起不来：$it" } ?: st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" },
+            mono = true,
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

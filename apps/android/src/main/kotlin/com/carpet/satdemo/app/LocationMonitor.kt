@@ -30,9 +30,13 @@ class LocationMonitor(
         ) {
             return
         }
-        // MINIMUM_UPDATE_TIME 设 2s：演示时观众要看到点在动，5s 一步会被质疑"是不是假的"
-        manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2_000L, 1f, this)
-        manager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5_000L, 5f, this)
+        // MINIMUM_UPDATE_TIME 设 2s：演示时观众要看到点在动，5s 一步会被质疑"是不是假的"。
+        // 包一层：定制 ROM 上 GPS_PROVIDER 缺席、位置服务被关掉都会抛，
+        // 而"没有定位"只是能力少一格，不该把整个 App 带走
+        runCatching {
+            manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2_000L, 1f, this)
+            manager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5_000L, 5f, this)
+        }
     }
 
     fun stop() {

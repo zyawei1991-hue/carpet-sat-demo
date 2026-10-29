@@ -98,6 +98,8 @@ class DemoRuntime(
         val clients: Int = 0,
         val lastSos: SatResult? = null,
         val localIp: String? = null,
+        /** 展示端接入点没起来的原因。非空 = 1Hz 在跑但屏连不上，首页必须说实话 */
+        val serverError: String? = null,
         val log: List<String> = emptyList(),
     )
 
@@ -113,12 +115,16 @@ class DemoRuntime(
             if (msg.t == MsgType.dialog) onDialog(msg)
             _status.value = _status.value.copy(clients = server.clientCount)
         }
-        server.onHello = { msg ->
-            val hello = requireNotNull(msg.hello)
+        server.onHello = hello@{ msg ->
             // 谈得下来 = 双方版本有交集。v1 的屏**不是**"契约不匹配"，它只是不能说话 ——
             // 把老固件标成降级并打红字，明天到货现场会让人以为屏坏了
-            // v1 的屏**不是**"契约不匹配"，它只是不能说话
-            // v1 的屏**不是**"契约不匹配"，它只是不能说话 —— 标成降级会让人以为屏坏了
+            val hello = msg.hello ?: run {
+                // 没有 hello 帧体却进了 onHello，只能是屏那边把包拼错了。
+                // **不许 requireNotNull**：这个 lambda 跑在 WebSocket 的读线程上，
+                // 那儿的未捕获异常会把整个 App 带走 —— 一颗屏发错一个字段，不该让车上这块屏和手机一起没
+                log("展示端 hello 缺字段，已忽略这一帧")
+                return@hello
+            }
             val ver = ScreenCodec.negotiated(hello.protocols)
             val ok = ScreenCodec.compatible(hello.protocols)
             log(
@@ -161,16 +167,29 @@ class DemoRuntime(
         engine.onSosProgress = { p ->
             if (p is SosProgress.SatSending && p.attempt > 1) log("SOS 第 ${p.attempt} 次重发")
         }
-        server.start()
-        _status.value = _status.value.copy(running = true, localIp = firstLanAddress())
-        log("展示端接入点 ws://${_status.value.localIp}:${ScreenLinkServer.PORT}")
+        // 端口被占（上一次退出没干净、或者桌面上还开着另一个实例）**不能把 App 带走**：
+        // 屏连不上是一件事，手机连状态都看不到是另一件更糟的事。记下原因、1Hz 照跑，
+        // 首页那行字改口说"接入点起不来" —— 不许继续报"服务运行中"
+        val bindFail = runCatching { server.start() }.exceptionOrNull()
+        _status.value = _status.value.copy(
+            running = true,
+            localIp = if (bindFail == null) firstLanAddress() else null,
+            serverError = bindFail?.let { it.message ?: it.javaClass.simpleName },
+        )
+        if (bindFail == null) {
+            log("展示端接入点 ws://${_status.value.localIp}:${ScreenLinkServer.PORT}")
+        } else {
+            log("展示端接入点起不来：${_status.value.serverError} —— 1Hz 照跑，但屏连不上")
+        }
         if (autoTick) loop = scope.launch { tickForever() }
     }
 
     fun stop() {
         loop?.cancel()
         loop = null
-        server.stop()
+        // stop() 会等选择线程退场，最多阻塞一秒级；这一句在 Activity.onDestroy 里，
+        // 主线程等它一次可以，被它抛出来的 InterruptedException 打死不行
+        runCatching { server.stop() }
         _status.value = _status.value.copy(running = false, clients = 0)
         log("服务停止")
     }

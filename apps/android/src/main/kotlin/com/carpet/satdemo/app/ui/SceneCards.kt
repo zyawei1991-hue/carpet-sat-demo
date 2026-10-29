@@ -295,6 +295,16 @@ fun DeviceManagerCard(s: CardScope) {
     val allowed = s.app.allowedScreens()
     InkCard(icon = MIcons.terminal) {
         CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")
+        // 这一行必须是"钉住了没"，不是"守护开着没"：权限没批的时候 1Hz 照跑，
+        // 但锁屏久了会被系统冻住，报"运行中"就是假话
+        ValueRow(
+            "常驻",
+            when {
+                !st.running -> "没跑"
+                s.app.guardPinned -> "已钉住进程，锁屏也不断"
+                else -> "只在 App 里跑：定位权限没批，锁屏会停"
+            },
+        )
         if (list.isEmpty()) {
             Text("台账还是空的。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)
         }

@@ -1,12 +1,13 @@
 package com.carpet.satdemo.core.ai
 
+import java.net.HttpURLConnection
 import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.time.Duration
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -47,13 +48,22 @@ class LocalRuleProvider : AiProvider {
 }
 
 /**
- * OpenAI 兼容端点。用 JDK 17 自带的 `java.net.http` —— `:core` 是纯 JVM 模块，
- * 引 OkHttp / Retrofit 会为了一个接口把整个网络栈拖进单测里。
+ * OpenAI 兼容端点。
+ *
+ * ⚠️ **走的是 `HttpURLConnection`，不是 JDK 11 那个 `java.net.http.HttpClient`**。
+ * 上一版用了后者，编译和 214 条单测全绿、桌面彩排台也跑得完美 —— 因为那些都在 JDK 17 上跑。
+ * **Android 到现在都没有 `java.net.http` 这个包**，而 `AppRuntime` 在 `Application.onCreate`
+ * 里就构造这个 provider，类初始化一碰到 `HttpClient` 就是 NoClassDefFoundError，
+ * 于是两台手机装上去**点开就闪退，一行界面都没有**。纯 JVM 模块里那种"桌面也有"的 API，
+ * 必须逐个确认 Android 有没有 —— 这条由 `:core` 的 AndroidCompatTest 扫源码看着。
+ *
+ * 传输从外面注入（[transport]）：单测和工程模式换掉这一跳就能验请求形状，不需要真起一个网关。
  */
 class OpenAiCompatProvider(
     private var endpoint: AiEndpoint,
     private val timeout: Duration = Duration.ofSeconds(12),
-    private val transport: (HttpRequest) -> String = ::send,
+    private val transport: (url: String, body: String, headers: Map<String, String>) -> String =
+        { u, b, h -> post(u, b, h, timeout.toMillis()) },
 ) : AiProvider {
 
     override val label: String get() = endpoint.model.ifBlank { "远端模型" }
@@ -78,17 +88,20 @@ class OpenAiCompatProvider(
             )
             append("}")
         }
-        val req = try {
-            HttpRequest.newBuilder(URI.create(endpoint.baseUrl.trimEnd('/') + "/chat/completions"))
-                .timeout(timeout)
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer ${endpoint.apiKey}")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build()
+        val url = try {
+            URI.create(endpoint.baseUrl.trimEnd('/') + "/chat/completions").toURL().toString()
         } catch (e: IllegalArgumentException) {
             return null // base URL 形状不对，不试第二眼
         }
-        return runCatching { parse(transport(req)) }.getOrNull()
+        val headers = mapOf(
+            "Content-Type" to "application/json",
+            "Authorization" to "Bearer ${endpoint.apiKey}",
+        )
+        // Dispatchers.IO：Android 在主线程做网络会直接抛 NetworkOnMainThreadException，
+        // 而这一句的调用方（DialogBridge）跑在宿主给的作用域里，宿主是 Main
+        return withContext(Dispatchers.IO) {
+            runCatching { parse(transport(url, body, headers)) }.getOrNull()
+        }
     }
 
     companion object {
@@ -110,7 +123,7 @@ class OpenAiCompatProvider(
          */
         fun parse(raw: String): String? = runCatching {
             val obj = json.parseToJsonElement(raw) as? JsonObject ?: return null
-            val choices = obj["choices"] as? kotlinx.serialization.json.JsonArray ?: return null
+            val choices = obj["choices"] as? JsonArray ?: return null
             val first = choices.firstOrNull() as? JsonObject ?: return null
             (first["message"] as? JsonObject)?.get("content")?.let { return it.jsonPrimitive.content }
             first["text"]?.jsonPrimitive?.content
@@ -129,11 +142,31 @@ class OpenAiCompatProvider(
             }
         }
 
-        private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(6)).build()
-
-        private fun send(req: HttpRequest): String =
-            client.send(req, HttpResponse.BodyHandlers.ofString()).let { resp ->
-                if (resp.statusCode() / 100 != 2) error("http ${resp.statusCode()}") else resp.body()
+        /**
+         * 一次 POST。**这里不许出现 `java.net.http.*`**（见类注释那次闪退）：
+         * `HttpURLConnection` 从 API 1 就有，JDK 上也一样能跑，桌面彩排台和手机才是同一条代码。
+         *
+         * 两个超时都必须显式设：不设读超时等于无限等，现场网关不回话会把那条线程挂死。
+         * 非 2xx 抛出去，由 [complete] 那一层收成 null —— 网关回 401、回 HTML 错误页都是常态。
+         */
+        private fun post(url: String, body: String, headers: Map<String, String>, readMs: Long): String {
+            val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 6_000
+            conn.readTimeout = readMs.coerceIn(1_000, 60_000).toInt()
+            conn.doOutput = true
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            try {
+                // 请求体要一次写完再关流。关流之后 connect() 才真正发出去，所以这两句的顺序不能反
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                val text = (if (code / 100 == 2) conn.inputStream else conn.errorStream)
+                    ?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+                if (code / 100 != 2) error("http $code")
+                return text
+            } finally {
+                conn.disconnect()
             }
+        }
     }
 }

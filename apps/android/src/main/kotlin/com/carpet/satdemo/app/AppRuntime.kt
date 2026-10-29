@@ -42,6 +42,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.carpet.satdemo.core.link.SosCopy
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 
 /**
  * **连接层持有者，不属于任何页面。**
@@ -191,7 +194,7 @@ class AppRuntime(private val host: Application) {
     fun startMonitors() {
         // 起来就把 1Hz 那圈跑上：状态卡要在首屏自己动，等用户按"启动服务"就变成又要学一遍旧控制台的操作。
         // 退到后台会被 stop 掉，所以这一句在 monitorsUp 之外，每次回到前台都能把自己接回来
-        if (!runtime.status.value.running) setGuard(true)
+        if (!runtime.status.value.running) setGuard(true) else retryGuard()
         if (!monitorsUp) {
             monitorsUp = true
             location = LocationMonitor(host) { lat, lon, source, hdop, age ->
@@ -473,18 +476,52 @@ class AppRuntime(private val host: Application) {
 
     fun allowedScreens(): Set<String> = runtime.allowedScreens()
 
+    /** 想要常驻、但那一刻权限还没批 → 只跑了进程内那一圈。这两个记的是"欠着的那半" */
+    private var guardWanted = false
+    private var guardNoted = false
+
+    /**
+     * 进程真被钉住了吗。**页面上凡是"守护"两个字都得读这一句**，不能读 `status.running`：
+     * 后者只代表 1Hz 在转，而锁屏之后系统照样能把它冻住 —— 那正是这次闪退之后剩下的唯一风险。
+     */
+    val guardPinned: Boolean get() = guardWanted && DemoGuardService.canHold(host)
+
     /**
      * 守护服务的总闸。**开的时候同时把进程钉住**（[DemoGuardService]）：
      * 连接层只挂在 Application 上时，锁屏久了系统照样冻住进程，1Hz 那一圈会停。
+     *
+     * ⚠️ **钉进程这一步必须先有权限**。两台手机首启必闪退就是这么来的：`MainActivity.onCreate`
+     * 里 `requestPermissions` 只是把系统对话框弹出去（异步），紧接着的 `startMonitors()` 就把
+     * 前台服务拉起来，而 Android 10 起 `startForeground(..., TYPE_LOCATION)` 要求**调用那一刻**
+     * 定位权限已经批下来 —— 系统抛 SecurityException，进程当场没了。V1.6 那个包没这问题，
+     * 因为守护那时只在「我的」里手动开；V1.7 把它挪到启动路径上，顺手把崩溃也挪了过来。
+     *
+     * 所以这里分成两层，各自的条件不一样：
+     * **进程内 1Hz 不要任何权限**，无条件起；**前台服务只在系统认账时起**（[DemoGuardService.canHold]），
+     * 起不来就记下 [guardWanted] 等 [retryGuard] 补 —— 权限是异步批下来的，这条路必须能重试。
      */
     fun setGuard(on: Boolean) {
+        guardWanted = on
         if (on) {
             runtime.start()
-            DemoGuardService.start(host)
+            retryGuard()
         } else {
             DemoGuardService.stop(host)
             runtime.stop()
         }
+    }
+
+    private fun retryGuard() {
+        if (!guardWanted) return
+        if (!DemoGuardService.canHold(host)) {
+            if (!guardNoted) {
+                guardNoted = true
+                runtime.log("守护先只在 App 里跑：定位权限还没批，这时候起前台服务会被系统当场拒（上次闪退就是这一下）")
+            }
+            return
+        }
+        guardNoted = false
+        DemoGuardService.start(host)
     }
 
     fun setSentinel(on: Boolean) = runtime.armSentinel(on)
@@ -566,8 +603,32 @@ class CarpetApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // **先装崩溃记录，再装配 runtime**：那次闪退就闪退在装配里（Providers 引了 Android
+        // 没有的 java.net.http）。顺序反了，现场连一份栈都留不下，只剩用户一句"又闪退了"
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching {
+                val sw = StringWriter()
+                e.printStackTrace(PrintWriter(sw))
+                File(filesDir, "crash-${System.currentTimeMillis()}.log").writeText("线程 ${t.name}\n$sw")
+                // 只留最近 5 份，演示机上跑一整天也不许把内部存储写满
+                filesDir.listFiles { f -> f.name.startsWith("crash-") && f.name.endsWith(".log") }
+                    ?.sortedBy { it.name }?.dropLast(5)?.forEach { it.delete() }
+            }
+            // 自己这行绝不能抛，否则连系统那个"应用已停止"的对话框都看不到
+            previous?.uncaughtException(t, e)
+        }
+        // 上一次异常退出留下的栈读进运行时日志 —— 手机上那一屏字，是我们在这台没有手机的机器上
+        // 唯一读得到"真机上到底发生了什么"的通道
+        val last = filesDir.listFiles { f -> f.name.startsWith("crash-") && f.name.endsWith(".log") }
+            ?.maxByOrNull { it.name }
         // 让 lazy 在进程起来时就落地一次：第一件事是接线展示端指令，
         // 否则用户先点圆屏、App 才第一次读 runtime，那条指令会被丢掉
         appRuntime.wireCommands()
+        last?.let { f ->
+            val tail = runCatching { f.readText().lines().filter { it.isNotBlank() }.takeLast(2) }
+                .getOrDefault(emptyList()).joinToString(" ← ")
+            appRuntime.runtime.log("上次异常退出：$tail")
+        }
     }
 }
