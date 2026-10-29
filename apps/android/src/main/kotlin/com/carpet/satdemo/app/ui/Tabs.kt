@@ -156,18 +156,9 @@ private fun AssistantSettings(app: AppRuntime) {
         ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() })
         ValueRow("密钥", if (endpoint.apiKey.isBlank()) null else "已存本机")
         SectionLabel("权限档：${granted.label}（往右每高一档都更危险）")
-        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x4)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
             PermissionTier.entries.forEach { t ->
-                val on = t === granted
-                Box(
-                    modifier = Modifier
-                        .background(
-                            if (on) Ink.Sat.copy(alpha = 0.22f) else Ink.Track,
-                            RoundedCornerShape(Grid.x8),
-                        )
-                        .clickable { app.setAiGranted(t) }
-                        .padding(horizontal = Grid.x8, vertical = Grid.x4),
-                ) { Text(t.label, style = Type.Caption, color = if (on) Ink.Sat else Ink.TextMid) }
+                Chip(t.label, selected = t === granted) { app.setAiGranted(t) }
             }
         }
         SectionLabel("它现在会做什么")

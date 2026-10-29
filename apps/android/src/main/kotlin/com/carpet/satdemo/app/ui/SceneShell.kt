@@ -3,6 +3,8 @@ package com.carpet.satdemo.app.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,14 +36,13 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     val current by app.scene.collectAsState()
     var more by remember { mutableStateOf(false) }
     val shown = if (more) Scene.entries.toList() else Scene.quick
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
-        Text(current.label, style = Type.Hero)
-        Text(current.subtitle + " · 底座默认隐私 " + current.profile.basePrivacy.label, style = Type.Caption)
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x12)) {
+        SectionHead(current.label, current.subtitle + " · 底座默认隐私 " + current.profile.basePrivacy.label)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
-            shown.forEach { sc -> SceneChip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
+            shown.forEach { sc -> Chip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
         }
         Text(
             if (more) "收起场景" else "更多场景（${Scene.entries.size - Scene.quick.size}）",
@@ -52,27 +53,12 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     }
 }
 
-@Composable
-private fun SceneChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .background(
-                if (selected) Ink.Sat.copy(alpha = 0.22f) else Ink.Track,
-                RoundedCornerShape(Grid.x8),
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = Grid.x12, vertical = Grid.x8),
-    ) {
-        Text(label, style = Type.Body.copy(color = if (selected) Ink.Sat else Ink.TextMid))
-    }
-}
-
 /** 卡片流。缺能力的卡在这里直接被跳过，不画占位也不报错（§5.3 硬要求 #3） */
 @Composable
 fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(Grid.x12),
+        verticalArrangement = Arrangement.spacedBy(Grid.Card),
     ) {
         keys.forEach { key -> RenderCard(key, scope) }
     }

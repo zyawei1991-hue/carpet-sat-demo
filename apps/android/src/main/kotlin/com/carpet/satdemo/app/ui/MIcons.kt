@@ -5,16 +5,18 @@ import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Adb
 import androidx.compose.material.icons.outlined.Alarm
-import androidx.compose.material.icons.outlined.AltRoute
+import androidx.compose.material.icons.automirrored.outlined.AltRoute
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.BatteryFull
-import androidx.compose.material.icons.outlined.BluetoothSearching
+import androidx.compose.material.icons.automirrored.outlined.BluetoothSearching
 import androidx.compose.material.icons.outlined.CardMembership
 import androidx.compose.material.icons.outlined.CellTower
-import androidx.compose.material.icons.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.ChildCare
 import androidx.compose.material.icons.outlined.DataSaverOn
 import androidx.compose.material.icons.outlined.DirectionsCar
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.HourglassBottom
@@ -22,7 +24,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Nature
-import androidx.compose.material.icons.outlined.Notes
+import androidx.compose.material.icons.automirrored.outlined.Notes
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PinDrop
 import androidx.compose.material.icons.outlined.PrivacyTip
@@ -65,11 +67,11 @@ object MIcons {
 
     /** 圆屏/底座。Watch=那块圆表，BluetoothSearching=还没握手，AltRoute=过顶路径 */
     val dock = Icons.Outlined.Watch
-    val pairing = Icons.Outlined.BluetoothSearching
-    val pass = Icons.Outlined.AltRoute
+    val pairing = Icons.AutoMirrored.Outlined.BluetoothSearching
+    val pass = Icons.AutoMirrored.Outlined.AltRoute
 
     /** AI 主理人。Chat=对话，SmartToy=本机规则（不是真模型），VoiceChat=语音，SupportAgent=主动提醒 */
-    val chat = Icons.Outlined.Chat
+    val chat = Icons.AutoMirrored.Outlined.Chat
     val model = Icons.Outlined.SmartToy
     val voice = Icons.Outlined.VoiceChat
     val mic = Icons.Outlined.Mic
@@ -94,7 +96,7 @@ object MIcons {
     val health = Icons.Outlined.MonitorHeart
     val send = Icons.AutoMirrored.Outlined.Send
     val settings = Icons.Outlined.Settings
-    val speech = Icons.Outlined.Chat
+    val speech = Icons.AutoMirrored.Outlined.Chat
 
     /**
      * 第二批（V1.7 排版收口时补）。名字全部在这份 aar 的 classes.jar 里逐个核对过：
@@ -110,11 +112,15 @@ object MIcons {
     val share = Icons.Outlined.Badge
     val sentry = Icons.Outlined.Visibility
     val guard = Icons.Outlined.Alarm
-    val ticket = Icons.Outlined.Notes
+    val ticket = Icons.AutoMirrored.Outlined.Notes
     val parking = Icons.Outlined.PinDrop
     val growth = Icons.Outlined.Nature
     val checkin = Icons.Outlined.Today
     val task = Icons.Outlined.Task
+
+    /** 展开/收起。箭头朝向就是"内容往哪走"：向下=还有东西要出来，向上=收回去 */
+    val expand = Icons.Outlined.ExpandMore
+    val collapse = Icons.Outlined.ExpandLess
 
     /** 底部导航四个。Rounded 一档，和卡片里的 Outlined 拉开层级 */
     val navHome = Icons.Rounded.Home

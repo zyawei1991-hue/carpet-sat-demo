@@ -1,24 +1,30 @@
 package com.carpet.satdemo.app.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -29,6 +35,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -63,10 +72,20 @@ object Motion {
 
     /** 颜色不能复用 [tweenSpec]：动画规格带类型，拿 Float 的规格去插 Color 是编译期就拦住的错法 */
     val colorSpec = tween<Color>(Normal)
+
+    /** 展开/收起统一用这一对。以前各处手写出入动画，四个地方四种时长 */
+    val expandIn = fadeIn(tween(Fast)) + expandVertically(tween(Normal))
+    val expandOut = fadeOut(tween(Fast)) + shrinkVertically(tween(Normal))
 }
 
 /**
- * 卡片原语。**卡片之间只用底色区分，不画边框不画阴影**（§5.2 第 3 条）。
+ * 卡片。**层级只有三档，一屏不许用出第四档**（[Level]）：
+ *  - [Level.Plain] 默认：卡底，无描边 —— 绝大多数卡片；
+ *  - [Level.Raised] 强调：更亮一档的底 + 一根描边，**一屏最多一个**，给当前主问题；
+ *  - [Level.Group] 分组背板：更暗一档 + 无内边距，用来把若干 [RowLine] 收进同一个标题下。
+ *
+ * 之前所有卡都是同一档、同一间距，读起来就是"一摞同权重方块"。分档不是审美，
+ * 是让用户扫一眼就知道该先看哪一块。
  *
  * @param mock 非空时在卡片角上打「示意数据」徽标。**桩数据必须可辨** ——
  *   前装车开不开放数据还没定，演示时观众把示意读成实测，比少一张卡片损失大得多。
@@ -74,20 +93,27 @@ object Motion {
 @Composable
 fun InkCard(
     modifier: Modifier = Modifier,
+    level: Level = Level.Plain,
     tone: Tone = Tone.Neutral,
     mock: Boolean = false,
     emphasis: Boolean = false,
     icon: ImageVector? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val shape = if (level === Level.Raised) RoundedCornerShape(Round.Hero) else RoundedCornerShape(Round.Card)
+    val bg = when (level) {
+        Level.Plain -> Ink.Card
+        Level.Raised -> Ink.Raise
+        Level.Group -> Ink.Sunk
+    }
+    val box = modifier
+        .fillMaxWidth()
+        .background(bg, shape)
+    val edged = if (level === Level.Raised) box.border(1.dp, Ink.Outline, shape) else box
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Ink.Card, RoundedCornerShape(Grid.x16))
-            .padding(Grid.x16),
+        modifier = edged.then(if (level === Level.Group) Modifier else Modifier.padding(Grid.Pad)),
     ) {
-        // 图标列在最左，内容整体右移：**每张卡的标题从同一条竖线起排**。
-        // 之前图标单独占一行，一屏六张卡读起来是六段"带图标的段落"，不是六张同一族的卡
+        // 图标列在最左，内容整体右移：**每张卡的标题从同一条竖线起排**
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x12),
@@ -101,11 +127,189 @@ fun InkCard(
             }
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(Grid.x8),
+                verticalArrangement = Arrangement.spacedBy(Grid.Inner),
             ) {
                 if (mock) MockChip()
                 content()
             }
+        }
+    }
+}
+
+/** 卡片的三档层级。见 [InkCard] */
+enum class Level { Plain, Raised, Group }
+
+/**
+ * 分组背板：一个标题 + 若干行。**组内不再各是一张卡**，
+ * 因为"每组一张卡"才是上一版最直接的乱源 —— 六个独立方块之间全是同一种间距。
+ */
+@Composable
+fun InkGroup(
+    title: String,
+    trailing: String? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    InkCard(modifier = modifier, level = Level.Group) {
+        Column(modifier = Modifier.padding(horizontal = Grid.x16, vertical = Grid.x12)) {
+            RowLineHead(title, trailing)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun RowLineHead(title: String, trailing: String?) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title.uppercase(), style = Type.Overline)
+        trailing?.let { Text(it, style = Type.Overline, color = Ink.TextLow) }
+    }
+}
+
+/** 组里的一行。行与行之间一根 [HairLine]，比"每行一张卡"密得多也好读得多 */
+@Composable
+fun RowLine(
+    label: String,
+    value: String?,
+    tone: Tone = Tone.Neutral,
+    mono: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = Grid.Inner),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = Type.Body.copy(color = Ink.TextMid), modifier = Modifier.padding(end = Grid.x12))
+        Text(
+            value ?: "--",
+            style = if (mono) Type.Mono else Type.Body,
+            color = when {
+                value == null -> Ink.TextLow
+                tone !== Tone.Neutral -> tone.color
+                else -> Ink.TextHigh
+            },
+        )
+    }
+}
+
+/** 一根分隔线。只用于组内行与行之间，不许拿来当"卡片边框"用 */
+@Composable
+fun HairLine(modifier: Modifier = Modifier) {
+    Box(modifier = modifier.fillMaxWidth().height(1.dp).background(Ink.Track))
+}
+
+/**
+ * 组标题。**层级靠"字距 + 留白"，不靠颜色**，所以这里给的是 [Type.Overline]。
+ * 上一版的 [SectionLabel] 用 12sp 灰字，掉在卡片堆里完全看不见，分组因此不成立。
+ */
+@Composable
+fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
+        Text(title.uppercase(), style = Type.Overline)
+        note?.let { Text(it, style = Type.Caption, color = Ink.TextLow) }
+    }
+}
+
+/**
+ * 一行式设备状态条。**首页顶部用它回答"现在能不能用"，而不是让用户滚三屏去找**。
+ * 每枚 chip 只写"什么 + 状态"，颜色一律从 [Tone] 取，不引入第二种表达方式。
+ */
+@Composable
+fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items.forEach { it0 ->
+            Row(
+                modifier = Modifier
+                    .background(Ink.Card, RoundedCornerShape(Round.Pill))
+                    .padding(horizontal = Grid.x12, vertical = Grid.x8),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Dot(it0.tone)
+                Text(it0.label, style = Type.Caption.copy(color = Ink.TextHigh, fontWeight = FontWeight.Medium))
+                it0.value?.let { Text(it, style = Type.Caption, color = it0.tone.color) }
+            }
+        }
+    }
+}
+
+data class RailItem(val label: String, val value: String? = null, val tone: Tone)
+
+/**
+ * 选择器 chip（场景、权限档这种"选一档"的地方）。
+ *
+ * **选中用实底 + 深色字，不用"语义色 + 同色字"**。之前那种是 `Sat.copy(alpha=0.22)` 的淡底上
+ * 再写一支 `Sat` 的字，算下来只有 **4.43:1**（低于 AA 的 4.5）—— 淡底把自己的字压糊了，
+ * 而这类 chip 恰恰是"我现在在哪一档"的唯一线索。实底 Sat 配 [Ink.Deep] 是 7.5:1，
+ * 顺带也和 M3 的 filter chip 选中态对上了。
+ */
+@Composable
+fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    Box(
+        modifier = modifier
+            .background(if (selected) Ink.Sat else Ink.Track, RoundedCornerShape(Round.Chip))
+            .clickable(onClick = onClick)
+            .padding(horizontal = Grid.x12, vertical = Grid.x8),
+    ) {
+        Text(
+            label,
+            style = Type.Caption.copy(
+                color = if (selected) Ink.Deep else Ink.TextHigh,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            ),
+        )
+    }
+}
+
+/**
+ * 长说明文字。**默认收起，点标题才展开** —— 上一版把"配对为什么是这三步""为什么不先做自动发现"
+ * 这类工程说明直接摊在首页正文里，那是把 changelog 当界面用，也是"信息乱"最实在的来源。
+ * 该说的话一句没少，只是不再抢第一屏的注意力。
+ */
+@Composable
+fun CollapsableNote(
+    label: String,
+    text: String,
+    tone: Tone = Tone.Neutral,
+    expandedByDefault: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    var open by rememberSaveable(label) { mutableStateOf(expandedByDefault) }
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = !open },
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (open) MIcons.collapse else MIcons.expand,
+                contentDescription = null,
+                tint = Ink.TextLow,
+                modifier = Modifier.size(14.dp),
+            )
+            Text(label, style = Type.Caption.copy(color = Ink.Sat))
+        }
+        AnimatedVisibility(visible = open, enter = Motion.expandIn, exit = Motion.expandOut) {
+            Text(
+                text,
+                style = Type.Caption,
+                color = if (tone === Tone.Neutral) Ink.TextLow else tone.color,
+                modifier = Modifier.padding(top = Grid.x8),
+            )
         }
     }
 }
@@ -116,7 +320,7 @@ fun IconBadge(icon: ImageVector, tint: Color, modifier: Modifier = Modifier, siz
     Box(
         modifier = modifier
             .size(size.dp)
-            .background(tint.copy(alpha = 0.14f), RoundedCornerShape(Grid.x8)),
+            .background(tint.copy(alpha = Ink.TINT), RoundedCornerShape(Grid.x8)),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size((size - 14).dp))
@@ -138,7 +342,7 @@ fun Dot(tone: Tone, modifier: Modifier = Modifier) {
 fun MockChip() {
     Box(
         modifier = Modifier
-            .background(Ink.Track, RoundedCornerShape(Grid.x4))
+            .background(Ink.Wait.copy(alpha = Ink.TINT), RoundedCornerShape(Round.Chip))
             .padding(horizontal = Grid.x8, vertical = Grid.x4),
     ) {
         Text("示意数据 · 未接真源", style = Type.Caption.copy(color = Ink.Wait))
@@ -150,13 +354,17 @@ fun MockChip() {
 fun Badge(text: String, tone: Tone) {
     Box(
         modifier = Modifier
-            .background(tone.color.copy(alpha = 0.18f), RoundedCornerShape(Grid.x4))
+            .background(tone.color.copy(alpha = Ink.TINT), RoundedCornerShape(Round.Chip))
             .padding(horizontal = Grid.x8, vertical = Grid.x4),
     ) {
         Text(text, style = Type.Caption.copy(color = tone.color, fontWeight = FontWeight.SemiBold))
     }
 }
 
+/**
+ * 卡片标题。**18sp 的 [Type.Title] 是这一版新增的那一档** ——
+ * 上一版标题借用 15sp 正文加粗，和正文只差字重，扫读时抓不到锚点。
+ */
 @Composable
 fun CardTitle(text: String, trailing: String? = null, icon: ImageVector? = null, tone: Tone = Tone.Neutral) {
     Row(
@@ -169,17 +377,25 @@ fun CardTitle(text: String, trailing: String? = null, icon: ImageVector? = null,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             icon?.let {
-                Icon(it, contentDescription = null, tint = if (tone === Tone.Neutral) Ink.TextMid else tone.color, modifier = Modifier.size(18.dp))
+                Icon(
+                    it,
+                    contentDescription = null,
+                    tint = if (tone === Tone.Neutral) Ink.TextMid else tone.color,
+                    modifier = Modifier.size(18.dp),
+                )
             }
-            Text(text, style = Type.Body.copy(fontWeight = FontWeight.SemiBold))
+            Text(text, style = Type.Title)
         }
-        trailing?.let { Text(it, style = Type.Caption) }
+        trailing?.let { Text(it, style = Type.Caption, color = Ink.TextLow) }
     }
 }
 
 /**
- * 首页那种"一屏先回答一个问题"的大数字块。**只允许给真数据用** ——
- * 桩数据不配有这个字号，它就该待在带「示意数据」徽标的小字行里。
+ * 首屏那一个主问题的大数字块。**[Display] 一屏只许出现一次**（唯一例外是 SOS 倒计时环，
+ * 它出事时才出现，那时全页重心本来就该在它身上）。
+ * 上一版"圆屏 0 台在线"和"对话"各摆了一个大字号块，两个重心等于没有重心。
+ *
+ * **只允许给真数据用** —— 桩数据不配有这个字号，它就该待在带「示意数据」徽标的小字行里。
  */
 @Composable
 fun HeroStat(
@@ -188,6 +404,7 @@ fun HeroStat(
     unit: String? = null,
     caption: String,
     tone: Tone = Tone.Neutral,
+    display: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val color = if (tone === Tone.Neutral) Ink.TextHigh else tone.color
@@ -196,14 +413,14 @@ fun HeroStat(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Grid.x16),
     ) {
-        IconBadge(icon, color, size = 48)
+        IconBadge(icon, color, size = if (display) 52 else 44)
         Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
             Row(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(Grid.x4),
             ) {
                 AnimatedContent(targetState = value, transitionSpec = { Motion.slideForward(true) }, label = "hero") { t ->
-                    Text(t, style = Type.Display.copy(color = color))
+                    Text(t, style = (if (display) Type.Display else Type.Hero).copy(color = color))
                 }
                 unit?.let { Text(it, style = Type.Body, color = Ink.TextMid) }
             }
@@ -216,7 +433,9 @@ fun HeroStat(
 @Composable
 fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boolean = false) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = Grid.x4),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.Top,
     ) {
@@ -248,7 +467,7 @@ fun CountdownRing(
     // 1Hz 的跳变直接画会一格一格地抖，动一下眼睛才读得出"在倒计时"而不是"数字变了"
     val f by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec, label = "ring")
     val c by animateColorAsState(tone.color, Motion.colorSpec, label = "ringColor")
-    Box(modifier = modifier.size(96.dp), contentAlignment = Alignment.Center) {
+    Box(modifier = modifier.size(104.dp), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.matchParentSize()) {
             val track = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round)
             // 画在包围盒内侧：半径减一个线宽，否则圆环会被裁掉一边
@@ -412,7 +631,14 @@ fun ProgressBar(fraction: Float, tone: Tone = Tone.Wait, modifier: Modifier = Mo
     }
 }
 
+/** 纵向占位。层级现在主要靠留白承担，所以这里给一个显式的名字，别处再写 24.dp 就该被问为什么 */
+@Composable
+fun Gap(size: Int = 16) {
+    Spacer(modifier = Modifier.height(size.dp))
+}
+
+/** 旧的组标题。V1.10 起改成 [SectionHead]，这里保留是为了让还没改完的卡片不至于编译不过 */
 @Composable
 fun SectionLabel(text: String, modifier: Modifier = Modifier) {
-    Text(text, style = Type.Caption, color = Ink.TextLow, modifier = modifier.padding(top = Grid.x4))
+    Text(text.uppercase(), style = Type.Overline, modifier = modifier.padding(top = Grid.x4))
 }
