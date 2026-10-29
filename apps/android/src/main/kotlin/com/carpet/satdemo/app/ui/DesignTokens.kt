@@ -67,8 +67,16 @@ object Grid {
     val x32: Dp = 32.dp
 }
 
-/** §5.2 第 3 条：字号三档、字重两档，没有第四种 */
+/** §5.2 第 3 条：字号三档、字重两档，没有第四种。**V1.7 只做了一处放宽：Display** ——
+ *  首页两个主区各要回答一个大问题（"连没连上""还要多久"），15sp 的正文撑不起"一屏一重心"。
+ *  Display 只允许出现在 [HeroStat] 上，一屏最多两个；正文/说明仍旧只有 Body 和 Caption 两档。 */
 object Type {
+    val Display = TextStyle(
+        fontSize = 32.sp,
+        lineHeight = 36.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = Ink.TextHigh,
+    )
     val Hero = TextStyle(
         fontSize = 22.sp,
         lineHeight = 28.sp,

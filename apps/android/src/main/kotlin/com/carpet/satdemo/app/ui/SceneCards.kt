@@ -32,7 +32,7 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
 @Composable
 fun VehicleStatusCard(s: CardScope) {
     val parked = s.status.snapshot?.sentinel?.armed == true
-    InkCard(mock = s.mock(Capability.VehicleBus)) {
+    InkCard(icon = MIcons.vehicle, mock = s.mock(Capability.VehicleBus)) {
         CardTitle("车况", trailing = if (parked) "哨兵布防中" else "熄火停车")
         ValueRow("剩余续航", "412 km")
         ValueRow("油量", "3/4")
@@ -51,7 +51,7 @@ fun VehicleStatusCard(s: CardScope) {
 fun VehicleFindCard(s: CardScope) {
     val g = s.snap?.gnss
     val hasFix = g != null && !(g.lat == 0.0 && g.lon == 0.0 && g.fixAgeS == null)
-    InkCard(mock = s.mock(Capability.VehicleBus)) {
+    InkCard(icon = MIcons.parking, mock = s.mock(Capability.VehicleBus)) {
         CardTitle("寻车", trailing = "记一次车位")
         ValueRow(
             "最后已知位置",
@@ -70,7 +70,7 @@ fun VehicleFindCard(s: CardScope) {
 
 @Composable
 fun VehicleServiceCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.VehicleBus)) {
+    InkCard(icon = MIcons.ticket, mock = s.mock(Capability.VehicleBus)) {
         CardTitle("养车工单")
         RowWork("保养", "还有 830 km", Tone.Wait)
         RowWork("轮胎换位", "已逾期 12 天", Tone.Alert)
@@ -92,7 +92,7 @@ private fun RowWork(name: String, state: String, tone: Tone) {
 
 @Composable
 fun VehicleEnergyCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.VehicleBus)) {
+    InkCard(icon = MIcons.battery, mock = s.mock(Capability.VehicleBus)) {
         CardTitle("能耗", trailing = "近 30 天")
         Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
             Text("驱动 78% · 空调 14% · 待机 8%", style = Type.Body)
@@ -106,7 +106,7 @@ fun VehicleEnergyCard(s: CardScope) {
 
 @Composable
 fun KidsControlCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.ChildDevice)) {
+    InkCard(icon = MIcons.kid, mock = s.mock(Capability.ChildDevice)) {
         CardTitle("亲子管控", trailing = "底座：项圈")
         ValueRow("今日屏幕时长", "37 分钟 / 上限 60")
         ValueRow("内容白名单", "故事、英语、汉字（示意）")
@@ -121,7 +121,7 @@ fun KidsControlCard(s: CardScope) {
 
 @Composable
 fun KidsGrowthCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.ChildDevice)) {
+    InkCard(icon = MIcons.growth, mock = s.mock(Capability.ChildDevice)) {
         CardTitle("成长记录")
         ValueRow("今天新词", "5 个（示意）")
         ValueRow("连续打卡", "12 天")
@@ -132,7 +132,7 @@ fun KidsGrowthCard(s: CardScope) {
 
 @Composable
 fun KidsAiCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.AiAgent)) {
+    InkCard(icon = MIcons.model, mock = s.mock(Capability.AiAgent)) {
         CardTitle("AI 育儿", trailing = "只摘要，不判断")
         Text("「今天孩子主动问了 3 次『为什么』，集中在机械类。」", style = Type.Body)
         Text("「建议：把睡前故事换成齿轮主题的绘本。」", style = Type.Body)
@@ -146,7 +146,7 @@ fun KidsAiCard(s: CardScope) {
 
 @Composable
 fun HealthVitalsCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.HealthBand)) {
+    InkCard(icon = MIcons.health, mock = s.mock(Capability.HealthBand)) {
         CardTitle("体征", trailing = "心率带未接")
         ValueRow("心率", "72 bpm（示意）")
         ValueRow("体温", "36.5 ℃（示意）")
@@ -161,7 +161,7 @@ fun HealthVitalsCard(s: CardScope) {
 
 @Composable
 fun HealthCheckinCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.HealthBand)) {
+    InkCard(icon = MIcons.checkin, mock = s.mock(Capability.HealthBand)) {
         CardTitle("今日打卡")
         RowWork("血压", "08:12 已完成", Tone.Ok)
         RowWork("用药", "21:00 待完成", Tone.Wait)
@@ -171,7 +171,7 @@ fun HealthCheckinCard(s: CardScope) {
 
 @Composable
 fun HealthAgentCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.AiAgent)) {
+    InkCard(icon = MIcons.agent, mock = s.mock(Capability.AiAgent)) {
         CardTitle("健康主理人")
         Text("「用药还差一次。要不要现在提醒？」", style = Type.Body)
         Text("动作：提醒一次 / 今天不提醒 / 转给家人", style = Type.Caption)
@@ -181,7 +181,7 @@ fun HealthAgentCard(s: CardScope) {
 
 @Composable
 fun AvatarCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.AiAgent)) {
+    InkCard(icon = MIcons.model, mock = s.mock(Capability.AiAgent)) {
         CardTitle("数字分身", trailing = "代答中")
         ValueRow("今日代答", "9 条（示意）")
         ValueRow("转真人", "2 条")
@@ -196,7 +196,7 @@ fun AvatarCard(s: CardScope) {
 
 @Composable
 fun A2aCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.AiAgent)) {
+    InkCard(icon = MIcons.chat, mock = s.mock(Capability.AiAgent)) {
         CardTitle("A2A 社交")
         ValueRow("在线对象", "3（示意）")
         ValueRow("待授权共享", "位置 · 行程")
@@ -206,7 +206,7 @@ fun A2aCard(s: CardScope) {
 
 @Composable
 fun ShareObjectsCard(s: CardScope) {
-    InkCard(mock = s.mock(Capability.Account)) {
+    InkCard(icon = MIcons.share, mock = s.mock(Capability.Account)) {
         CardTitle("共享对象")
         RowWork("妈妈", "位置 · 全程可见", Tone.Ok)
         RowWork("车队群", "位置 · 仅越界时", Tone.Wait)
@@ -222,7 +222,7 @@ fun ShareObjectsCard(s: CardScope) {
 @Composable
 fun SubscriptionCard(s: CardScope) {
     val u = s.app.usage()
-    InkCard(mock = s.mock(Capability.Account)) {
+    InkCard(icon = MIcons.plan, mock = s.mock(Capability.Account)) {
         CardTitle("订阅与流量包")
         ValueRow(
             "卫星报文额度",
@@ -245,7 +245,7 @@ fun PrivacyCard(s: CardScope) {
     val picked = s.app.privacyChoice.collectAsState().value
     val base = s.app.scene.collectAsState().value.profile.basePrivacy
     val eff = PrivacyTier.effective(base, picked)
-    InkCard(mock = s.mock(Capability.Account)) {
+    InkCard(icon = MIcons.privacy, mock = s.mock(Capability.Account)) {
         CardTitle("隐私中心", trailing = "取更严的那个")
         TierRow("底座默认", base, null)
         TierRow("家长设置", picked) { s.app.setPrivacyChoice(it) }
@@ -293,7 +293,7 @@ fun DeviceManagerCard(s: CardScope) {
     val list = s.app.devices.collectAsState().value
     val now = System.currentTimeMillis()
     val allowed = s.app.allowedScreens()
-    InkCard {
+    InkCard(icon = MIcons.terminal) {
         CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")
         if (list.isEmpty()) {
             Text("台账还是空的。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)

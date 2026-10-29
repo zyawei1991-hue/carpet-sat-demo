@@ -21,6 +21,9 @@ enum class Capability {
     Geofence,
     Sentinel,
     Dock,
+
+    /** AI 主理人这条链路（路由 / 权限 / 主动扫描）。**模型接不接是另一件事**，界面上逐条标来源 */
+    Assistant,
     VehicleBus,
     ChildDevice,
     HealthBand,
@@ -60,12 +63,12 @@ data class SceneProfile(
 )
 
 enum class Scene(val label: String, val subtitle: String, val profile: SceneProfile) {
-    /** 车载守护：用车养车 + 卫星通信，主场景是"车在那儿、人不在旁边也要看着" */
+    /** 车载守护：用车养车 + 卫星兜底。V1.7 起主卡是**圆屏这块屏**，不是链路 —— 车里天天看的是它 */
     Vehicle(
         "车载守护",
-        "用车养车 · 卫星链路",
+        "用车养车 · 卫星兜底",
         SceneProfile(
-            headline = "link",
+            headline = "dock",
             cards = listOf("sos", "link", "pass", "terminal", "vehicle.status", "vehicle.energy", "fence", "queue", "usage", "position", "vehicle.find"),
             actions = listOf("一键 SOS", "寻车", "远程熄火", "上报车况"),
             input = InputMode.TouchAndVoice,

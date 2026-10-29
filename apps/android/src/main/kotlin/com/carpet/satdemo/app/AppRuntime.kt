@@ -1,6 +1,13 @@
 package com.carpet.satdemo.app
 
 import android.app.Application
+import com.carpet.satdemo.core.ai.AiEndpoint
+import com.carpet.satdemo.core.ai.AiGateway
+import com.carpet.satdemo.core.ai.Heartbeat
+import com.carpet.satdemo.core.ai.OpenAiCompatProvider
+import com.carpet.satdemo.core.ai.PermissionTier
+import com.carpet.satdemo.core.ai.ReplySource
+import com.carpet.satdemo.core.ai.SkillContext
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -155,6 +162,9 @@ class AppRuntime(private val host: Application) {
         Capability.PositionSource -> if (locationActive) Availability.Live else Availability.Mocked
         Capability.Geofence -> Availability.Live
         Capability.Dock -> Availability.Live
+        // 网关这条链路是真的（路由、权限拦截、按状态作答）；**模型是不是真的看有没有配端点**，
+        // 那件事不在这里标，逐条回答上标 source —— 否则一条没配端点会把整块能力判成假
+        Capability.Assistant -> Availability.Live
         Capability.Sentinel,
         Capability.VehicleBus, Capability.ChildDevice, Capability.HealthBand,
         Capability.AiAgent, Capability.Account,
@@ -190,6 +200,7 @@ class AppRuntime(private val host: Application) {
             }.also { it.start(scope) }
         }
         location?.start()
+        startAiLoop()
     }
 
     fun setFlag(next: Flags) {
@@ -286,8 +297,162 @@ class AppRuntime(private val host: Application) {
     /** 设备台账（§8 R1 第一件事）。切 Tab、切场景都不会让它空一格 */
     val devices: StateFlow<List<Device>> get() = runtime.devicesSnapshot
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // AI 主理人。对话是首页两个主区之一（V1.7 重排），所以它跟链路一样挂在连接层，
+    // 不挂在页面上 —— 用户发完问题去切 Tab，回答回来时不该丢上下文。
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private val _endpoint = MutableStateFlow(
+        AiEndpoint(
+            baseUrl = prefs.getString(KEY_AI_URL, "") ?: "",
+            apiKey = prefs.getString(KEY_AI_KEY, "") ?: "",
+            model = prefs.getString(KEY_AI_MODEL, "") ?: "",
+        ),
+    )
+    val aiEndpoint: StateFlow<AiEndpoint> = _endpoint
+
+    private val aiProvider = OpenAiCompatProvider(_endpoint.value)
+
+    /**
+     * 权限档默认只到 [PermissionTier.ReadLocal]：**能说话不等于能动手**。
+     * 出网发送和不可逆动作要在「我的」里明确放开，SOS 那一档就算放开也不许由对话触发（§6.1）。
+     */
+    private val ai = AiGateway(
+        provider = aiProvider,
+        initialGranted = runCatching {
+            PermissionTier.valueOf(prefs.getString(KEY_AI_TIER, PermissionTier.ReadLocal.name) ?: "ReadLocal")
+        }.getOrDefault(PermissionTier.ReadLocal),
+        log = { line -> runtime.log(line) },
+    )
+
+    /**
+     * 当前权限档。**必须是 StateFlow**：这一档在「我的」页上就地改，普通 getter 改完界面不会重画，
+     * 用户会以为点了没反应，然后连点五下 —— 每一下都写了一次 SharedPreferences。
+     */
+    private val _aiGranted = MutableStateFlow(ai.granted)
+    val aiGranted: StateFlow<PermissionTier> = _aiGranted
+
+    enum class ChatFrom { Me, Ai }
+
+    data class ChatLine(
+        val from: ChatFrom,
+        val text: String,
+        val source: ReplySource = ReplySource.LocalRule,
+        val skill: String? = null,
+        val proactive: Boolean = false,
+    )
+
+    private val _chat = MutableStateFlow(
+        listOf(
+            ChatLine(
+                ChatFrom.Ai,
+                "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答 —— " +
+                    "回答只来自手机这边的真实状态，没配模型端点之前不会编话。",
+            ),
+        ),
+    )
+    val chat: StateFlow<List<ChatLine>> = _chat
+
+    private var aiBusy = false
+    private var aiLoop: Job? = null
+    private val heartbeat = Heartbeat()
+
+    /** 一次问答。忙的时候直接回"我在想上一条"，不排队 —— 排队会让用户以为按了两次就发两遍 */
+    fun askAi(question: String) {
+        val q = question.trim()
+        if (q.isEmpty() || aiBusy) return
+        aiBusy = true
+        _chat.value = _chat.value + ChatLine(ChatFrom.Me, q)
+        scope.launch {
+            try {
+                val r = ai.ask(q, aiContext())
+                _chat.value = _chat.value + ChatLine(ChatFrom.Ai, r.text, r.source, r.skill)
+            } finally {
+                aiBusy = false
+            }
+        }
+    }
+
+    /** 端点配置。**只填不全就当作没配**：宁可显示"未接真源"，也不要现场等一次 12 秒超时 */
+    fun setAiEndpoint(url: String, key: String, model: String) {
+        val next = AiEndpoint(url.trim(), key.trim(), model.trim())
+        _endpoint.value = next
+        aiProvider.setEndpoint(next)
+        prefs.edit().putString(KEY_AI_URL, next.baseUrl).putString(KEY_AI_KEY, next.apiKey)
+            .putString(KEY_AI_MODEL, next.model).apply()
+        runtime.log(if (next.configured) "模型端点已配：${next.model}" else "模型端点未配齐，回到本机规则")
+    }
+
+    fun setAiGranted(tier: PermissionTier) {
+        ai.setGranted(tier)
+        _aiGranted.value = ai.granted
+        prefs.edit().putString(KEY_AI_TIER, tier.name).apply()
+    }
+
+    /**
+     * 技能清单 + 当前这一档准不准。**逐条摆出来**：只写一句"权限已放开"的话，
+     * 用户不知道放开的是什么，出问题时也读不出是哪一条越了档。
+     */
+    data class AiSkillRow(val title: String, val needs: PermissionTier, val allowed: Boolean)
+
+    fun aiSkills(): List<AiSkillRow> = ai.skills.all.map { AiSkillRow(it.title, it.needs, ai.can(it.id)) }
+
+    /** 事实表：全部从状态机读，一个都不新造（core/ai 的设计前提） */
+    fun aiContext(): SkillContext {
+        val s = runtime.status.value.snapshot
+        val u = runtime.engine.usage()
+        return SkillContext(
+            scene = _scene.value.label,
+            phase = s?.sat?.phase?.name,
+            secondsToNextPass = s?.sat?.nextPassInS,
+            passWindowSec = s?.sat?.nextPassDurS,
+            moduleOnline = s?.sat?.moduleOk,
+            gnssLat = s?.gnss?.lat?.takeIf { it != 0.0 },
+            gnssLon = s?.gnss?.lon?.takeIf { it != 0.0 },
+            queueWaiting = s?.sat?.queuePending,
+            queueCapacity = s?.sat?.queueCapacity,
+            handedOver = u.handedOver,
+            phoneBattery = s?.phoneBattery,
+            ephemerisFresh = s?.sat?.ephState?.name?.let { it == "SUCCESS" },
+            fenceActive = s?.fence?.active,
+            fenceInside = s?.fence?.takeIf { it.active }?.inside,
+            screensOnline = runtime.status.value.clients,
+            aiEndpointConfigured = _endpoint.value.configured,
+        )
+    }
+
+    /** 主动扫描。10 秒一轮，够快也不至于把对话刷屏 */
+    private fun startAiLoop() {
+        if (aiLoop != null) return
+        aiLoop = scope.launch {
+            while (true) {
+                delay(AI_SCAN_MS)
+                heartbeat.scan(aiContext()).forEach { tip ->
+                    _chat.value = _chat.value + ChatLine(ChatFrom.Ai, tip.text, skill = tip.skill, proactive = true)
+                }
+            }
+        }
+    }
+
     /** 额度与队列水位。**现场读模组**，不是写死的数（§9 #12/#16 那两个口径未定，所以只能读） */
     fun usage(): DemoEngine.Usage = runtime.engine.usage()
+
+    /**
+     * 圆屏配对入口：**只负责"放开接入 + 把 screen_id 加进白名单 + 把接入点地址念出来"这三件事**，
+     * 剩下的都在圆屏那侧（它自己是 WebSocket 客户端）。
+     *
+     * 这里刻意**不**做"设备自己冒出来"：那要 mDNS/BLE 广播，而 `firmware/screen/` 到今天还是空的，
+     * 扫描结果的形状必须由真实固件定 —— 现在编一个发现协议，到货当天百分之百对不上。
+     * 明天固件一起来，第一件事是往设备总线上 upsert 一行，这个入口换成"扫到的设备列表"，别的都不动。
+     */
+    fun pairScreen(screenId: String): Boolean {
+        val id = screenId.trim()
+        if (id.isEmpty()) return false
+        val ok = runtime.allowScreen(id)
+        runtime.log(if (ok) "已把 $id 放进白名单" else "白名单里已经有 $id")
+        if (ok && !_flags.value.acceptScreens) setFlag(_flags.value.copy(acceptScreens = true))
+        return ok
+    }
 
     fun allowScreen(screenId: String): Boolean = runtime.allowScreen(screenId)
 
@@ -359,6 +524,13 @@ class AppRuntime(private val host: Application) {
         /** 假模块的"永远在过境窗口内"。真机的窗口由星历算，不靠这个数 */
         private const val ALWAYS_VISIBLE = Long.MAX_VALUE / 4
         private const val KEY_VENDOR_EPH = "vendor_eph"
+        private const val KEY_AI_URL = "ai_url"
+        private const val KEY_AI_KEY = "ai_key"
+        private const val KEY_AI_MODEL = "ai_model"
+        private const val KEY_AI_TIER = "ai_tier"
+
+        /** 主动扫描的间隔。比 1Hz 慢一个量级：提醒是"这事值得说一句"，不是刷屏 */
+        private const val AI_SCAN_MS = 10_000L
 
         /** 长按总量与"三段"。3 秒是〔规〕里那颗侧键的口径，三段是给眼睛看的进度 */
         const val ARM_MS = 3_000L

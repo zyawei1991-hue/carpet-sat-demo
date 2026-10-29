@@ -1,12 +1,15 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -15,10 +18,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.runtime.DemoRuntime
 
 /**
@@ -82,7 +87,7 @@ fun MeTab(
     val flags by app.flags.collectAsState()
     Page("我的", "设备与底座 · 订阅与流量包 · 隐私中心", modifier = modifier) {
         RenderCard("device.manager", scope)
-        InkCard {
+        InkCard(icon = MIcons.task) {
             CardTitle("运行与服务")
             ToggleRow(
                 "守护服务",
@@ -96,7 +101,7 @@ fun MeTab(
                 app.setFlag(flags.copy(demoMode = it))
             }
         }
-        InkCard {
+        InkCard(icon = MIcons.guard) {
             CardTitle("守护开关")
             ToggleRow(
                 "哨兵模式",
@@ -107,6 +112,7 @@ fun MeTab(
                 status.snapshot?.fence?.active == true,
                 "越界走卫星发一条，不等蜂窝") { app.setFence(it, "西湖景区") }
         }
+        AssistantSettings(app)
         RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
@@ -132,5 +138,55 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
             Text(hint, style = Type.Caption, color = Ink.TextLow)
         }
         Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+/**
+ * 主理人的"能碰什么"。首页那张卡只管问与答，这一张管权限：
+ * **档位逐条列出每条技能当前准不准** —— 只写一句"已放开"的话，用户不知道放开的是什么，
+ * 出事时也读不出是哪一条越了档（§6 第 3 条要的是能核对，不是能开关）。
+ */
+@Composable
+private fun AssistantSettings(app: AppRuntime) {
+    val endpoint by app.aiEndpoint.collectAsState()
+    val granted by app.aiGranted.collectAsState()
+    val rows = remember(granted) { app.aiSkills() }
+    InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Wait) {
+        CardTitle("主理人与模型", trailing = if (endpoint.configured) endpoint.model else "本机规则")
+        ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() })
+        ValueRow("密钥", if (endpoint.apiKey.isBlank()) null else "已存本机")
+        SectionLabel("权限档：${granted.label}（往右每高一档都更危险）")
+        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x4)) {
+            PermissionTier.entries.forEach { t ->
+                val on = t === granted
+                Box(
+                    modifier = Modifier
+                        .background(
+                            if (on) Ink.Sat.copy(alpha = 0.22f) else Ink.Track,
+                            RoundedCornerShape(Grid.x8),
+                        )
+                        .clickable { app.setAiGranted(t) }
+                        .padding(horizontal = Grid.x8, vertical = Grid.x4),
+                ) { Text(t.label, style = Type.Caption, color = if (on) Ink.Sat else Ink.TextMid) }
+            }
+        }
+        SectionLabel("它现在会做什么")
+        rows.forEach { r ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(r.title, style = Type.Body, modifier = Modifier.weight(1f))
+                Text(r.needs.label, style = Type.Caption, color = Ink.TextLow)
+                Badge(if (r.allowed) "准许" else "拦下", if (r.allowed) Tone.Ok else Tone.Wait)
+            }
+        }
+        Text(
+            "密钥只写进本机 SharedPreferences，不进日志、不进线路原文窗。「发求救」那一档就算放开，" +
+                "网关也只回一句「提示你自己去按」—— 不可逆动作不由对话触发（§6.1）。",
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
     }
 }

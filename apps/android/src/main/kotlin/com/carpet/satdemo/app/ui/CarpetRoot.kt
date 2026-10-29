@@ -1,10 +1,17 @@
 package com.carpet.satdemo.app.ui
 
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -14,11 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 
@@ -27,6 +30,9 @@ import com.carpet.satdemo.app.AppRuntime
  *
  * 工程模式是第四个 Tab 里的一个入口，不占第五个位置 —— 它给彩排和救场用，
  * 不该出现在产品导航里。
+ *
+ * 换页动画只有一档：轻微上推 + 淡入淡出。做重了会盖住内容本身的变化，
+ * 用户在四个页面之间来回点的时候，动画应该让他觉得"是同一摞卡片换了个摆法"。
  */
 @Composable
 fun CarpetRoot(app: AppRuntime) {
@@ -48,7 +54,7 @@ fun CarpetRoot(app: AppRuntime) {
                     NavigationBarItem(
                         selected = i == tab,
                         onClick = { app.setTab(i) },
-                        icon = { Glyph(t.key, if (i == tab) Ink.TextHigh else Ink.TextLow) },
+                        icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
                         label = { Text(t.label, style = Type.Caption) },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = Ink.TextHigh,
@@ -63,59 +69,34 @@ fun CarpetRoot(app: AppRuntime) {
         },
     ) { insets ->
         Box(modifier = Modifier.padding(insets)) {
-            when (tab) {
-                0 -> SceneShell(app, status)
-                1 -> VehicleTab(app, status)
-                2 -> FamilyTab(app, status)
-                else -> MeTab(app, status, onEngineer = { app.setFlag(flags.copy(engineering = true)) })
+            AnimatedContent(
+                targetState = tab,
+                transitionSpec = {
+                    (slideInVertically(tween(Motion.Normal)) { it / 12 } + fadeIn(tween(Motion.Fast)))
+                        .togetherWith(slideOutVertically(tween(Motion.Normal)) { -it / 12 } + fadeOut(tween(Motion.Fast)))
+                },
+                label = "tab",
+            ) { t ->
+                when (t) {
+                    0 -> HomeShell(app, status)
+                    1 -> VehicleTab(app, status)
+                    2 -> FamilyTab(app, status)
+                    else -> MeTab(app, status, onEngineer = { app.setFlag(flags.copy(engineering = true)) })
+                }
             }
         }
     }
 }
 
-private data class TabSpec(val key: String, val label: String)
-
-private val Tabs = listOf(
-    TabSpec("home", "首页"),
-    TabSpec("vehicle", "车辆"),
-    TabSpec("family", "家人"),
-    TabSpec("me", "我的"),
+private data class TabSpec(
+    val label: String,
+    val icon: ImageVector,
 )
 
-/**
- * 导航图标自己画，不引图标库（§5.2 第 4 条：形要有语义）。
- * 环=守护台在转，框=车辆，两个点=家人，点+框=我的。
- * 颜色只走灰阶 —— 语义色留给状态，导航图标一染色，"蓝=卫星链路"就不纯净了。
- */
-@Composable
-private fun Glyph(key: String, color: Color) {
-    Canvas(modifier = Modifier.size(24.dp)) {
-        val c = Offset(size.width / 2f, size.height / 2f)
-        val r = size.minDimension / 2f
-        val line = Stroke(width = 2.dp.toPx())
-        when (key) {
-            "home" -> drawCircle(color = color, radius = r * 0.7f, center = c, style = line)
-            "vehicle" -> drawRoundRect(
-                color = color,
-                topLeft = Offset(c.x - r * 0.8f, c.y - r * 0.5f),
-                size = Size(r * 1.6f, r * 1.0f),
-                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-                style = line,
-            )
-            "family" -> {
-                drawCircle(color = color, radius = r * 0.28f, center = Offset(c.x - r * 0.35f, c.y))
-                drawCircle(color = color, radius = r * 0.28f, center = Offset(c.x + r * 0.35f, c.y))
-            }
-            else -> {
-                drawCircle(color = color, radius = r * 0.28f, center = Offset(c.x, c.y - r * 0.4f))
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(c.x - r * 0.45f, c.y + r * 0.05f),
-                    size = Size(r * 0.9f, r * 0.6f),
-                    cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
-                    style = line,
-                )
-            }
-        }
-    }
-}
+/** 导航图标全部用官方 Material 图标集（material-icons-extended，Apache-2.0），不再自绘 */
+private val Tabs = listOf(
+    TabSpec("首页", MIcons.navHome),
+    TabSpec("车辆", MIcons.navVehicle),
+    TabSpec("家人", MIcons.navFamily),
+    TabSpec("我的", MIcons.navMe),
+)

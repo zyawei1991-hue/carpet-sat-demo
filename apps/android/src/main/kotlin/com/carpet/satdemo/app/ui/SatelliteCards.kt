@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -74,7 +75,7 @@ fun LinkCard(s: CardScope) {
     val st = s.status
     val snap = s.snap
     val tone = phaseTone(st.phase)
-    InkCard(tone = tone, emphasis = true) {
+    InkCard(icon = MIcons.signal, tone = tone, emphasis = true) {
         CardTitle("链路", trailing = st.localIp?.let { "接入点 $it" })
         Text(st.phase.name, style = Type.Hero.copy(color = tone.color))
         Text(phaseLine(st.phase, st.clients), style = Type.Body)
@@ -116,7 +117,7 @@ fun SosCard(s: CardScope) {
         level == SosLevel.sent -> Tone.Wait
         else -> Tone.Neutral
     }
-    InkCard(tone = tone, emphasis = true) {
+    InkCard(icon = MIcons.sos, tone = tone, emphasis = true) {
         CardTitle("紧急求助", trailing = snap?.sos?.attempts?.let { "已尝试 $it 次" })
         Text(
             when (level) {
@@ -211,7 +212,12 @@ private fun ArmSegments(done: Int) {
  * 因为"没发出去"和"被页面滚动打断"对用户是同一件事：松手了，什么都没发生。
  */
 @Composable
-private fun HoldToFire(onDown: () -> Unit, onUp: () -> Unit) {
+internal fun HoldToFire(
+    onDown: () -> Unit,
+    onUp: () -> Unit,
+    label: String = "长按 3 秒触发 SOS",
+    compact: Boolean = false,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -228,10 +234,10 @@ private fun HoldToFire(onDown: () -> Unit, onUp: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            "长按 3 秒触发 SOS",
-            style = Type.Hero,
+            label,
+            style = if (compact) Type.Body.copy(fontWeight = FontWeight.SemiBold) else Type.Hero,
             color = Color.White,
-            modifier = Modifier.padding(vertical = Grid.x16),
+            modifier = Modifier.padding(vertical = if (compact) Grid.x12 else Grid.x16),
         )
     }
 }
@@ -249,7 +255,7 @@ fun PassWindowCard(s: CardScope) {
     val dur = (sat?.nextPassDurS ?: 0).toLong()
     val maxEl = sat?.nextPassMaxEl
     val ephOk = sat?.ephState == EphState.SUCCESS
-    InkCard(tone = Tone.Sat, mock = s.mock(Capability.Ephemeris)) {
+    InkCard(icon = MIcons.pass, tone = Tone.Sat, mock = s.mock(Capability.Ephemeris)) {
         CardTitle("下次过境", trailing = sat?.satName?.let { "锁定 $it" })
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -304,7 +310,7 @@ fun PassWindowCard(s: CardScope) {
 fun TerminalCard(s: CardScope) {
     val sat = s.snap?.sat
     val pct = sat?.upgradePct
-    InkCard(tone = if (sat?.moduleOk == false) Tone.Alert else Tone.Neutral) {
+    InkCard(icon = MIcons.hardware, tone = if (sat?.moduleOk == false) Tone.Alert else Tone.Neutral) {
         CardTitle("卫星终端", trailing = sat?.fw?.let { "fw $it" })
         Text(
             when {
@@ -333,7 +339,7 @@ fun QueueCard(s: CardScope) {
     val sat = s.snap?.sat
     val pending = sat?.queuePending ?: 0
     val dropped = sat?.queueDropped
-    InkCard(tone = if (dropped != null) Tone.Alert else if (pending > 0) Tone.Wait else Tone.Ok) {
+    InkCard(icon = MIcons.queue, tone = if (dropped != null) Tone.Alert else if (pending > 0) Tone.Wait else Tone.Ok) {
         CardTitle("待发队列", trailing = "点=条数")
         QueueDots(pending, sat?.queueCapacity, if (pending > 0) Tone.Wait else Tone.Ok)
         Text(
@@ -360,7 +366,7 @@ fun TpiCard(s: CardScope) {
     val sat = s.snap?.sat
     val age = sat?.tpiAgeS
     val stale = sat?.tpiStale == true
-    InkCard(tone = if (stale) Tone.Alert else Tone.Ok) {
+    InkCard(icon = MIcons.terminal, tone = if (stale) Tone.Alert else Tone.Ok) {
         CardTitle("终端里的位置（TPI）", trailing = "模组只认我们推的这份")
         Text(
             when {
@@ -384,7 +390,7 @@ fun TpiCard(s: CardScope) {
 fun PositionCard(s: CardScope) {
     val g = s.snap?.gnss
     val hasFix = g != null && !(g.lat == 0.0 && g.lon == 0.0 && g.fixAgeS == null)
-    InkCard(tone = if (hasFix) Tone.Ok else Tone.Wait) {
+    InkCard(icon = MIcons.position, tone = if (hasFix) Tone.Ok else Tone.Wait) {
         CardTitle("位置", trailing = g?.let { sourceLabel(it.source) })
         ValueRow("经纬度", if (hasFix && g != null) "%.5f, %.5f".format(g.lat, g.lon) else null, mono = true)
         ValueRow("精度 HDOP", g?.hdop?.let { "%.1f".format(it) }, mono = true)
@@ -413,7 +419,7 @@ fun FenceCard(s: CardScope) {
     val f = s.snap?.fence
     val d = f?.distM
     val breached = f != null && f.active && !f.inside
-    InkCard(tone = if (breached) Tone.Alert else Tone.Neutral) {
+    InkCard(icon = MIcons.fence, tone = if (breached) Tone.Alert else Tone.Neutral) {
         CardTitle("电子围栏", trailing = f?.name ?: "未命名")
         Text(
             when {
@@ -433,7 +439,7 @@ fun FenceCard(s: CardScope) {
 fun SentinelCard(s: CardScope) {
     val sn = s.snap?.sentinel
     val armed = sn?.armed == true
-    InkCard(tone = if (armed) Tone.Ok else Tone.Neutral, mock = s.mock(Capability.Sentinel)) {
+    InkCard(icon = MIcons.sentry, tone = if (armed) Tone.Ok else Tone.Neutral, mock = s.mock(Capability.Sentinel)) {
         CardTitle("哨兵模式", trailing = if (armed) "布防中" else "未布防")
         Text(
             if (armed) "布防中：静止超过阈值发一条状态，动了就打一个轨迹点" else "未布防",
@@ -448,7 +454,7 @@ fun SentinelCard(s: CardScope) {
 @Composable
 fun DockCard(s: CardScope) {
     val st = s.status
-    InkCard(tone = if (st.clients > 0) Tone.Ok else Tone.Wait) {
+    InkCard(icon = MIcons.dock, tone = if (st.clients > 0) Tone.Ok else Tone.Wait) {
         CardTitle("展示端", trailing = "契约 v1")
         Text(
             if (st.clients > 0) "${st.clients} 台圆屏在线，1Hz 收全量状态"
@@ -481,7 +487,7 @@ fun UsageCard(s: CardScope) {
         u.dropped > 0 -> Tone.Wait
         else -> Tone.Neutral
     }
-    InkCard(tone = tone) {
+    InkCard(icon = MIcons.quota, tone = tone) {
         CardTitle("卫星用量", trailing = u.model?.name)
         if (u.invalidCard) {
             // 无效卡的时候连额度都不能信：那组数是从没就绪的模组里读出来的
