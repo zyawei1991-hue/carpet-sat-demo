@@ -30,6 +30,7 @@
   .screen{
     width:var(--scr);height:var(--scr);border-radius:50%;
     background:#000;overflow:hidden;position:relative;
+    touch-action:none;
   }
   svg{display:block}
   .hint{font:12px/1.6 ui-monospace,Consolas,monospace;color:#7c8697;text-align:center}
@@ -46,10 +47,10 @@
 </head>
 <body>
 <div class="stage">
-  <div class="bezel"><div class="screen"><svg id="ui" viewBox="0 0 466 466" width="466" height="466"></svg></div></div>
+  <div class="bezel"><div class="screen" id="screen"><svg id="ui" viewBox="0 0 466 466" width="466" height="466"></svg></div></div>
   <div class="hint" id="hint">等待连接…</div>
 </div>
-<div class="panel">
+<div class="panel" id="panel">
   <h2>原始状态流</h2>
   <div id="kv"></div>
   <div class="log" id="log"></div>
@@ -65,6 +66,9 @@ const NS='http://www.w3.org/2000/svg';
 const ui=document.getElementById('ui');
 const cx=233, cy=233;
 let last=null, lastSeq=-1, connected=false;
+// 状态帧的 seq 是服务端自增，事件帧走另一条计数；两者都要留痕才能判断是不是重发
+let lastStateAt=0, outSeq=0, ws=null;
+const seenEvents=[];                     // event_id 去重环形缓冲，契约规定留 32 个
 
 function el(tag,attrs,parent){
   const n=document.createElementNS(NS,tag);
@@ -72,9 +76,9 @@ function el(tag,attrs,parent){
   (parent||ui).appendChild(n);
   return n;
 }
-function text(x,y,str,o){
+function text(x,y,str,o,parent){
   const t=el('text',Object.assign({x,y,'text-anchor':'middle',fill:'#e8edf4',
-    'font-family':'Segoe UI, Microsoft YaHei, sans-serif'},o||{}));
+    'font-family':'Segoe UI, Microsoft YaHei, sans-serif'},o||{}),parent);
   t.textContent=str; return t;
 }
 function arc(r,a0,a1,color,w,opacity){
@@ -85,19 +89,46 @@ function arc(r,a0,a1,color,w,opacity){
     stroke:color,'stroke-width':w,fill:'none','stroke-linecap':'round',opacity:opacity||1});
 }
 
-const PHASE_CN={idle:'待命',searching:'对星中',locked:'已锁定',tx_pending:'待发',tx_ok:'已送达',tx_fail:'发送失败',tx_no_ack:'星上未确认'};
+// 文案全部照 §6.1 红线一写：星上应答 ≠ 平台回执 ≠ 有人在路上。tx_ok 那一档以前写的是禁用句
+const PHASE_CN={idle:'待命',searching:'对星中',locked:'已锁定',tx_pending:'待发',tx_ok:'星上已应答',tx_fail:'发送失败',tx_no_ack:'星上未确认'};
 const LINK_CN={cell:'蜂窝主链路',sat:'卫星主链路'};
-const SOS_CN={normal:'',armed:'已布防',pending:'发送中',sent:'已发出待确认',acked:'平台已确认'};
+
+/**
+ * 上面那两行小字是这屏最贵的地方：**一条只说一件事**，且优先级写死。
+ * 现场最容易犯的错是把「星历算不出」显示成「无卫星信号」，用户会举着天线在空旷处干等。
+ */
+function topLines(s){
+  const sat=s.sat||{}, out=[];
+  if(sat.tpi_stale===true)
+    out.push(['位置已过期，卫星可能投递失败', sat.tpi_age_s!=null?`${Math.round(sat.tpi_age_s/60)} 分钟前推送`:'', '#ff4545']);
+  if(typeof sat.eph_fail==='string' && sat.eph_fail)
+    out.push([sat.eph_fail, '', '#ffb020']);            // 这句由 App 出成品文案，固件不许自己编
+  if(sat.upgrade_pct!=null)
+    out.push(['模组升级中 '+sat.upgrade_pct+'%', '发送已锁', '#ffb020']);
+  const offline=sat.module_ok===false;
+  if(!offline && sat.phase!=='locked' && sat.next_pass_in_s!=null && sat.next_pass_in_s>0){
+    let line='距下次过顶 '+sat.next_pass_in_s+'s';
+    if(sat.next_pass_dur_s>0) line+=' · 窗口 '+sat.next_pass_dur_s+'s';     // 0 是"还没算出来"，不是"窗口 0 秒"
+    if(sat.next_pass_max_el>0) line+=' · 最大仰角 '+Math.round(sat.next_pass_max_el)+'°';
+    out.push([line, '', '#ffb020']);
+  }
+  if(out.length<2 && sat.queue_dropped)
+    out.push(['队满丢过 '+sat.queue_dropped+' 条', '不是零丢失', '#ff4545']);
+  return out.slice(0,2);
+}
 
 function draw(s){
   ui.textContent='';
   el('circle',{cx,cy,r:232,fill:'#000'});
 
+  // 3 秒没状态就把外圈打灰（screen-link.md §保活）。断线时留最后一帧，不许黑屏
+  const stale=(Date.now()-lastStateAt)>3000 && connected;
+
   // 外圈：链路。蜂窝=绿实线弧，卫星=琥珀弧
   const sat = s.link.primary==='sat';
   arc(226,-Math.PI*0.78,Math.PI*0.78,'#1b222c',5);
-  if(!sat) arc(226,-Math.PI*0.78,Math.PI*0.78,'#3ddc84',5);
-  else { arc(226,-Math.PI*0.78,Math.PI*0.78,'#ffb020',5); arc(226,Math.PI*0.78,Math.PI*1.22,'#ffb020',5,.55); }
+  if(!sat) arc(226,-Math.PI*0.78,Math.PI*0.78, stale?'#5a6472':'#3ddc84',5);
+  else { arc(226,-Math.PI*0.78,Math.PI*0.78, stale?'#5a6472':'#ffb020',5); arc(226,Math.PI*0.78,Math.PI*1.22,'#ffb020',5,.55); }
 
   // 卫星相位环
   const ph=s.sat.phase, order=['idle','searching','locked','tx_pending','tx_ok','tx_fail','tx_no_ack'];
@@ -109,31 +140,66 @@ function draw(s){
   // 「终端离线」和「没锁到星」必须分开说：前者是 GT1005 掉电，后者只是在等过顶。
   const offline = s.sat.module_ok === false;
   const queued = s.sat.queue_pending || 0;
+  const cap = s.sat.queue_capacity || null;
   text(cx,96,offline?'GT1005':(s.sat.sat_name||'—'),{'font-size':19,'letter-spacing':1.5,
     fill:offline?'#ff4545':(s.sat.sat_name?'#ffb020':'#5a6472')});
-  text(cx,116,offline?(queued?`离线 · 攒 ${queued} 条待补发`:'终端离线'):
+  text(cx,116,offline?(queued?`离线 · 攒 ${queued}${cap?'/'+cap:''} 条待补发`:'终端离线'):
       (s.sat.cnr?('CNR '+s.sat.cnr.toFixed(1)+' dB'):'未锁定'),{'font-size':12,fill:offline?'#aeb9c9':'#5a6472'});
   text(cx,138,offline?'终端离线':(PHASE_CN[ph]||ph),{'font-size':15,
     fill:offline?'#ff4545':'#e8edf4','font-weight':'600'});
-  // 没锁定又在等窗口时，唯一有用的信息就是还有多少秒过顶
-  if(!offline && ph!=='locked' && s.sat.next_pass_in_s!=null && s.sat.next_pass_in_s>0)
-    text(cx,158,`距下次过顶 ${s.sat.next_pass_in_s}s`,{'font-size':12,fill:'#ffb020'});
+  topLines(s).forEach((r,i)=>{
+    text(cx,158+i*16,r[0],{'font-size':12,fill:r[2],'letter-spacing':.2});
+    if(r[1]) text(cx+150,158+i*16,r[1],{'font-size':10,fill:'#5a6472','text-anchor':'end'});
+  });
 
-  drawTrack(s);
+  if(s.sos.level==='normal') drawTrack(s);
 
-  // 底部：位置 / 围栏 / 电量
-  text(cx,344,`${s.gnss.lat.toFixed(5)}, ${s.gnss.lon.toFixed(5)}`,{'font-size':13,fill:'#aeb9c9'});
-  text(cx,362,`源 ${s.gnss.source==='gt1005'?'GT1005':(s.gnss.source==='fused'?'融合':'手机GPS')}`+
+  // 底部：位置 / 围栏 / 电量，最下面那块是触摸 SOS 区
+  text(cx,326,`${s.gnss.lat.toFixed(5)}, ${s.gnss.lon.toFixed(5)}`,{'font-size':13,
+    fill:(s.gnss.fix_age_s!=null && s.gnss.fix_age_s>30)?'#5a6472':'#aeb9c9'});
+  text(cx,343,`源 ${s.gnss.source==='gt1005'?'GT1005':(s.gnss.source==='fused'?'融合':'手机GPS')}`+
       (s.gnss.fix_age_s!=null?`  ${s.gnss.fix_age_s.toFixed(0)}s前`:''),{'font-size':11,fill:'#5a6472'});
   if(s.fence.active)
-    text(cx,386,s.fence.inside?`围栏内 · ${s.fence.name||''}`:`出界 ${Math.abs(s.fence.dist_m||0).toFixed(0)}m`,
+    text(cx,361,s.fence.inside?`围栏内 · ${s.fence.name||''}`:`出界 ${Math.abs(s.fence.dist_m||0).toFixed(0)}m`,
       {'font-size':14,'font-weight':'600',fill:s.fence.inside?'#3ddc84':'#ff4545'});
-  text(cx,412,`${s.phone_battery}%  ·  ${LINK_CN[s.link.primary]||s.link.primary}`,
-    {'font-size':12,fill:'#5a6472'});
+  text(cx,376,`${s.phone_battery==null?'—':s.phone_battery+'%'}  ·  ${LINK_CN[s.link.primary]||s.link.primary}`,
+    {'font-size':11,fill:'#5a6472'});
 
-  // SOS 横幅压在最上层
-  if(s.sos.level!=='normal') sosBanner(s.sos);
+  drawPad(s);
+
+  // SOS 横幅压在最上层。这时候轨迹盘不画：弹层只盖住它下半截，
+  // 露出一条弧比什么都不露更乱 —— 一屏一重心，SOS 期间这屏上只有 SOS
+  if(s.sos.level!=='normal') sosBanner(s);
 }
+
+/**
+ * 触摸 SOS 区。真屏是一块 466×466 的圆触摸屏，这屏唯一该让人按的就是这里，
+ * 所以它按 §3.1 的承诺来：**长按 3 秒、中途松手就取消**，发出去之后这一块直接变成「撤销」。
+ * 位置在圆心正下方靠边，手指从侧面搭上来也够得着，且压不到轨迹盘。
+ */
+function drawPad(s){
+  const x=130,w=206,y=388,h=46;
+  const upgrading=s.sat.upgrade_pct!=null;
+  const active=s.sos.level!=='normal' && s.sos.level!=='armed';
+  const armed=s.sos.level==='armed';
+  let col = active?'#ff4545' : armed?'#ffb020' : upgrading?'#3a4150' : '#ff4545';
+  el('rect',{x,y,width:w,height:h,rx:23,fill:'#0b0d10'});
+  el('rect',{x,y,width:w,height:h,rx:23,fill:col,opacity:upgrading?.10:.16});
+  el('rect',{x,y,width:w,height:h,rx:23,fill:'none',stroke:col,'stroke-width':2,opacity:upgrading?.5:1});
+  const label = press.count>0 ? `再按 ${press.count}`+' 秒'
+    : upgrading ? '升级中 · 发送已锁'
+    : active ? '点一下撤销 SOS'
+    : armed ? '已布防 · 长按 3 秒可提前发出'
+    : '长按 3 秒触发 SOS';
+  text(cx,y+29,label,{'font-size':14,'font-weight':'600',
+    fill:press.count>0?'#ffffff':(upgrading?'#5a6472':'#ff8a80')});
+  if(press.count>0){
+    const f=(3-press.count)/3;
+    el('rect',{x:x+16,y:y+h-9,width:(w-32)*f,height:3,rx:1.5,fill:'#ffffff',opacity:.85});
+  }
+  PAD={x,y,w,h};
+}
+let PAD={x:130,y:388,w:206,h:46};
 
 function drawTrack(s){
   const g=el('g',{});
@@ -146,6 +212,15 @@ function drawTrack(s){
   } else if(s.fence.active){
     el('circle',{cx,cy,r:52,fill:'none',stroke:'#3ddc84','stroke-width':2,'stroke-dasharray':'7 6',opacity:.6},g);
   }
+  // 该把车头/天线朝哪边：正北在上，按瞬时方位角插值。窗口内画出来，窗口外不硬编一个方向
+  const az=s.sat.aim_az;
+  if(az!=null){
+    const a=az*Math.PI/180, L=66;
+    const hx=cx+Math.sin(a)*L, hy=cy-Math.cos(a)*L;
+    el('line',{x1:cx,y1:cy,x2:hx,y2:hy,stroke:'#388bfd','stroke-width':2.5,'stroke-linecap':'round'},g);
+    el('circle',{cx:hx,cy:hy,r:5,fill:'#388bfd'},g);
+    text(cx,cy-62,'N',{'font-size':10,fill:'#5a6472'},g);
+  }
   // 轨迹：用 seq 造一条会动的线，硬件到位后换成 track_pull 的真实点
   const n=14, pts=[];
   for(let i=0;i<n;i++){
@@ -153,22 +228,37 @@ function drawTrack(s){
     pts.push([cx+rr*Math.cos(a)-14, cy+rr*Math.sin(a)+10]);
   }
   el('polyline',{points:pts.map(p=>p.join(',')).join(' '),fill:'none',
-    stroke:'#4a8fd6','stroke-width':2,'stroke-linecap':'round',opacity:.9},g);
+    stroke:'#4a5b6e','stroke-width':2,'stroke-linecap':'round',opacity:.9},g);
   const head=pts[pts.length-1];
-  el('circle',{cx:head[0],cy:head[1],r:6,fill:'#e8edf4'},g);
-  el('circle',{cx:head[0],cy:head[1],r:11,fill:'none',stroke:'#e8edf4',opacity:.35},g);
+  el('circle',{cx:head[0],cy:head[1],r:6,fill:'#aeb9c9'},g);
+  el('circle',{cx:head[0],cy:head[1],r:11,fill:'none',stroke:'#aeb9c9',opacity:.35},g);
 }
 
-function sosBanner(sos){
-  const bad=sos.level==='sent'||sos.level==='pending';
-  const col=sos.level==='acked'?'#3ddc84':(bad?'#ff4545':'#ffb020');
+function sosHead(sos){
+  // level 只说"走到哪一步"，sat_ack 才说"星上收没收到"。V1.7 之前这屏把两句拼成一句写死，
+  // 结果星上没应答时横幅还在说「星上已收到」—— 那正是 §6.1 红线一最要命的一种错法
+  if(sos.level==='armed') return '已布防 · 等触发';
+  if(sos.level==='pending') return '触发中 · 正在发送';
+  if(sos.level==='acked') return '平台已回执';
+  return sos.sat_ack===true ? '星上已收到 · 等平台回执' : '星上还没应答 · 继续重试';
+}
+
+function sosBanner(s){
+  const sos=s.sos;
+  // SOS 没落地之前一直是红。星上应答只是"少了一半不确定"，不该让横幅换成黄色看着像快好了
+  const col=sos.level==='acked'?'#3ddc84':(sos.level==='armed'?'#ffb020':'#ff4545');
   // 先压一块暗底。SOS 弹层压在地图上，不压住就看不清，演示时看不清等于没做
-  el('rect',{x:0,y:186,width:466,height:94,fill:'#0b0d10',opacity:.9});
-  el('rect',{x:53,y:196,width:360,height:74,rx:16,fill:col,opacity:.16});
-  el('rect',{x:53,y:196,width:360,height:74,rx:16,fill:'none',stroke:col,'stroke-width':2});
-  text(cx,228,'SOS '+SOS_CN[sos.level],{'font-size':21,'font-weight':'700',fill:col});
-  text(cx,252,(sos.attempts||0)+' 次发送'+(sos.level==='sent'?' · 等星上确认':''),
+  el('rect',{x:0,y:180,width:466,height:104,fill:'#0b0d10',opacity:.9});
+  el('rect',{x:53,y:190,width:360,height:84,rx:16,fill:col,opacity:.16});
+  el('rect',{x:53,y:190,width:360,height:84,rx:16,fill:'none',stroke:col,'stroke-width':2});
+  text(cx,222,'SOS '+sosHead(sos),{'font-size':20,'font-weight':'700',fill:col});
+  // 标题已经说了"星上收没收到"，这一行就不重复一遍，只补次数和成因
+  text(cx,244,(sos.attempts||0)+' 次发送'+
+      (sos.level==='acked'&&sos.sat_ack===true?' · 星上已应答':'')+
+      (sos.fail?' · '+sos.fail:''),
     {'font-size':12,fill:'#aeb9c9'});
+  if(sos.level!=='acked') text(cx,264,'撤销见下方按钮',
+    {'font-size':11,fill:'#5a6472'});
 }
 
 function renderKv(s){
@@ -176,10 +266,13 @@ function renderKv(s){
   const rows=[
     ['链路',s.link.primary+(s.link.cell_ok?' / 蜂窝通':' / 蜂窝断')],
     ['卫星',[s.sat.module_ok===false?'offline':s.sat.phase,s.sat.sat_name,
-      s.sat.queue_pending?('待补发'+s.sat.queue_pending):null].filter(Boolean).join(' · ')],
+      s.sat.queue_pending?('待补发'+s.sat.queue_pending):null,
+      s.sat.queue_dropped?('丢'+s.sat.queue_dropped):null,
+      s.sat.tpi_stale?'TPI 陈旧':null].filter(Boolean).join(' · ')],
     ['定位',`${s.gnss.lat.toFixed(5)},${s.gnss.lon.toFixed(5)} (${s.gnss.source})`],
     ['围栏',s.fence.active?(s.fence.inside?'界内':'出界 '+s.fence.dist_m+'m'):'未启用'],
-    ['SOS',s.sos.level+(s.sos.attempts?' 第'+s.sos.attempts+'次':'')],
+    ['SOS',s.sos.level+(s.sos.attempts?' 第'+s.sos.attempts+'次':'')+
+      (s.sos.sat_ack===true?' 星上应答':'')],
     ['哨兵',s.sentinel?(s.sentinel.armed?'布防':'解除'):'-'],
     ['演示模式',String(s.demo_mode)],
   ];
@@ -197,21 +290,74 @@ function handleFrame(chunk){
     let m; try{ m=JSON.parse(line); }catch(e){ continue; }
     if(m.t==='state'){
       if(m.seq<=lastSeq) continue;
-      lastSeq=m.seq; last=m.state; draw(m.state); renderKv(m.state);
+      lastSeq=m.seq; last=m.state; lastStateAt=Date.now();
+      draw(m.state); renderKv(m.state);
+      if(m.state.demo_mode===true) document.getElementById('panel').style.display='none';
+      else document.getElementById('panel').style.display='';
     } else if(m.t==='event'){
+      ackEvent(m);
+      if(seenEvents.includes(m.event.event_id)) continue;      // 重发的那条不再弹第二次
+      seenEvents.push(m.event.event_id);
+      if(seenEvents.length>32) seenEvents.shift();
       note('事件 '+m.event.kind+' '+JSON.stringify(m.event.payload).slice(0,80));
       if(m.event.kind==='sos_triggered'||m.event.kind==='sos_failed') note('  ↑ 弹层', '#ff4545');
+      if(m.event.kind==='sos_cancelled') note('  ↑ 已撤销', '#3ddc84');
+    } else if(m.t==='ack'){
+      const a=m.ack||{};
+      note('回执 for_seq='+(a.for_seq!=null?a.for_seq:a.forSeq)+(a.error?' 拒：'+a.error:''));
     }
   }
 }
 
+/** 契约规定 event 必须回执，否则服务端 3 秒重发一次、再 3 秒放弃并记一条「展示端没收到」 */
+function ackEvent(m){
+  if(!ws || ws.readyState!==1) return;
+  ws.send(JSON.stringify({v:1,t:'ack',seq:outSeq++,ts:Math.floor(Date.now()/1000),
+    ack:{for_seq:m.seq, for_event_id:m.event.event_id}}));
+}
+
+function sendCmd(cmd,args){
+  if(!ws || ws.readyState!==1){ note('链路没通，指令发不出去','#ff4545'); return; }
+  ws.send(JSON.stringify({v:1,t:'command',seq:outSeq++,ts:Math.floor(Date.now()/1000),
+    command:{cmd,args:args||{}}}));
+  note('指令 '+cmd);
+}
+
+// ── 触摸：长按 3 秒 / 中途松手取消 / 发出后点一下撤销 ──────────────────────────
+const press={timer:null,count:0};
+const screen=document.getElementById('screen');
+
+function hitPad(evt){
+  const r=screen.getBoundingClientRect();
+  const sx=(evt.clientX-r.left)/r.width*466, sy=(evt.clientY-r.top)/r.height*466;
+  return sx>=PAD.x && sx<=PAD.x+PAD.w && sy>=PAD.y && sy<=PAD.y+PAD.h;
+}
+function stopPress(fired){
+  if(press.timer){ clearInterval(press.timer); press.timer=null; }
+  if(press.count>0 && !fired) note('长按中断，SOS 未触发','#7c8697');
+  press.count=0;
+  if(last) draw(last);
+}
+screen.addEventListener('pointerdown',(e)=>{
+  if(!last || !hitPad(e)) return;
+  if(last.sat.upgrade_pct!=null){ note('升级写锁生效，按钮已置灰','#ffb020'); return; }
+  if(last.sos.level!=='normal' && last.sos.level!=='armed'){ sendCmd('sos_cancel'); return; }
+  press.count=3; draw(last);
+  press.timer=setInterval(()=>{
+    press.count--;
+    if(press.count<=0){ stopPress(true); sendCmd('sos_press'); note('触发已发出，撤销在下方','#ff4545'); }
+    else draw(last);
+  },1000);
+});
+['pointerup','pointercancel','pointerleave'].forEach(ev=>screen.addEventListener(ev,()=>stopPress(false)));
+
 function connect(){
-  const ws=new WebSocket(`ws://127.0.0.1:8443`);
+  ws=new WebSocket(`ws://127.0.0.1:8443`);
   ws.onopen=()=>{
-    connected=true;
+    connected=true; lastStateAt=Date.now();
     document.getElementById('hint').textContent='已连接 · 状态 1Hz 推送';
-    ws.send(JSON.stringify({v:1,t:'hello',seq:1,
-      hello:{screen_id:'WS175B-A3F7',fw:'sim-0.1.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1]}}));
+    ws.send(JSON.stringify({v:1,t:'hello',seq:outSeq++,
+      hello:{screen_id:'WS175B-A3F7',fw:'sim-0.2.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1]}}));
   };
   ws.onmessage=(ev)=>handleFrame(ev.data);
   ws.onclose=()=>{
@@ -219,16 +365,34 @@ function connect(){
     const h=document.getElementById('hint');
     let secs=0;
     h.textContent='链路中断 00:00 · 保留最后一帧';
+    h.style.color='#ff4545';
     const t=setInterval(()=>{
       if(connected){clearInterval(t);return;}
       secs++;
       h.textContent=`链路中断 00:${String(secs).padStart(2,'0')} · 保留最后一帧`;
-      h.style.color=secs>3?'#ff4545':'#7c8697';
     },1000);
     setTimeout(connect,2000);
   };
   ws.onerror=()=>ws.close();
 }
+
+// 保活看的是 state 帧本身：契约不做独立心跳，1Hz 快照就是心跳
+setInterval(()=>{
+  if(!connected) return;
+  const gap=Math.round((Date.now()-lastStateAt)/1000);
+  if(gap>10){ note('10 秒没状态，主动重连','#ff4545'); try{ws.close();}catch(e){} return; }
+  if(gap>3){
+    const h=document.getElementById('hint');
+    h.textContent=`状态已 ${gap}s 没更新 · 保留最后一帧`;
+    h.style.color='#ffb020';
+    if(last) draw(last);
+  }
+},1000);
+
+// 关页面时先道别，App 台账上那台屏才能立刻变离线
+window.addEventListener('pagehide',()=>{
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({v:1,t:'bye',seq:outSeq++}));
+});
 
 // 服务还没起来时先画一帧静态图，避免白屏
 draw({link:{primary:'cell',cell_ok:true,sat_ok:false},

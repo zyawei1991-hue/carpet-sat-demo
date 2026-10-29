@@ -39,6 +39,27 @@ class UiCopyRedLineTest {
     }
 
     /**
+     * 同一把尺子量到**冒充圆屏的那块浏览器页**上。
+     *
+     * 理由不是洁癖：现场给吉利演示时，观众看到的第二块屏就是它，而它上面写的字
+     * 完全由 JS 里的三张表决定（PHASE_CN / SOS_CN），改的人不会想到 §6.1 那五条红线。
+     * V1.7 之前那页把 tx_ok 直接写成「已送达」，单测看不见，肉眼也看不见 —— 因为它一直黑屏。
+     */
+    @Test
+    fun `展示端冒充件的文案也不许出现被禁的措辞`() {
+        val f = File("../../simulator/screen.html")
+        assertTrue(f.isFile, "找不到展示端冒充件：${f.absolutePath}（测试的工作目录应是 :app 模块根）")
+        val hits = f.readLines().mapIndexedNotNull { i, line ->
+            val bad = SosCopy.BANNED.firstOrNull { line.contains(it) }
+            val t = line.trimStart()
+            if (bad != null && !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("<!--")) {
+                "screen.html:${i + 1} 「$bad」 $t"
+            } else null
+        }
+        assertTrue(hits.isEmpty(), "展示端把卫星 ACK 说成了平台受理（§6.1 红线一）：\n" + hits.joinToString("\n"))
+    }
+
+    /**
      * 场景里写了 key、注册表里没有 —— 结果不是报错，而是**那张卡安静地不出现**。
      * §5.3 要求"注册表里没有的卡就不渲染，也不报错"，这条对真缺能力是对的，
      * 对打错字也是同一行为，所以打错字只能靠这一条测出来。
