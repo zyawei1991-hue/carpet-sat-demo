@@ -61,13 +61,20 @@ const nodes = {};
 function node(id) {
   if (nodes[id]) return nodes[id];
   const handlers = {};
-  return (nodes[id] = {
-    id, textContent: '', innerHTML: '', style: {}, attrs: {}, children: [], handlers,
+  const n = {
+    id, innerHTML: '', style: {}, attrs: {}, children: [], handlers, own: '',
     setAttribute(k, v) { this.attrs[k] = v; },
     appendChild(c) { this.children.push(c); return c; },
     addEventListener(ev, fn) { (handlers[ev] ||= []).push(fn); },
     getBoundingClientRect() { return {left: 0, top: 0, width: 466, height: 466}; },
+  };
+  // textContent 的赋值必须真的清空子节点：draw() 每帧先 ui.textContent=''，
+  // 不清空的话断言读到的还是上一帧的字，"SOS 压过对话"这类测试永远测不出来
+  Object.defineProperty(n, 'textContent', {
+    get() { return n.children.length ? n.children.map((c) => c.textContent).join(' ') : n.own; },
+    set(v) { n.children.length = 0; n.own = v == null ? '' : String(v); },
   });
+  return (nodes[id] = n);
 }
 const winHandlers = {};
 class FakeDate extends Date { static now() { return now; } }
@@ -111,7 +118,11 @@ advance(100);
 const hello = sent.find(m => m.t === 'hello');
 if (!hello || hello.hello.screen_id !== 'WS175B-A3F7' || !hello.hello.protocols?.includes(1))
   fail('hello 帧不对：白名单要 screen_id + protocols 含 1 —— ' + JSON.stringify(hello));
-else ok(`hello 带 screen_id=${hello.hello.screen_id} fw=${hello.hello.fw} protocols=[1]`);
+else ok(`hello 带 screen_id=${hello.hello.screen_id} fw=${hello.hello.fw} protocols=[${hello.hello.protocols}]`);
+// 不申报 [2] 的话，服务端那条 dialog 通道根本不会往这台屏推（ScreenLinkServer 逐连接按版本过滤），
+// 表现就是"手机答了，屏上什么都没有"
+if (!hello.hello.protocols?.includes(2)) fail('hello 没申报契约 v2 —— 手机不会把对话推给这台屏');
+else ok('hello 申报了契约 v2，对话通道才会开');
 
 // ── 2. state：seq 单调，旧帧丢弃 ─────────────────────────────────────────────
 handleFrame(JSON.stringify(STATE()));
@@ -178,6 +189,71 @@ const drawnText = node('ui').children.map(c => c.textContent).join('|');
 const hit = banned.filter(b => drawnText.includes(b));
 if (hit.length) fail('屏上画出了禁用句：' + hit.join(','));
 else ok(`画出来的 ${node('ui').children.length} 段文字里没有禁用句（tx_ok 那档现在叫「星上已应答」）`);
+
+// ── 9. 对话（契约 v2）：屏是耳朵和嘴，手机是记录 ─────────────────────────────
+const uiText = () => node('ui').textContent;
+const countOf = (s) => uiText().split(s).length - 1;
+const DLG = (turn_id, dir, text, extra = {}) => ({
+  v: 2, t: 'dialog', seq: 900, ts: Math.floor(now / 1000),
+  dialog: Object.assign({turn_id, dir, text, source: 'local_rule', origin: 'phone'}, extra),
+});
+
+handleFrame(JSON.stringify(STATE()));
+sent.length = 0;
+pointer('pointerdown', 233, 57);                 // 状态视图里那颗"按住问一句"
+if (sent.some((m) => m.t === 'dialog')) fail('才按下去话就发出去了 —— "按住说、松开才发"这个动作没生效');
+pointer('pointerup', 233, 57);
+const up = sent.find((m) => m.t === 'dialog');
+if (!up) fail('松开手指没发出 dialog 帧');
+else if (up.v !== 2 || up.dialog.dir !== 'up' || up.dialog.origin !== 'screen' || up.dialog.source !== 'asr')
+  fail('dialog 帧形状不对：' + JSON.stringify(up));
+else ok(`按住说话 → dialog{dir:up, origin:screen, source:asr, turn_id=${up.dialog.turn_id}} 已发出`);
+if (countOf('问 · 圆屏') === 0) fail('自己说出去的那句没上屏 —— 只有答没有问，用户读不出这是在答哪句');
+else ok('自己那句当场画上，角标「问 · 圆屏」');
+
+// 手机把这句镜像回来（同一 turn_id、同一 dir）：屏上不能出现两遍
+const xid = up.dialog.turn_id;
+handleFrame(JSON.stringify({v: 2, t: 'dialog', seq: 910, ts: Math.floor(now / 1000), dialog: Object.assign({}, up.dialog)}));
+if (countOf('车到哪了') !== 1) fail(`镜像回来的同一条 up 没去重，屏上出现 ${countOf('车到哪了')} 遍`);
+else ok('同 turn_id + dir 去重：手机回镜的那句自己那行不会画第二遍');
+
+handleFrame(JSON.stringify(DLG(xid, 'down', '车在西湖景区，卫星链路正常')));
+if (countOf('答 · 手机起') === 0) fail('手机答的那句话没上屏');
+else ok('手机起头答的那句上了屏，角标写清「答 · 手机起」');
+
+// 求救压过对话
+handleFrame(JSON.stringify(STATE({sos: {level: 'sent', attempts: 1, sat_ack: true}})));
+if (countOf('车在西湖景区') > 0) fail('SOS 弹层期间还把对话画在屏上 —— 那一屏只能有求救');
+else ok('SOS 进行中对话不画，一屏一个重心');
+sent.length = 0;
+pointer('pointerdown', 233, 57);
+pointer('pointerup', 233, 57);
+if (sent.some((m) => m.t === 'dialog')) fail('SOS 弹层期间还能对着屏说话');
+else ok('SOS 期间说话键不给按（那屏上任何"顺便问一句"的邀请都在分走注意力）');
+
+handleFrame(JSON.stringify(STATE()));
+// 小智官方云那一路：单独一档标注，而且过屏前先过一遍红线
+// **手机的闸管不到小智直接往屏上画的那条路**，所以屏这一侧必须自己再守一次
+handleFrame(JSON.stringify(DLG('x-1', 'down', '救援已在路上', {source: 'xiaozhi_cloud', origin: 'screen'})));
+if (countOf('救援已在路上') > 0) fail('小智云那句越界的话原样上了屏 —— §6.1 红线一在屏这一侧漏了');
+else if (countOf('不能替平台说') === 0) fail('越界句是拦下了，可屏上没给出替代文案');
+else ok('小智云那句入账前先过闸：画出来的是「这句我不能替平台说，以手机台账为准」');
+if (countOf('小智云 · 未过网关') === 0) fail('小智云那一路没单独标出来，观众会把它当成我们的模型在答');
+
+// 折行不许把型号拆开：GT1005 折成 GT10/05 是这屏最难看的一种错，观众恰恰盯着型号看
+const wrapped = ctx.wrapCjk('当前相位 locked，GT1005 在线。下一次过顶还有 128 秒。', 16);
+if (wrapped.some((w) => /^[A-Za-z0-9]+$/.test(w.slice(-1) + (wrapped[wrapped.indexOf(w) + 1] || '')[0]) && /[A-Za-z0-9]$/.test(w) && /^[A-Za-z0-9]/.test(wrapped[wrapped.indexOf(w) + 1] || '')))
+  fail('折行把一串字母数字切开了：' + JSON.stringify(wrapped));
+else ok('折行按整词走：' + wrapped.join('⏎'));
+const wrapped2 = ctx.wrapCjk('待发 0 条 / 槽位 50 条，已交核心网 0 条。', 16);
+if (wrapped2.some((w) => /^[，。、）？！]/.test(w))) fail('标点开头的折行，读起来像上一句被腰斩：' + JSON.stringify(wrapped2));
+else ok('逗号句号不会开新行：' + wrapped2.join('⏎'));
+
+// 说完 25 秒自己回状态盘
+advance(26_000);
+if (countOf('小智云 · 未过网关') > 0) fail('25 秒没人说话没回到状态盘 —— 这块屏的日常身份是车载状态表');
+else ok('25 秒静默 → 自动回状态盘');
+if (countOf('长按 3 秒触发 SOS') === 0) fail('回到状态盘后 SOS 那颗键没画出来');
 
 console.log(out.join('\n'));
 console.log(out.some(l => l.startsWith('FAIL')) ? '\n结论：冒充件的链路有问题' : '\n结论：冒充件按契约在跑');

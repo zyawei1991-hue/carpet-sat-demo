@@ -19,6 +19,7 @@ const ok = (m) => out.push('ok   ' + m);
 const ws = new WebSocket(URL_);
 const states = [];
 const events = [];
+const dialogs = [];
 const acks = [];
 const closes = [];
 let helloAcked = false;
@@ -30,7 +31,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 ws.onopen = () => {
   ok('已连上 ' + URL_);
   // 首帧必须是 hello：服务端在拿到 screen_id 之前没法查白名单（D8）
-  send('hello', { hello: { screen_id: SCREEN_ID, fw: 'linkcheck-1', protocols: [1] } });
+  // 申报 [1,2]：不带上 2，服务端那条 dialog 通道根本不会往这台屏推（逐连接按协商结果过滤）
+  send('hello', { hello: { screen_id: SCREEN_ID, fw: 'linkcheck-2', protocols: [1, 2] } });
 };
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -39,6 +41,7 @@ ws.onmessage = (e) => {
     acks.push(m);
     if (m.ack?.forSeq === 0 || m.ack?.for_seq === 0) helloAcked = true;
   }
+  if (m.t === 'dialog') dialogs.push(m.dialog);
   if (m.t === 'event') {
     const ev = m.event ?? {};
     events.push(ev);
@@ -72,14 +75,45 @@ const run = async () => {
   const n2 = events.length;
   send('command', { command: { cmd: 'sos_cancel', args: {} } });
   await sleep(3500);
-  const got = events.slice(n2).map((e) => e.kind);
-  if (!got.includes('sos_cancelled')) fail('发了 sos_cancel，没等到 sos_cancelled');
-  else ok('sos_cancel 走通，收到 sos_cancelled');
+  const cancels = events.slice(n2).filter((e) => e.kind === 'sos_cancelled' || e.kind === 'sos_failed');
+  // 撤销**允许**被拒：脚本化彩排在某些相位里报文已经交了核心网、或者模组正好离线，那时"撤不了"是正确答案。
+  // 真正的事故只有两种：按下去石沉大海（屏上那个「撤销这次 SOS」永远转圈，§3.1 的撤销承诺就空了），
+  // 或者只回一句"失败"不给原因 —— 现场没人能对着"失败"两个字解释观众
+  // ⚠️ `already_handed` 缺席 = false：宿主按 `encodeDefaults=false` 编码，等于默认值的字段根本不上线（和对话那一路同一件事）
+  if (!cancels.length) fail('发了 sos_cancel，一条回执 event 都没回来 —— 撤销石沉大海');
+  else if (cancels[0].kind === 'sos_cancelled') ok('sos_cancel 走通，收到 sos_cancelled');
+  else if ((cancels[0].payload ?? cancels[0]).sat_result) {
+    const why = cancels[0].payload ?? cancels[0];
+    ok(`sos_cancel 被拒但给出了原因：sat_result=${why.sat_result} already_handed=${why.already_handed === true}`);
+  }
+  else fail('sos_cancel 回的是 sos_failed 且没带 sat_result —— 撤销失败却说不清为什么');
 
   const ids = events.map((e) => e.event_id);
   const dup = ids.filter((x, i) => ids.indexOf(x) !== i);
   if (dup.length) fail('回执之后仍重发了同一条 event：' + dup.join(','));
   else ok(`${ids.length} 条 event 无重发（回执生效）`);
+
+  // ── 对话通道（契约 v2）。这条必须在真链路上验：
+  //    协商错、逐连接过滤写反、回镜没接上 —— 三种错的现场表现都是"屏上说话没反应"，肉眼分不出来
+  // 每次跑一个新的 turn_id：**宿主的记录跨连接去重**，复用固定 id 会被当成重复那句话直接丢掉
+  const TID = 'lc-' + Date.now().toString(36);
+  send('dialog', { dialog: { turn_id: TID, dir: 'up', text: '链路现在怎么样', source: 'asr', origin: 'screen' } });
+  await sleep(2500);
+  const mine = dialogs.filter((d) => d.turn_id === TID);
+  if (!mine.length) fail('发了 dialog{dir:up}，服务端一条对话都没回 —— 对话通道没接上，或协商把这台屏挡掉了');
+  else if (!mine.some((d) => d.dir === 'down')) fail('对话只收到镜像回来的自己那句，没有答：' + JSON.stringify(mine));
+  else {
+    const ans = mine.find((d) => d.dir === 'down');
+    if (mine.filter((d) => d.dir === 'down').length !== 1) fail(`一轮答了 ${mine.length} 条，屏上就要多出一轮`);
+    ok(`对话往返通：答「${ans.text.slice(0, 24)}」 source=${ans.source ?? 'local_rule(缺省)'} origin=${ans.origin ?? 'screen(缺省)'}`);
+    // 沿用它那个 turn_id 才钉得回原来那一轮；另起一个 id 屏上就会多出第二条对话
+    if (ans.turn_id !== TID) fail(`回镜没沿用屏那边的 turn_id，实际 ${ans.turn_id}`);
+    else ok('回镜沿用屏那边的 turn_id');
+    // 屏自己那句**不回镜**（回一遍就是同一句话在屏上出现两次）。所以这一轮只该收到一条 down
+    const ups = mine.filter((d) => d.dir === 'up').length;
+    if (ups) fail(`服务端把屏自己说的那句又镜像回来了 ${ups} 遍，屏上会出现两条一样的问话`);
+    else ok('屏自己那句没被回镜，只有答那一条下来');
+  }
 
   const lastSeq = seq;
   byeAt = Date.now();

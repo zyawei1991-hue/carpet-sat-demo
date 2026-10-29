@@ -1,5 +1,9 @@
 package com.carpet.satdemo.simulator
 
+import com.carpet.satdemo.core.ai.AiGateway
+import com.carpet.satdemo.core.ai.DialogBridge
+import com.carpet.satdemo.core.ai.LocalRuleProvider
+import com.carpet.satdemo.core.ai.skillContext
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -22,7 +26,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -129,6 +136,23 @@ object DemoDriver {
                 else -> Unit
             }
         }
+        /**
+         * 对话接线，和 [com.carpet.satdemo.app.AppRuntime] 同一份 [DialogBridge]、同一张事实表。
+         * 驱动器不接这一段，明天现场就只能拿手机当服务端 —— 而彩排台本来就是给"手机还没到手"用的。
+         * `turn_id` 由屏那侧生成，这里沿用；主动提醒的冷却跟着假时钟走。
+         */
+        val host = CoroutineScope(coroutineContext + SupervisorJob())
+        val gateway = AiGateway(provider = LocalRuleProvider(), log = { line -> println("ai       $line") })
+        val dialog = DialogBridge(
+            gateway = gateway,
+            facts = { runtime.skillContext(scene = "车") },
+            push = { d -> runtime.pushDialog(d) },
+            launch = { body -> host.launch { body() } },
+            note = { line -> println("对话     $line"); runtime.log(line) },
+            nowMs = { clock.ms },
+        )
+        runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
+
         // 假时钟由下面的脚本推，不能再起内部那圈 1Hz
         runtime.start(autoTick = false)
         val sink = record?.let { ReplaySink(it) }
@@ -160,6 +184,7 @@ object DemoDriver {
                         printConsole(runtime)
                         holdScreen(runtime)
                     }
+                    if ((clock.ms - T0) / 1000 % 10 == 0L) dialog.scanProactive()
                     delay(TICK_MS)
                 }
                 println("step ${i + 1}  t=${(clock.ms - T0) / 1000}s  ${step.label}  ->  ${engine.phase}")
@@ -170,7 +195,17 @@ object DemoDriver {
                     holdScreen(runtime)
                 }
             }
-            if (hold != null || freezeAt != null) return@runBlocking
+            if (hold != null) {
+                // `--hold` 是**步号**不是秒数。传了范围之外的值时，以前 main 一退就完事：
+                // 进程还活着、端口还开着、1Hz 却停了 —— 屏 3 秒打灰、10 秒重连，
+                // 现场看起来像链路坏了，其实是我自己把彩排台跑成了僵尸。宁可定格在最后一帧。
+                if (hold !in SCRIPT.indices) {
+                    println("--hold $hold 不在 1..${SCRIPT.size} 里（这一项是**步号**，不是秒数）。按最后一帧定格，1Hz 继续发。")
+                    holdScreen(runtime)
+                }
+                return@runBlocking
+            }
+            if (freezeAt != null) return@runBlocking
             println("—— 第 $round 轮跑完，重播 ——")
         }
     }
@@ -183,7 +218,8 @@ object DemoDriver {
         runtime.status.value.log.takeLast(3).forEach { println("        > $it") }
     }
 
-    private fun Array<String>.argAfter(name: String): Int? {        val i = indexOf(name).takeIf { it >= 0 } ?: return null
+    private fun Array<String>.argAfter(name: String): Int? {
+        val i = indexOf(name).takeIf { it >= 0 } ?: return null
         return getOrNull(i + 1)?.toIntOrNull()
     }
 

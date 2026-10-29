@@ -10,7 +10,33 @@ import kotlinx.serialization.json.Json
  * Kotlin 侧保持 camelCase 习惯。契约变更以 protocol/screen-link.schema.json 为准。
  */
 object ScreenCodec {
-    const val CONTRACT_VERSION = 1
+    /**
+     * 契约 v2：加了 `dialog` 通道（对话记录以手机为单一事实源，圆屏是耳朵和嘴）。
+     *
+     * **v1 的连接仍然全部可用**：state / event / command / ack 的形状一个字段都没改，
+     * 所以这里收 1 和 2 两个版本，协商看 `hello.protocols`（不看帧上的 `v` —— 出站帧
+     * 因为 encodeDefaults=false 根本不写 `v`，把它当依据会在真固件上猜错）。
+     * 唯一的差别是 v2 才发 `dialog`，服务端按连接逐个过滤。
+     */
+    const val CONTRACT_VERSION = 2
+    val SUPPORTED_VERSIONS: Set<Int> = setOf(1, 2)
+
+    /**
+     * 这条连接能不能收对话。取双方都支持的最高版。
+     *
+     * 空/缺失一律按 v1：**宁可不说话，也不把对话发给一个画不出对话的固件**
+     * （取更严的那头，和 §6 隐私档同一条思路）。
+     */
+    fun negotiated(protocols: List<Int>?): Int =
+        protocols?.filter { it in SUPPORTED_VERSIONS }?.maxOrNull() ?: 1
+
+    /**
+     * 这固件我们到底能不能对话。**没申报 = 能**（v1 的 state/event 形状一个字段没改，
+     * 老固件照样画得出状态，只是不能说话）；申报了但全是我们不认的版本才是真不匹配，
+     * 那种情况要当场拒绝并回 `ack{error:"proto_mismatch"}`，别让它以为连上了。
+     */
+    fun compatible(protocols: List<Int>?): Boolean =
+        protocols == null || protocols.any { it in SUPPORTED_VERSIONS }
 
     val json: Json = Json {
         // kotlinx 1.3 起默认不写出 null 字段，正好是我们要的紧凑 wire
@@ -20,7 +46,7 @@ object ScreenCodec {
 }
 
 @Serializable
-enum class MsgType { hello, bye, state, event, command, ack }
+enum class MsgType { hello, bye, state, event, command, ack, dialog }
 
 @Serializable
 enum class DockType { none, desk_stand, car_mount, collar, gym_belt, toy }
@@ -50,6 +76,33 @@ enum class EventKind {
 @Serializable
 enum class CommandType { sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui }
 
+/** 对话通道。[up]=屏上说的话（要手机回答），[down]=手机说的话（要在屏上显示） */
+@Serializable
+enum class DialogDir { up, down }
+
+/** 这一轮是谁先起的。记录里必须分得出来 —— 车主想知道"刚才是不是有人在车那边说话" */
+@Serializable
+enum class DialogOrigin { screen, phone }
+
+/**
+ * 一句话是从哪儿来的。**这条决定界面上打不打「未接真源」那个标，不许省**。
+ * [xiaozhi_cloud] 是小智官方云全包那条路线的产物：话不是我们的网关生成的，
+ * 落到记录和屏幕之前仍要过同一道文案闸（见 [com.carpet.satdemo.core.ai.AiGateway.guard]）。
+ */
+@Serializable
+enum class DialogSource { asr, local_rule, model, local_fallback, denied, xiaozhi_cloud }
+
+@Serializable
+data class DialogPayload(
+    /** 一轮问答一个 id。上行和下行共用它，所以手机能把"问"和"答"钉在同一轮上，也天然去重 */
+    @SerialName("turn_id") val turnId: String,
+    val dir: DialogDir,
+    val text: String,
+    val source: DialogSource = DialogSource.local_rule,
+    val skill: String? = null,
+    val origin: DialogOrigin = DialogOrigin.screen,
+)
+
 @Serializable
 data class HelloPayload(
     @SerialName("screen_id") val screenId: String,
@@ -57,7 +110,12 @@ data class HelloPayload(
     @SerialName("dock_type") val dockType: DockType = DockType.none,
     @SerialName("wifi_rssi") val wifiRssi: Int? = null,
     @SerialName("battery_mv") val batteryMv: Int? = null,
-    val protocols: List<Int> = listOf(ScreenCodec.CONTRACT_VERSION),
+    /**
+     * 固件声明它认的契约版本。null = 固件压根没这一项（第一版小智固件就是这样），
+     * 按 v1 处理：state/event 的形状一个字段都没改，它照样画得出。
+     * **默认值不能是当前版本** —— 漏报就被当成最新档，服务端会往一个画不出对话的固件上推 dialog。
+     */
+    val protocols: List<Int>? = null,
 )
 
 @Serializable
@@ -209,6 +267,7 @@ data class ScreenMessage(
     val event: EventPayload? = null,
     val command: CommandPayload? = null,
     val ack: AckPayload? = null,
+    val dialog: DialogPayload? = null,
 ) {
     init {
         // 镜像 schema 里的 allOf 条件：t 决定哪个负载必填。
@@ -219,13 +278,14 @@ data class ScreenMessage(
             MsgType.event -> event
             MsgType.command -> command
             MsgType.ack -> ack
+            MsgType.dialog -> dialog
             MsgType.bye -> null
         }
         val key = when (t) {
             MsgType.bye -> null
             else -> t.name
         }
-        require(v == ScreenCodec.CONTRACT_VERSION) { "unsupported contract version $v" }
+        require(v in ScreenCodec.SUPPORTED_VERSIONS) { "unsupported contract version $v" }
         require(seq >= 0) { "seq must be >= 0, got $seq" }
         if (key != null) require(required != null) { "t=$t requires payload '$key'" }
     }

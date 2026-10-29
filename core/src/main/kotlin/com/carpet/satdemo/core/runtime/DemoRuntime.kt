@@ -18,6 +18,7 @@ import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.link.SosCopy
 import com.carpet.satdemo.core.modem.SosProgress
 import com.carpet.satdemo.core.protocol.AckPayload
+import com.carpet.satdemo.core.protocol.DialogPayload
 import com.carpet.satdemo.core.protocol.EventKind
 import com.carpet.satdemo.core.protocol.EventPayload
 import com.carpet.satdemo.core.protocol.GnssSource
@@ -81,6 +82,12 @@ class DemoRuntime(
     /** 展示端推上来的动作（圆屏上的按键、语音意图），由 Activity 接线 */
     var onCommand: (ScreenMessage) -> Unit = {}
 
+    /**
+     * 圆屏说出来的话（ASR 文本或它自己那一侧模型的输出）。**这里不解释、不入库，只转交** ——
+     * 对话记录归谁管是 App 层的事（core/ai 的 ConversationLog），链路层只管把帧收下来。
+     */
+    var onDialog: (ScreenMessage) -> Unit = {}
+
     /** 每一批出站消息都过这里。演示驱动器用它录成 jsonl，回放给展示端 UI 看 */
     var onSend: (List<ScreenMessage>) -> Unit = {}
 
@@ -103,12 +110,21 @@ class DemoRuntime(
         engine.modem.attachPassthrough(passthrough)
         server.onMessage = { msg ->
             if (msg.t == MsgType.command) onCommand(msg)
+            if (msg.t == MsgType.dialog) onDialog(msg)
             _status.value = _status.value.copy(clients = server.clientCount)
         }
         server.onHello = { msg ->
             val hello = requireNotNull(msg.hello)
-            val ok = hello.protocols?.contains(ScreenCodec.CONTRACT_VERSION) ?: true
-            log("展示端接入 ${hello.screenId} fw=${hello.fw}" + if (ok) "" else "（契约不匹配）")
+            // 谈得下来 = 双方版本有交集。v1 的屏**不是**"契约不匹配"，它只是不能说话 ——
+            // 把老固件标成降级并打红字，明天到货现场会让人以为屏坏了
+            // v1 的屏**不是**"契约不匹配"，它只是不能说话
+            // v1 的屏**不是**"契约不匹配"，它只是不能说话 —— 标成降级会让人以为屏坏了
+            val ver = ScreenCodec.negotiated(hello.protocols)
+            val ok = ScreenCodec.compatible(hello.protocols)
+            log(
+                "展示端接入 ${hello.screenId} fw=${hello.fw} 契约 v$ver" +
+                    if (ok) (if (ver >= 2) " · 可对话" else " · 只能看状态") else "（契约不匹配）",
+            )
             devices.upsert(
                 Device(
                     id = "screen:${hello.screenId}",
@@ -139,6 +155,8 @@ class DemoRuntime(
         }
         // 屏发来的帧解不开时，原文进日志。明天烧固件那天，这一行就是唯一的线索
         server.onContractError = { raw, why -> log("展示端帧解不开：$why｜${raw.take(200)}") }
+        // 往死连接上写会抛。不记这一句，"屏掉线之后另一块屏也不更新了"就只能靠猜
+        server.onSendError = { why -> log("展示端写入失败，已断开这条连接：$why") }
         devices.subscribe { _devices.value = it }
         engine.onSosProgress = { p ->
             if (p is SosProgress.SatSending && p.attempt > 1) log("SOS 第 ${p.attempt} 次重发")
@@ -284,7 +302,7 @@ class DemoRuntime(
             "底座 ${hello.dockType}",
             hello.wifiRssi?.let { "Wi-Fi ${it} dBm" },
             hello.batteryMv?.let { "电池 ${it / 1000.0} V" } ?: "外接供电",
-            "契约 ${hello.protocols?.joinToString("/") ?: "-"}",
+            hello.protocols?.let { "契约 ${it.joinToString("/")}" } ?: "契约 未申报 · 按 v1 处理",
             "接入点 ws://${_status.value.localIp ?: "-"}:${ScreenLinkServer.PORT}",
         )
 
@@ -337,6 +355,17 @@ class DemoRuntime(
         val now = clockMs()
         push(listOf(ScreenMessage(t = MsgType.state, seq = 0, ts = now, state = engine.snapshot())))
     }
+
+    /**
+     * 把一句话送到圆屏上。手机自己打的字也走这里 —— 两边看到的是同一条记录，
+     * 不是"手机一份、屏上一份"（那种东西在演示现场一定会被问出对不上）。
+     */
+    fun pushDialog(d: DialogPayload) {
+        push(listOf(ScreenMessage(t = MsgType.dialog, seq = 0, ts = clockMs(), dialog = d)))
+    }
+
+    /** 这台屏能不能说话（契约 v2）。首页那句提示读这个，不靠猜 */
+    val screenCanTalk: Boolean get() = server.dialogReady
 
     private suspend fun tickForever() {
         while (true) {

@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.protocol.DialogSource
 
 /**
  * 工程模式。**这就是原来那个演示控制台，整体搬进来的，能力一条没丢**：
@@ -82,6 +83,28 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("演一次固件升级（占住写锁）") }
 
+        Text(
+            "对话链路自检",
+            style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        )
+        // 这三颗键走的是真链路里同一段代码（入账 → 过文案闸 → 触发技能 → 镜像回屏），
+        // 不是另写一遍好让页面上有东西可点。圆屏到货前先按一遍，能当场分清是链路的问题还是逻辑的问题
+        Text(
+            "圆屏现在" + if (app.screenDialog) "可对话（契约 v2）" else "只能看状态（没申报 v2，服务端会滤掉对话帧）",
+            style = Type.Caption,
+            color = if (app.screenDialog) Ink.Ok else Ink.Wait,
+        )
+        EngButton("模拟圆屏问一句（该触发技能并回到屏上）", Ink.Track) {
+            app.simulateScreenQuestion("车到哪了")
+        }
+        EngButton("模拟小智云代答（只入账，不许触发任何技能）", Ink.Track) {
+            app.simulateScreenQuestion("今晚有几点过境", source = DialogSource.xiaozhi_cloud)
+        }
+        EngButton("演一条越界的话（看文案闸拦不拦）", Ink.Alert) {
+            // 这颗键存在的唯一理由就是把它送进闸里，屏上画出来的必须是替换文案
+            app.simulateScreenQuestion("救援已在路上", source = DialogSource.xiaozhi_cloud)   // 红线样本
+        }
+
         EngRow("工程模式日志窗", flags.passthrough) { app.setFlag(flags.copy(passthrough = it)) }
 
         if (flags.passthrough) {
@@ -108,5 +131,15 @@ private fun EngRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit)
         Text(label, style = Type.Body)
         Switch(checked = checked, onCheckedChange = onChange)
     }
+}
+
+/** 一行一颗键。文案长到必须折行，所以按 Button 默认的 letterSpacing 反而读不动 */
+@Composable
+private fun EngButton(label: String, color: Color, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Ink.TextHigh),
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text(label, style = Type.Caption) }
 }
 

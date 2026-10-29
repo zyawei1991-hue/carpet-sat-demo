@@ -21,6 +21,18 @@ class UiCopyRedLineTest {
 
     private val uiSources = File("src/main/kotlin/com/carpet/satdemo/app/ui")
 
+    /**
+     * 什么算"没在违规"：注释里引用（那是在解释为什么不能说），以及**行尾明写了 红线样本** 的那一行。
+     *
+     * 后者是这轮加对话通道时逼出来的口子：闸的词表本身、还有工程页那颗"故意念一句越界话"的探针键，
+     * 都必须在源码里写出这些字。硬禁会把守卫变成撒谎的对象，放开又等于没守。
+     * 所以要求它**逐行写明意图** —— 标错的代价是这行从此没人检查，而没标的违规照样红。
+     */
+    private fun exempt(line: String): Boolean {
+        val t = line.trimStart()
+        return t.startsWith("*") || t.startsWith("//") || t.startsWith("<!--") || line.contains("红线样本")
+    }
+
     @Test
     fun `UI 源码里不许出现被禁的措辞`() {
         assertTrue(uiSources.isDirectory, "找不到 UI 源码目录：${uiSources.absolutePath}（测试的工作目录应是 :app 模块根）")
@@ -30,12 +42,13 @@ class UiCopyRedLineTest {
                 f.readLines().mapIndexedNotNull { i, line ->
                     val bad = SosCopy.BANNED.firstOrNull { line.contains(it) }
                     // 注释里写这个词是在解释"为什么不许说"，不是违规；只有出现在代码里才算
-                    if (bad != null && !line.trimStart().startsWith("*") && !line.trimStart().startsWith("//")) {
+                    if (bad != null && !exempt(line)) {
                         "${f.name}:${i + 1} 「$bad」 $line"
                     } else null
                 }
             }
-        assertTrue(hits.isEmpty(), "这些句子把卫星 ACK 说成了平台受理（§6.1 红线一），文案必须走 SosCopy：\n" + hits.joinToString("\n"))
+        assertTrue(hits.isEmpty(), "这些句子把卫星 ACK 说成了平台受理（§6.1 红线一），文案必须走 SosCopy；" +
+            "确实是被闸拦下的反面样本，就在行尾写明「红线样本」：\n" + hits.joinToString("\n"))
     }
 
     /**
@@ -52,7 +65,7 @@ class UiCopyRedLineTest {
         val hits = f.readLines().mapIndexedNotNull { i, line ->
             val bad = SosCopy.BANNED.firstOrNull { line.contains(it) }
             val t = line.trimStart()
-            if (bad != null && !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("<!--")) {
+            if (bad != null && !exempt(line)) {
                 "screen.html:${i + 1} 「$bad」 $t"
             } else null
         }

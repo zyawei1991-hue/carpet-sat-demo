@@ -95,8 +95,11 @@ class AiGateway(
     /**
      * 模型输出的文案红线。**红线不只约束我们写的模板，也约束别人的模型**：
      * 出现 [SosCopy.BANNED] 里任何一句就整条换成不越界说法 —— 一句"救援已在路上"的代价我们担不起。
+     *
+     * public 是有意的：[ConversationLog] 要拿它当入站那道闸。小智云那一路的话不是这个网关生成的，
+     * 但它同样要上屏、同样会永久留在车主的记录里，所以同样得过这一道。
      */
-    private fun guard(text: String): String {
+    fun guard(text: String): String {
         val hit = SosCopy.BANNED.firstOrNull { text.contains(it) }
         if (hit == null) return text
         log("模型输出踩线（$hit），已替换：${text.take(80)}")

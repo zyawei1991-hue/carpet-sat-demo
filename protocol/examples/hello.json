@@ -1,5 +1,5 @@
 {
-  "v": 1,
+  "v": 2,
   "t": "hello",
   "seq": 1,
   "hello": {
@@ -8,6 +8,6 @@
     "dock_type": "desk_stand",
     "wifi_rssi": -52,
     "battery_mv": 4080,
-    "protocols": [1]
+    "protocols": [1, 2]
   }
 }

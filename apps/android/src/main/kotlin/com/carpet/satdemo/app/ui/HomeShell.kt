@@ -44,8 +44,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ai.ReplySource
+import com.carpet.satdemo.core.ai.Turn
+import com.carpet.satdemo.core.ai.TurnFrom
 import com.carpet.satdemo.core.devices.DeviceKind
 import com.carpet.satdemo.core.devices.DeviceLink
+import com.carpet.satdemo.core.protocol.DialogOrigin
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.core.screen.ScreenLinkServer
 
@@ -216,6 +219,14 @@ private fun AssistantHero(app: AppRuntime) {
             "主理人",
             trailing = if (endpoint.configured) "远端模型 ${endpoint.model}" else "本机规则 · 未接模型",
         )
+        // 对话的宿主在手机，圆屏是它的耳朵和嘴。这一行说死"两边同一份记录"这件事：
+        // 屏上说的话会出现在这里，这里答的话会上屏 —— 而不是两块屏各存一份再对齐
+        Text(
+            if (app.screenDialog) "圆屏也能问：屏上说的话会出现在这里，这里答的话会上屏"
+            else "圆屏还不能对话（固件没申报契约 v2）。这里说的每一条，屏上看不到",
+            style = Type.Caption,
+            color = if (app.screenDialog) Ink.Ok else Ink.TextLow,
+        )
         chat.takeLast(4).forEach { line -> Bubble(line) }
 
         AnimatedVisibility(
@@ -331,8 +342,8 @@ private fun FieldRow(label: String, value: String, onChange: (String) -> Unit) {
 
 /** 一条对话。左右对齐就够，不做头像、不做气泡尾巴 —— 那两个都会把一屏能看的条数压掉一条 */
 @Composable
-private fun Bubble(line: AppRuntime.ChatLine) {
-    val mine = line.from == AppRuntime.ChatFrom.Me
+private fun Bubble(line: Turn) {
+    val mine = line.from == TurnFrom.Me
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
@@ -346,16 +357,29 @@ private fun Bubble(line: AppRuntime.ChatLine) {
                 .padding(horizontal = Grid.x12, vertical = Grid.x8),
             verticalArrangement = Arrangement.spacedBy(Grid.x4),
         ) {
+            // 圆屏起的那一轮，问和答都要标。车主在手机上看到这条时想知道的是
+            // "刚才是不是有人站在车那边跟屏说话"，这个只标一次读不出来
+            if (line.via == DialogOrigin.screen) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Grid.x4), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(MIcons.dock, contentDescription = null, tint = Ink.Wait, modifier = Modifier.size(13.dp))
+                    Text("圆屏", style = Type.Caption, color = Ink.Wait)
+                }
+            }
             Text(line.text, style = Type.Body)
             if (!mine) {
                 Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8), verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        if (line.source.live) MIcons.model else if (line.proactive) MIcons.agent else MIcons.ledger,
+                        when {
+                            !line.ours -> MIcons.voice
+                            line.source.live -> MIcons.model
+                            line.proactive -> MIcons.agent
+                            else -> MIcons.ledger
+                        },
                         contentDescription = null,
                         tint = Ink.TextLow,
                         modifier = Modifier.size(14.dp),
                     )
-                    Text(sourceLabel(line), style = Type.Caption, color = Ink.TextLow)
+                    Text(sourceLabel(line), style = Type.Caption, color = if (line.ours) Ink.TextLow else Ink.Wait)
                     if (line.skill != null) Text("· ${line.skill}", style = Type.Caption, color = Ink.TextLow)
                 }
             }
@@ -367,11 +391,14 @@ private fun Bubble(line: AppRuntime.ChatLine) {
  * 来源必须逐条标，不能整块标一次。**"本机规则"和"远端模型"混在一屏里不写清楚，
  * 观众就会把规则模板当成接了大模型** —— 这比承认没接要贵得多。
  */
-private fun sourceLabel(line: AppRuntime.ChatLine): String = when {
+private fun sourceLabel(line: Turn): String = when {
+    // 小智官方云那一路：话不是我们的网关生成的，界面上必须单独一句话说明，
+    // 而不是混进"远端模型"里 —— 那会让人以为这句话也过了我们的红线
+    line.source == ReplySource.XiaozhiCloud -> "小智云 · 未过网关"
     line.proactive -> "主动提醒"
-    line.source === ReplySource.Model -> "远端模型"
-    line.source === ReplySource.Denied -> "权限拦截"
-    line.source === ReplySource.LocalFallback -> "未接模型 · 规则作答"
+    line.source == ReplySource.Model -> "远端模型"
+    line.source == ReplySource.Denied -> "权限拦截"
+    line.source == ReplySource.LocalFallback -> "未接模型 · 规则作答"
     else -> "本机状态直答"
 }
 

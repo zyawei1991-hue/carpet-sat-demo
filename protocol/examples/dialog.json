@@ -1,0 +1,13 @@
+{
+  "v": 2,
+  "t": "dialog",
+  "seq": 203,
+  "ts": 1795200021000,
+  "dialog": {
+    "turn_id": "t-8f21",
+    "dir": "up",
+    "text": "车到哪了",
+    "source": "asr",
+    "origin": "screen"
+  }
+}

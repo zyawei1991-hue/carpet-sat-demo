@@ -42,6 +42,16 @@
   .panel h2{font:600 13px/1 sans-serif;color:#dfe6ef;margin-bottom:10px;letter-spacing:.5px}
   .panel .row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #262c35;padding:3px 0}
   .panel .row b{color:#e8edf4;font-weight:600}
+  .ask{display:flex;gap:6px;margin:0 0 12px}
+  .ask input{
+    flex:1;background:#12161c;border:1px solid #2b313a;border-radius:8px;
+    color:#e8edf4;padding:6px 8px;font:12px/1.4 ui-monospace,Consolas,monospace;
+  }
+  .ask button{
+    background:#2b313a;color:#aeb9c9;border:0;border-radius:8px;padding:6px 9px;
+    font:12px/1 sans-serif;cursor:pointer;
+  }
+  .ask #askprobe{color:#ffb020}
   .log{height:210px;overflow:auto;margin-top:10px;white-space:pre-wrap;word-break:break-all;color:#7f8a9b}
 </style>
 </head>
@@ -51,6 +61,12 @@
   <div class="hint" id="hint">等待连接…</div>
 </div>
 <div class="panel" id="panel">
+  <h2>对话（冒充麦克风那条链路）</h2>
+  <div class="ask">
+    <input id="askbox" placeholder="随便说一句，回车即发">
+    <button id="asksend">发送</button>
+    <button id="askprobe" title="故意说一句红线里的话，看手机端拦不拦">越界探针</button>
+  </div>
   <h2>原始状态流</h2>
   <div id="kv"></div>
   <div class="log" id="log"></div>
@@ -69,6 +85,17 @@ let last=null, lastSeq=-1, connected=false;
 // 状态帧的 seq 是服务端自增，事件帧走另一条计数；两者都要留痕才能判断是不是重发
 let lastStateAt=0, outSeq=0, ws=null;
 const seenEvents=[];                     // event_id 去重环形缓冲，契约规定留 32 个
+
+// 对话（契约 v2）。屏上这一份只是"看得见的那几行"，**真正的记录在手机上**：
+// 断开重连后由手机把它那条时间线的最后几轮重新推下来，屏不自己攒（见 screen-link.md 的对话段）
+let dialog=[], dialogMode=false, dialogIdle=null, micHeld=false, DIALOG_VIEW=[];
+let dq=0;
+// 每次开页一个随机段。手机的记录按 turn_id 去重且**跨连接有效**，纯自增的 id 在页面刷新后
+// 会从 s-0 重新开始，撞上记录里的旧 id —— 表现是"重连后头几句问了没反应"
+const BOOT=Math.random().toString(36).slice(2,6);
+const DIALOG_Q=['车到哪了','还剩几条额度','链路现在怎么样','现在能发 SOS 吗','下次过境什么时候'];
+// 说完/答完 25 秒自己回到状态盘：这块屏的日常身份是"车载状态表"，不是聊天窗口
+const IDLE_MS=25000;
 
 function el(tag,attrs,parent){
   const n=document.createElementNS(NS,tag);
@@ -92,6 +119,17 @@ function arc(r,a0,a1,color,w,opacity){
 // 文案全部照 §6.1 红线一写：星上应答 ≠ 平台回执 ≠ 有人在路上。tx_ok 那一档以前写的是禁用句
 const PHASE_CN={idle:'待命',searching:'对星中',locked:'已锁定',tx_pending:'待发',tx_ok:'星上已应答',tx_fail:'发送失败',tx_no_ack:'星上未确认'};
 const LINK_CN={cell:'蜂窝主链路',sat:'卫星主链路'};
+
+/**
+ * §6.1 红线一的词表，屏上这一份和手机那一组是同一套口径。
+ * **手机的闸管得到过网关的话，管不到小智官方云直接往屏上画的那一路**（路线 A 的全部风险就在这），
+ * 所以凡是要上屏的文字都再过一次。宁可屏上少一句，也不能现场冒出一句"救援已在路上"。
+ */
+const BANNED=['已送达','发送成功','送达成功','救援已在路上','平台已受理','一定没问题'];   /* 红线样本：这一行是闸自己的词表，不是往屏上画的话 */
+function guardText(t){
+  const s=String(t==null?'':t);
+  return BANNED.some(b=>s.includes(b)) ? '这句我不能替平台说，以手机台账为准' : s;
+}
 
 /**
  * 上面那两行小字是这屏最贵的地方：**一条只说一件事**，且优先级写死。
@@ -136,7 +174,19 @@ function draw(s){
   arc(206,-Math.PI/2,-Math.PI/2+Math.PI*2*fill, ph==='tx_fail'||ph==='tx_no_ack'?'#ff4545':'#ffb020',7);
   el('circle',{cx,cy,r:206,fill:'none',stroke:'#1b222c','stroke-width':7});
 
-  // 顶部三行：星名 / 信号 / 相位。
+  // 中间那一块：对话模式换成这一轮的线程，**外圈链路环保留** —— 抬眼还是要知道链没连上。
+  // 求救压过对话：sos 不是 normal 时强制回状态视图，新到的那几句话先攒着，等归位再画
+  if(dialogMode && s.sos.level==='normal') drawDialog(s); else drawCenter(s, stale);
+
+  drawPad(s);
+
+  // SOS 横幅压在最上层。这时候轨迹盘不画：弹层只盖住它下半截，
+  // 露出一条弧比什么都不露更乱 —— 一屏一重心，SOS 期间这屏上只有 SOS
+  if(s.sos.level!=='normal') sosBanner(s);
+}
+
+/** 状态视图的中间那块：星名/相位/顶部小字/轨迹盘/底部位置电量。原来写在 draw() 里，抽出来只是为了让对话视图换得掉它 */
+function drawCenter(s,stale){
   // 「终端离线」和「没锁到星」必须分开说：前者是 GT1005 掉电，后者只是在等过顶。
   const offline = s.sat.module_ok === false;
   const queued = s.sat.queue_pending || 0;
@@ -145,7 +195,7 @@ function draw(s){
     fill:offline?'#ff4545':(s.sat.sat_name?'#ffb020':'#5a6472')});
   text(cx,116,offline?(queued?`离线 · 攒 ${queued}${cap?'/'+cap:''} 条待补发`:'终端离线'):
       (s.sat.cnr?('CNR '+s.sat.cnr.toFixed(1)+' dB'):'未锁定'),{'font-size':12,fill:offline?'#aeb9c9':'#5a6472'});
-  text(cx,138,offline?'终端离线':(PHASE_CN[ph]||ph),{'font-size':15,
+  text(cx,138,offline?'终端离线':(PHASE_CN[s.sat.phase]||s.sat.phase),{'font-size':15,
     fill:offline?'#ff4545':'#e8edf4','font-weight':'600'});
   topLines(s).forEach((r,i)=>{
     text(cx,158+i*16,r[0],{'font-size':12,fill:r[2],'letter-spacing':.2});
@@ -164,13 +214,103 @@ function draw(s){
       {'font-size':14,'font-weight':'600',fill:s.fence.inside?'#3ddc84':'#ff4545'});
   text(cx,376,`${s.phone_battery==null?'—':s.phone_battery+'%'}  ·  ${LINK_CN[s.link.primary]||s.link.primary}`,
     {'font-size':11,fill:'#5a6472'});
-
-  drawPad(s);
-
-  // SOS 横幅压在最上层。这时候轨迹盘不画：弹层只盖住它下半截，
-  // 露出一条弧比什么都不露更乱 —— 一屏一重心，SOS 期间这屏上只有 SOS
-  if(s.sos.level!=='normal') sosBanner(s);
+  drawMicPad(s);            // 状态视图里它是顶上那颗"按住问一句"
 }
+
+/**
+ * 对话视图。这一屏的重心是"刚才是不是有人在车那边跟屏说话"，所以：
+ * ① 问和答都要在（只有答的话，用户不知道它答的是哪句）；
+ * ② **每条都要标这一轮从哪儿起的** —— 手机那边问的，和圆屏自己听到的，必须在屏上分得开；
+ * ③ 小智云那一路的话不是我们网关生成的，标出来单独一档颜色，不能混进"主理人答"里。
+ * 每屏只留最近三轮：这块屏 466dp，多一行就要开始折行，折两行就压到下面那颗 SOS 键上了。
+ */
+function drawDialog(s){
+  DIALOG_VIEW=[];
+  const g=el('g',{});
+  text(cx,100,'主理人',{'font-size':12,fill:'#5a6472','letter-spacing':2},g);
+  if(!dialog.length){
+    text(cx,196,'按住下方说一句',{'font-size':19,fill:'#aeb9c9'},g);
+    text(cx,222,'手机那边问的、答的，都会出现在这儿',{'font-size':11,fill:'#5a6472'},g);
+  }
+  let y=136;
+  dialog.slice(-3).forEach(d=>{
+    if(y>262) return;                      // 再往下就压到说话键了，宁可少画一轮
+    text(cx,y,dialogTag(d),{'font-size':10,fill:'#5a6472'},g); y+=16;
+    const lines=wrapCjk(d.text,16);   // 别叫 ws：那名字是这条链路的 WebSocket
+    const shown=lines.slice(0,2);
+    // 只画两行，剩下的必须有省略号。砍掉半句而不提示，读的人会以为那句话本来就说到这儿
+    if(lines.length>2) shown[1]=shown[1].replace(/[,，。、]$/,'')+'…';
+    shown.forEach((t,i)=>{
+      text(cx,y+i*18,t,{'font-size':15,fill:dialogColor(d)},g);
+      DIALOG_VIEW.push({y:y+i*18,fill:dialogColor(d),str:t});
+    });
+    y+=18*2+10;
+  });
+  drawMicPad(s);
+}
+
+/** CJK 没有空格可分，按字符数硬折。真固件那边是 LVGL 的自动换行，这里只要形状对得上就行 */
+function wrapCjk(str,max){
+  const s=String(str==null?'':str);
+  // 连续的字母数字算一个整体：把 GT1005 折成 "GT10 / 05" 是这屏最难看的一种错，
+  // 而观众恰恰会盯着型号看
+  const atoms=s.match(/[A-Za-z0-9]+|[\s\S]/g)||[];
+  const out=[]; let cur='';
+  for(const a of atoms){
+    if(cur && (cur+a).length>max){
+      // 逗号句号不能开新行（那一行读起来像上一句被腰斩）。宁可多挤一个字，也不让标点起头
+      if(/^[，。、）？！:：]/.test(a)) { cur+=a; continue; }
+      out.push(cur); cur=a;
+    } else cur+=a;
+  }
+  if(cur) out.push(cur);
+  return out.length?out:[''];
+}
+
+/** 每条线的角标。"问·手机"这一档是这次改动的核心：车主在圆屏上也要能看出这话是谁先起的头 */
+function dialogTag(d){
+  const who=d.origin==='phone'?'手机':'圆屏';
+  if(d.dir==='up') return '问 · '+who;
+  if(d.source==='xiaozhi_cloud') return '答 · 小智云 · 未过网关';
+  if(d.source==='local_fallback') return '答 · 未接模型';
+  if(d.source==='denied') return '答 · 权限拦截';
+  return '答 · '+who+'起';
+}
+
+function dialogColor(d){
+  if(d.dir==='up') return '#7f8a9b';
+  if(d.source==='xiaozhi_cloud') return '#ffb020';
+  if(d.source==='denied') return '#ff4545';
+  return '#e8edf4';
+}
+
+/**
+ * 说话键，两个位置：
+ * 状态视图里它是圆心上方那个小药丸（那块地方是星名，点一下不会误触别的），
+ * 对话视图里它挪到 SOS 那颗键正上方，因为这时候拇指本来就是往上搭的。
+ * **SOS 那颗永不让位**：这块屏上任何"方便"都不能把唯一的安全入口挤掉。
+ * 链路没通时它是灰的并且明说原因，而不是画一个按下去没反应的假键。
+ */
+function drawMicPad(s){
+  const can=connected;
+  const lab=!can?'链路没通 · 说不了':(micHeld?'松开发送':(dialogMode?'按住再说一句':'按住问一句'));
+  const col=micHeld?'#388bfd':can?'#2b313a':'#1b1f26';
+  if(dialogMode){
+    const x=133,w=200,y=330,h=42;
+    el('rect',{x,y,width:w,height:h,rx:20,ry:20,fill:col,
+      stroke:micHeld?'#388bfd':(can?'#3a4150':'#20262e'),'stroke-width':1.5},ui);
+    text(cx,y+26,lab,{'font-size':14,'font-weight':'600',fill:can?'#e8edf4':'#5a6472'},ui);
+    MIC={x,y,w,h};
+  }else{
+    const x=166,w=134,y=44,h=26;
+    el('rect',{x,y,width:w,height:h,rx:13,ry:13,fill:col,
+      stroke:micHeld?'#388bfd':(can?'#3a4150':'#20262e'),'stroke-width':1.2},ui);
+    text(cx,y+17,lab,{'font-size':11,'font-weight':'600',fill:can?'#aeb9c9':'#5a6472'},ui);
+    ENTRY={x,y,w,h};
+  }
+}
+let MIC={x:133,y:330,w:200,h:42};
+let ENTRY={x:166,y:44,w:134,h:26};
 
 /**
  * 触摸 SOS 区。真屏是一块 466×466 的圆触摸屏，这屏唯一该让人按的就是这里，
@@ -302,6 +442,8 @@ function handleFrame(chunk){
       note('事件 '+m.event.kind+' '+JSON.stringify(m.event.payload).slice(0,80));
       if(m.event.kind==='sos_triggered'||m.event.kind==='sos_failed') note('  ↑ 弹层', '#ff4545');
       if(m.event.kind==='sos_cancelled') note('  ↑ 已撤销', '#3ddc84');
+    } else if(m.t==='dialog'){
+      pushLine(m.dialog);
     } else if(m.t==='ack'){
       const a=m.ack||{};
       note('回执 for_seq='+(a.for_seq!=null?a.for_seq:a.forSeq)+(a.error?' 拒：'+a.error:''));
@@ -312,34 +454,95 @@ function handleFrame(chunk){
 /** 契约规定 event 必须回执，否则服务端 3 秒重发一次、再 3 秒放弃并记一条「展示端没收到」 */
 function ackEvent(m){
   if(!ws || ws.readyState!==1) return;
-  ws.send(JSON.stringify({v:1,t:'ack',seq:outSeq++,ts:Math.floor(Date.now()/1000),
+  ws.send(JSON.stringify({v:2,t:'ack',seq:outSeq++,ts:Math.floor(Date.now()/1000),
     ack:{for_seq:m.seq, for_event_id:m.event.event_id}}));
 }
 
 function sendCmd(cmd,args){
   if(!ws || ws.readyState!==1){ note('链路没通，指令发不出去','#ff4545'); return; }
-  ws.send(JSON.stringify({v:1,t:'command',seq:outSeq++,ts:Math.floor(Date.now()/1000),
+  ws.send(JSON.stringify({v:2,t:'command',seq:outSeq++,ts:Math.floor(Date.now()/1000),
     command:{cmd,args:args||{}}}));
   note('指令 '+cmd);
+}
+
+/**
+ * 屏上"说一句话"。这块冒充件没有真的麦克风链路（附录 A.3 那条要等固件：板载双麦 + ES7210 + VAD），
+ * 所以按住说话 = 念一句预置问题，右侧面板那个输入框才是随便说。
+ * **两种入口都走这里**，发出去的帧完全一致 —— 否则冒充件测到的和真固件发的不是同一件事。
+ */
+function ask(line,source){
+  if(!ws || ws.readyState!==1){ note('链路没通，话发不出去','#ff4545'); return; }
+  const q=(line||'').trim();
+  if(!q) return;
+  const id='s-'+BOOT+'-'+outSeq, src=source||'asr';
+  ws.send(JSON.stringify({v:2,t:'dialog',seq:outSeq++,ts:Math.floor(Date.now()/1000),
+    dialog:{turn_id:id,dir:'up',text:q,source:src,origin:'screen'}}));
+  pushLine({turn_id:id,dir:'up',text:q,source:src,origin:'screen'});
+}
+
+/**
+ * 收到一条对话（dir=down 是手机答的，dir=up 是我们自己发出去又被镜像回来的）。
+ * 去重按 turn_id+dir：**同一条问话本地记一次、服务端再回一次，屏上不能出现两遍**。
+ * 自动切进对话视图 —— 用户在车那边说话，屏却还画着轨迹盘，等于没响应。
+ */
+function pushLine(raw){
+  if(!raw || !raw.text) return;
+  // 出站帧走了 encodeDefaults，缺省字段是不上线的：**收的一方必须自己补回同一套默认值**，
+  // 否则 d.source 是 undefined，角标会一路掉进兜底那档，把"未接模型"显示成"手机起"
+  const d={turn_id:'',dir:'down',text:'',source:'local_rule',skill:null,origin:'screen',...raw};
+  const safe=guardText(d.text);
+  if(safe!==d.text) note('对话红线拦截：原文没上屏','#ff4545');
+  d.text=safe;
+  const i=dialog.findIndex(x=>x.turn_id===d.turn_id && x.dir===d.dir);
+  if(i>=0) dialog[i]=d; else dialog.push(d);
+  while(dialog.length>6) dialog.shift();
+  dialogMode=true;
+  clearTimeout(dialogIdle);
+  dialogIdle=setTimeout(()=>{ dialogMode=false; if(last) draw(last); },IDLE_MS);
+  note('对话 '+(d.dir==='up'?'我说':'它答')+'：'+d.text);
+  if(last) draw(last);
 }
 
 // ── 触摸：长按 3 秒 / 中途松手取消 / 发出后点一下撤销 ──────────────────────────
 const press={timer:null,count:0};
 const screen=document.getElementById('screen');
 
-function hitPad(evt){
-  const r=screen.getBoundingClientRect();
-  const sx=(evt.clientX-r.left)/r.width*466, sy=(evt.clientY-r.top)/r.height*466;
-  return sx>=PAD.x && sx<=PAD.x+PAD.w && sy>=PAD.y && sy<=PAD.y+PAD.h;
+function hitRect(r,evt){
+  const b=screen.getBoundingClientRect();
+  const sx=(evt.clientX-b.left)/b.width*466, sy=(evt.clientY-b.top)/b.height*466;
+  return sx>=r.x && sx<=r.x+r.w && sy>=r.y && sy<=r.y+r.h;
 }
+function hitPad(evt){ return hitRect(PAD,evt); }
+
 function stopPress(fired){
   if(press.timer){ clearInterval(press.timer); press.timer=null; }
   if(press.count>0 && !fired) note('长按中断，SOS 未触发','#7c8697');
   press.count=0;
   if(last) draw(last);
 }
+
+/** 松开发送，取消（手指滑走）不发。真固件那边 VAD 会自己判尾，这一句只对应"按住/松开"这对动作 */
+function releaseMic(send){
+  if(!micHeld) return;
+  micHeld=false;
+  if(send) ask(DIALOG_Q[dq++%DIALOG_Q.length]);
+  else if(last) draw(last);
+}
+
 screen.addEventListener('pointerdown',(e)=>{
-  if(!last || !hitPad(e)) return;
+  if(!last) return;
+  // SOS 期间不给说话：那屏上只有求救，任何"顺便问一句"的邀请都是在分走注意力
+  const sosOn=last.sos.level!=='normal';
+  const onMic=!sosOn && (dialogMode ? hitRect(MIC,e) : hitRect(ENTRY,e));
+  if(onMic){
+    if(!connected){ note('链路没通，说不了','#ff4545'); return; }
+    micHeld=true; draw(last); return;
+  }
+  if(!hitPad(e)){
+    // 对话模式里点别处 = 收起回状态盘。SOS 那块位置不动，所以收起不会误触它
+    if(dialogMode){ dialogMode=false; clearTimeout(dialogIdle); draw(last); }
+    return;
+  }
   if(last.sat.upgrade_pct!=null){ note('升级写锁生效，按钮已置灰','#ffb020'); return; }
   if(last.sos.level!=='normal' && last.sos.level!=='armed'){ sendCmd('sos_cancel'); return; }
   press.count=3; draw(last);
@@ -349,15 +552,30 @@ screen.addEventListener('pointerdown',(e)=>{
     else draw(last);
   },1000);
 });
-['pointerup','pointercancel','pointerleave'].forEach(ev=>screen.addEventListener(ev,()=>stopPress(false)));
+screen.addEventListener('pointerup',()=>{ releaseMic(true); stopPress(false); });
+['pointercancel','pointerleave'].forEach(ev=>screen.addEventListener(ev,()=>{ releaseMic(false); stopPress(false); }));
+
+// 右侧面板那个输入框：冒充"随便说一句"。它和按住说话发的是同一种帧，只是文本从键盘来
+(function wirePanelAsk(){
+  const box=document.getElementById('askbox'), btn=document.getElementById('asksend'), probe=document.getElementById('askprobe');
+  if(btn) btn.onclick=()=>{ if(box){ ask(box.value); box.value=''; } };
+  if(box) box.onkeydown=(e)=>{ if(e && (e.key==='Enter'||e.keyCode===13)){ ask(box.value); box.value=''; } };
+  // 越界探针：故意让"屏"说一句红线里的话，看手机端那道闸拦不拦。
+  // 这一颗键存在的理由：红线不能只约束我们写的模板，它必须当着客户的面演一次才立得住
+  if(probe) probe.onclick=()=>ask('救援已在路上','xiaozhi_cloud');   /* 红线样本：故意念一句越界的话，验两道闸都拦得住 */
+})();
+
+// ?ask=某句话：建好链就自动说一句。截图脚本和现场"一键演示这句"都靠它，走的是同一个 ask()
+const AUTO_ASK=new URLSearchParams(location.search).get('ask');
+if(AUTO_ASK) setTimeout(()=>ask(AUTO_ASK),1200);
 
 function connect(){
   ws=new WebSocket(`ws://127.0.0.1:8443`);
   ws.onopen=()=>{
     connected=true; lastStateAt=Date.now();
-    document.getElementById('hint').textContent='已连接 · 状态 1Hz 推送';
-    ws.send(JSON.stringify({v:1,t:'hello',seq:outSeq++,
-      hello:{screen_id:'WS175B-A3F7',fw:'sim-0.2.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1]}}));
+    document.getElementById('hint').textContent='已连接 · 状态 1Hz 推送 · 契约 v2 可对话';
+    ws.send(JSON.stringify({v:2,t:'hello',seq:outSeq++,
+      hello:{screen_id:'WS175B-A3F7',fw:'sim-0.3.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1,2]}}));
   };
   ws.onmessage=(ev)=>handleFrame(ev.data);
   ws.onclose=()=>{
@@ -391,7 +609,7 @@ setInterval(()=>{
 
 // 关页面时先道别，App 台账上那台屏才能立刻变离线
 window.addEventListener('pagehide',()=>{
-  if(ws && ws.readyState===1) ws.send(JSON.stringify({v:1,t:'bye',seq:outSeq++}));
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({v:2,t:'bye',seq:outSeq++}));
 });
 
 // 服务还没起来时先画一帧静态图，避免白屏
@@ -408,6 +626,7 @@ if(replay && /^[\w.\-]+$/.test(replay)){
     if(!r.ok) throw new Error(r.status);
     return r.text();
   }).then(t=>{
+    connected=true;   // 回放录的就是连着的那一段。不置这一位，静帧上那颗说话键是灰的，看着像链路没通
     t.split('\n').filter(Boolean).forEach(handleFrame);
     document.getElementById('hint').textContent='回放 '+replay+' · 已定格在最后一帧';
   }).catch(e=>{

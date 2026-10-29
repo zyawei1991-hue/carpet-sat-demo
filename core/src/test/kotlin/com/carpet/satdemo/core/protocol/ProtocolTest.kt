@@ -139,9 +139,27 @@ class ScreenLinkContractTest {
     @Test
     fun `hello carries the negotiated contract version`() {
         val msg = ScreenMessage.decode(readExample("hello.json"))
-        assertEquals(1, msg.v)
+        assertEquals(2, msg.v)
         assertEquals(MsgType.hello, msg.t)
         assertFalse(msg.hello!!.screenId.isBlank())
+        // 协商看 protocols 而不是帧上的 v：出站帧因为 encodeDefaults=false 根本不写 v，
+        // 固件拿它当依据会在"手机发的帧没有这个键"时猜错
+        assertEquals(2, ScreenCodec.negotiated(msg.hello!!.protocols))
+        assertTrue(ScreenCodec.compatible(msg.hello!!.protocols))
+
+        // 什么都不申报的老固件：认下来、按 v1 待，只是不能对话
+        val legacy = ScreenMessage.decode(
+            """{"v":1,"t":"hello","seq":1,"hello":{"screen_id":"WS175B-A3F7","fw":"0.1.0-dev"}}""",
+        )
+        assertEquals(1, ScreenCodec.negotiated(legacy.hello!!.protocols))
+        assertTrue(ScreenCodec.compatible(legacy.hello!!.protocols))
+
+        // 申报了一个我们不认的版本才是真不匹配：服务端要当场拒绝并回 proto_mismatch，
+        // 不能让屏以为连上了却什么都收不到
+        val future = ScreenMessage.decode(
+            """{"v":1,"t":"hello","seq":1,"hello":{"screen_id":"X","fw":"9.9","protocols":[7,8]}}""",
+        )
+        assertFalse(ScreenCodec.compatible(future.hello!!.protocols))
     }
 
     @Test
@@ -182,8 +200,12 @@ class ScreenLinkContractTest {
 
     @Test
     fun `unknown contract version is rejected`() {
-        val v2 = """{"v":2,"t":"bye","seq":1}"""
-        assertThrows(Exception::class.java) { ScreenMessage.decode(v2) }
+        // v1（只会看状态）和 v2（能对话）**都**要收得下：明天到货的固件报哪个版本我们都不能拒它。
+        // 真正的"不认识"是第三个版本 —— 那种帧里的字段我们无从猜测，必须当场炸
+        ScreenMessage.decode("""{"v":1,"t":"bye","seq":1}""")
+        ScreenMessage.decode("""{"v":2,"t":"bye","seq":1}""")
+        assertThrows(Exception::class.java) { ScreenMessage.decode("""{"v":3,"t":"bye","seq":1}""") }
+        assertThrows(Exception::class.java) { ScreenMessage.decode("""{"v":0,"t":"bye","seq":1}""") }
     }
 
     @Test

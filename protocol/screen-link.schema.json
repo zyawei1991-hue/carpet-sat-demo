@@ -6,10 +6,14 @@
   "type": "object",
   "required": ["v", "t", "seq"],
   "properties": {
-    "v": { "const": 1, "description": "契约主版本，不兼容改动 +1" },
+    "v": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "契约主版本。**v2 只加了一条 dialog 通道，v1 的字段一个都没动**，所以两端都收 1 和 2：老固件连上来照样看状态，只是不发消息。真正的协商看 hello.protocols（出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断自己该不该解 dialog）"
+    },
     "t": {
-      "enum": ["hello", "bye", "state", "event", "command", "ack"],
-      "description": "消息类型。state=周期快照，event=即时推送，其余为会话控制"
+      "enum": ["hello", "bye", "state", "event", "command", "ack", "dialog"],
+      "description": "消息类型。state=周期快照，event=即时推送，dialog=对话（v2 起），其余为会话控制"
     },
     "seq": { "type": "integer", "minimum": 0, "description": "发送方自增序号，接收方用于去重和检测丢包" },
     "ts": { "type": "integer", "description": "Unix 毫秒，App 侧时钟。展示端不信任此值，仅用于显示" },
@@ -27,7 +31,7 @@
         },
         "wifi_rssi": { "type": "integer", "minimum": -120, "maximum": 0 },
         "battery_mv": { "type": "integer" },
-        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "展示端能解析的契约版本列表" }
+        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "展示端能解析的契约版本列表，例如 [1,2]。**省略 = 不申报 = 按 v1 待**（只收状态，服务端不会推 dialog）。固件不要什么都不发却期待拿到对话：App 侧的默认值刻意不是最新版本" }
       }
     },
 
@@ -169,6 +173,24 @@
           "description": "非空表示拒绝。目前只有 proto_mismatch：契约版本对不上，展示端显示黄屏而不是崩"
         }
       }
+    },
+
+    "dialog": {
+      "type": "object",
+      "description": "t=dialog 时必填。**v2 起才有**：协商下来是 v1 的连接，服务端一条 dialog 都不会推。对话记录的唯一宿主是手机（事实都在手机状态机里、§6.1 的文案红线只能约束过网关的话），圆屏是它的耳朵和嘴：dir=up 是屏上说的话（要手机回答），dir=down 是手机说的话（要屏显示）",
+      "required": ["turn_id", "dir", "text"],
+      "properties": {
+        "turn_id": { "type": "string", "maxLength": 32, "description": "一轮问答共用同一个 id，上行和下行各一条。固件必须原样回传它收到的那个 id，否则手机端会把答和问拆成两轮，去重也失效" },
+        "dir": { "enum": ["up", "down"], "description": "up=展示端->手机（要回答），down=手机->展示端（要显示）" },
+        "text": { "type": "string", "maxLength": 300, "description": "这句话说的是什么。**已经过 App 侧文案闸**（AiGateway.guard）：dir=down 的话不会出现「救援已在路上」这类越界措辞，固件直接照显示，不要自己加工或补一句安慰话" },
+        "source": {
+          "enum": ["asr", "local_rule", "model", "local_fallback", "denied", "xiaozhi_cloud"],
+          "default": "local_rule",
+          "description": "这句话从哪儿来的，决定界面上打什么标。local_fallback=该走模型但端点没配；denied=权限没开被网关拦下；xiaozhi_cloud=小智官方云全包那一路，**话不是我们的网关生成的**，屏上要单独标「小智云 · 未过网关」，也不许因为它触发任何技能"
+        },
+        "skill": { "type": ["string", "null"], "description": "命中的技能 id，没有为 null。给工程模式排查用" },
+        "origin": { "enum": ["screen", "phone"], "default": "screen", "description": "这一轮是谁先起的。车主想知道「刚才是不是有人在车那边跟屏说话」，所以这个字段必须一路带到手机上那条记录里" }
+      }
     }
   },
   "allOf": [
@@ -176,6 +198,7 @@
     { "if": { "properties": { "t": { "const": "event" } } }, "then": { "required": ["event"] } },
     { "if": { "properties": { "t": { "const": "hello" } } }, "then": { "required": ["hello"] } },
     { "if": { "properties": { "t": { "const": "command" } } }, "then": { "required": ["command"] } },
-    { "if": { "properties": { "t": { "const": "ack" } } }, "then": { "required": ["ack"] } }
+    { "if": { "properties": { "t": { "const": "ack" } } }, "then": { "required": ["ack"] } },
+    { "if": { "properties": { "t": { "const": "dialog" } } }, "then": { "required": ["dialog"] } }
   ]
 }

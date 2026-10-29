@@ -57,6 +57,18 @@ class AiGatewayTest {
     }
 
     @org.junit.jupiter.api.Test
+    fun `窗口内不许说还有 0 秒`() = runBlocking {
+        val g = AiGateway(provider = LocalRuleProvider())
+        val locked = base.copy(phase = "locked", secondsToNextPass = 0)
+        val line = g.ask("下一次过境什么时候", locked).text
+        assertTrue(!line.contains("还有 0 秒") && !line.contains("0 秒后"), "已经锁住了还把倒计时念成 0，用户会以为星正在头顶：$line")
+        assertContains(line, "窗口内")
+        // 没锁、也还没算出时间：这条要明说没得说，不许拿 0 当数
+        val none = base.copy(phase = "idle", secondsToNextPass = null, passWindowSec = null)
+        assertContains(g.ask("下一次过境什么时候", none).text, "还没有可用的过境时间")
+    }
+
+    @org.junit.jupiter.api.Test
     fun `没命中时不许编答案`() = runBlocking {
         val r = AiGateway(provider = LocalRuleProvider()).ask("帮我写一首诗", base)
         assertEquals(ReplySource.LocalFallback, r.source)

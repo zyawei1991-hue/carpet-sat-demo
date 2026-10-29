@@ -97,6 +97,13 @@ enum class ReplySource {
 
     /** 权限没开，网关拦下了 */
     Denied,
+
+    /**
+     * 小智官方云那一路：话不是我们的网关生成的，我们只负责把它镜像进记录和屏幕。
+     * **这一路不许触发任何技能**（车控、健康、SOS 都不行），也不许绕过文案闸 ——
+     * 界面上必须单独标出来，让观众知道这句"不是我说的"。
+     */
+    XiaozhiCloud,
     ;
 
     val live: Boolean get() = this == Model

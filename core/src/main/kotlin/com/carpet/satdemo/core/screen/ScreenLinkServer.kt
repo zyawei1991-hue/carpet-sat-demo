@@ -1,6 +1,7 @@
 package com.carpet.satdemo.core.screen
 
 import com.carpet.satdemo.core.protocol.MsgType
+import com.carpet.satdemo.core.protocol.ScreenCodec
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
@@ -48,9 +49,26 @@ class ScreenLinkServer(
      */
     var onContractError: (String, String) -> Unit = { _, _ -> }
 
+    /**
+     * 往一条已经不算活着的连接上写帧。参数是原因，由宿主记进运行时日志。
+     * 现场最常见的触发是拔屏的电源：不设这一句，1Hz 那圈循环整个死掉，
+     * 表现是"拔了一块屏，另一块屏从此再也不更新"。
+     */
+    var onSendError: (String) -> Unit = {}
+
     private val known = ConcurrentHashMap<String, WebSocket>()
 
+    /**
+     * 每条连接谈下来的契约版本。对话通道只对 v2 发 ——
+     * 老固件解不开未知类型会**直接断连**（我们这边就是这么规定的），
+     * 所以"多一个通道"绝不能变成"把已经连上的屏踢下线"。
+     */
+    private val negotiated = ConcurrentHashMap<WebSocket, Int>()
+
     val clientCount: Int get() = connections.count { it.isOpen }
+
+    /** 有没有任何一条连接能收对话。App 上那句"圆屏可以说话"要读这个，不靠猜 */
+    val dialogReady: Boolean get() = negotiated.values.any { it >= 2 } && connections.any { it.isOpen }
 
     /**
      * 现场改白名单。出厂烧死一个 id 这件事在演示现场是必错的：
@@ -88,6 +106,7 @@ class ScreenLinkServer(
                 return
             }
             known[hello.screenId] = conn
+            negotiated[conn] = ScreenCodec.negotiated(hello.protocols)
             onHello(msg)
         }
         // 展示端主动告别：固件在重启/换底座前会发一条。当场把它从台账摘掉，
@@ -107,6 +126,7 @@ class ScreenLinkServer(
     }
 
     override fun onClose(conn: WebSocket, code: Int, reason: String, remote: Boolean) {
+        negotiated.remove(conn)
         var gone: String? = null
         val it2 = known.entries.iterator()
         while (it2.hasNext()) {
@@ -125,9 +145,22 @@ class ScreenLinkServer(
 
     fun broadcast(messages: List<ScreenMessage>) {
         if (!accepting || messages.isEmpty()) return
-        // 一条消息一帧，圆屏那边不用拆包
+        // 一条消息一帧，圆屏那边不用拆包。按每条连接谈下来的版本过滤：v1 收不到 dialog
         connections.forEach { conn ->
-            if (conn.isOpen) messages.forEach { conn.send(it.encode()) }
+            if (!conn.isOpen) return@forEach
+            val ver = negotiated[conn] ?: 1
+            messages.forEach { if (it.t != MsgType.dialog || ver >= 2) sendOrDrop(conn, it) }
+        }
+    }
+
+    /** `isOpen == true` 不等于可写：这一句抛出来的异常必须在这里被吃掉，不能顺着调用栈爬回 1Hz 循环 */
+    private fun sendOrDrop(conn: WebSocket, message: ScreenMessage) {
+        try {
+            conn.send(message.encode())
+        } catch (e: Exception) {
+            negotiated.remove(conn)
+            onSendError(e.message ?: e.javaClass.simpleName)
+            runCatching { conn.close(CLOSE_POLICY, "send failed") }   // 真正的摘除走 onClose，那儿已经在清台账了
         }
     }
 
@@ -138,12 +171,13 @@ class ScreenLinkServer(
     fun sendTo(screenId: String, message: ScreenMessage) {
         if (!accepting) return
         val conn = known[screenId] ?: return
-        if (conn.isOpen) conn.send(message.encode())
+        if (conn.isOpen && (message.t != MsgType.dialog || (negotiated[conn] ?: 1) >= 2)) sendOrDrop(conn, message)
     }
 
     private fun closeClients() {
         connections.forEach { runCatching { it.close(CLOSE_POLICY, "demo lock") } }
         known.clear()
+        negotiated.clear()
     }
 
     companion object {

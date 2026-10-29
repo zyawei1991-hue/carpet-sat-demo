@@ -3,11 +3,14 @@ package com.carpet.satdemo.app
 import android.app.Application
 import com.carpet.satdemo.core.ai.AiEndpoint
 import com.carpet.satdemo.core.ai.AiGateway
-import com.carpet.satdemo.core.ai.Heartbeat
+import com.carpet.satdemo.core.ai.DialogBridge
 import com.carpet.satdemo.core.ai.OpenAiCompatProvider
 import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.ai.ReplySource
 import com.carpet.satdemo.core.ai.SkillContext
+import com.carpet.satdemo.core.ai.skillContext
+import com.carpet.satdemo.core.ai.Turn
+import com.carpet.satdemo.core.ai.TurnFrom
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -18,6 +21,12 @@ import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.CommandType
+import com.carpet.satdemo.core.protocol.DialogDir
+import com.carpet.satdemo.core.protocol.DialogOrigin
+import com.carpet.satdemo.core.protocol.DialogPayload
+import com.carpet.satdemo.core.protocol.DialogSource
+import com.carpet.satdemo.core.protocol.MsgType
+import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.app.ui.Availability
 import com.carpet.satdemo.app.ui.Capability
@@ -332,45 +341,71 @@ class AppRuntime(private val host: Application) {
     private val _aiGranted = MutableStateFlow(ai.granted)
     val aiGranted: StateFlow<PermissionTier> = _aiGranted
 
-    enum class ChatFrom { Me, Ai }
-
-    data class ChatLine(
-        val from: ChatFrom,
-        val text: String,
-        val source: ReplySource = ReplySource.LocalRule,
-        val skill: String? = null,
-        val proactive: Boolean = false,
+    /**
+     * 对话的唯一一条接线：入账 → 该不该触发技能 → 答 → 回镜给圆屏。
+     * 逻辑本体在 `core/ai/DialogBridge`（那边才有真单测，彩排台和手机跑的也才是同一份），
+     * 这里只填三个口子：事实表、往屏发一帧、宿主自己的协程作用域。
+     */
+    private val dialog = DialogBridge(
+        gateway = ai,
+        facts = { aiContext() },
+        push = { d -> runtime.pushDialog(d) },
+        launch = { body -> scope.launch { body() } },
+        note = { line -> runtime.log(line) },
     )
 
-    private val _chat = MutableStateFlow(
-        listOf(
-            ChatLine(
-                ChatFrom.Ai,
-                "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答 —— " +
-                    "回答只来自手机这边的真实状态，没配模型端点之前不会编话。",
-            ),
-        ),
-    )
-    val chat: StateFlow<List<ChatLine>> = _chat
+    /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
+    val chat: StateFlow<List<Turn>> = dialog.log.turns
 
-    private var aiBusy = false
+    /** 工程模式/演示要用：屏在不在、能不能说话 */
+    val screenDialog: Boolean get() = runtime.screenCanTalk
+
     private var aiLoop: Job? = null
-    private val heartbeat = Heartbeat()
 
-    /** 一次问答。忙的时候直接回"我在想上一条"，不排队 —— 排队会让用户以为按了两次就发两遍 */
-    fun askAi(question: String) {
-        val q = question.trim()
-        if (q.isEmpty() || aiBusy) return
-        aiBusy = true
-        _chat.value = _chat.value + ChatLine(ChatFrom.Me, q)
-        scope.launch {
-            try {
-                val r = ai.ask(q, aiContext())
-                _chat.value = _chat.value + ChatLine(ChatFrom.Ai, r.text, r.source, r.skill)
-            } finally {
-                aiBusy = false
-            }
-        }
+    /**
+     * 手机上问一句。[turnId] 由调用方给：圆屏起的那一轮必须沿用它那个 id，
+     * 否则手机把问和答记成两轮，屏上那条追问也钉不回原来的对话。
+     */
+    fun askAi(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null) {
+        scope.launch { dialog.ask(question, via, turnId) }
+    }
+
+    /**
+     * 工程模式的对话自检：**投一帧"圆屏说的话"进来，走的是真链路同一段代码**
+     * （[DialogBridge.onScreenFrame]），不是另写一遍好让页面上有东西可点。
+     *
+     * 明天圆屏到货前这三颗键就能验完整条：入账 → 过闸 → 触发技能 → 镜像回屏。
+     * 到货后表现不对，先按它一次，能立刻分清是链路的问题还是这段逻辑的问题。
+     */
+    fun simulateScreenQuestion(text: String, source: DialogSource = DialogSource.asr) {
+        runtime.log("自检：模拟圆屏说「$text」（${source.name}）")
+        dialog.onScreenFrame(
+            ScreenMessage(
+                t = MsgType.dialog,
+                seq = 0,
+                ts = System.currentTimeMillis(),
+                dialog = DialogPayload(
+                    turnId = "t-sim-" + System.nanoTime().toString(36),
+                    dir = DialogDir.up,
+                    text = text,
+                    source = source,
+                    origin = DialogOrigin.screen,
+                ),
+            ),
+        )
+    }
+
+    /** 首屏那一句开场白。走记录而不是硬塞进 UI，是为了让它也镜像得到圆屏 */
+    private fun greet() {
+        dialog.log.append(
+            Turn(
+                from = TurnFrom.Ai,
+                text = "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答 —— " +
+                    "回答只来自手机这边的真实状态，没配模型端点之前不会编话。",
+                source = ReplySource.LocalRule,
+                turnId = "t-greet",
+            ),
+        )
     }
 
     /** 端点配置。**只填不全就当作没配**：宁可显示"未接真源"，也不要现场等一次 12 秒超时 */
@@ -397,29 +432,9 @@ class AppRuntime(private val host: Application) {
 
     fun aiSkills(): List<AiSkillRow> = ai.skills.all.map { AiSkillRow(it.title, it.needs, ai.can(it.id)) }
 
-    /** 事实表：全部从状态机读，一个都不新造（core/ai 的设计前提） */
-    fun aiContext(): SkillContext {
-        val s = runtime.status.value.snapshot
-        val u = runtime.engine.usage()
-        return SkillContext(
-            scene = _scene.value.label,
-            phase = s?.sat?.phase?.name,
-            secondsToNextPass = s?.sat?.nextPassInS,
-            passWindowSec = s?.sat?.nextPassDurS,
-            moduleOnline = s?.sat?.moduleOk,
-            gnssLat = s?.gnss?.lat?.takeIf { it != 0.0 },
-            gnssLon = s?.gnss?.lon?.takeIf { it != 0.0 },
-            queueWaiting = s?.sat?.queuePending,
-            queueCapacity = s?.sat?.queueCapacity,
-            handedOver = u.handedOver,
-            phoneBattery = s?.phoneBattery,
-            ephemerisFresh = s?.sat?.ephState?.name?.let { it == "SUCCESS" },
-            fenceActive = s?.fence?.active,
-            fenceInside = s?.fence?.takeIf { it.active }?.inside,
-            screensOnline = runtime.status.value.clients,
-            aiEndpointConfigured = _endpoint.value.configured,
-        )
-    }
+    /** 事实表：本体在 `core/ai/Facts`，和桌面彩排台共用同一份实现 */
+    fun aiContext(): SkillContext =
+        runtime.skillContext(_scene.value.label, _endpoint.value.configured)
 
     /** 主动扫描。10 秒一轮，够快也不至于把对话刷屏 */
     private fun startAiLoop() {
@@ -427,9 +442,7 @@ class AppRuntime(private val host: Application) {
         aiLoop = scope.launch {
             while (true) {
                 delay(AI_SCAN_MS)
-                heartbeat.scan(aiContext()).forEach { tip ->
-                    _chat.value = _chat.value + ChatLine(ChatFrom.Ai, tip.text, skill = tip.skill, proactive = true)
-                }
+                dialog.scanProactive()
             }
         }
     }
@@ -499,6 +512,8 @@ class AppRuntime(private val host: Application) {
 
     /** 圆屏上的按键动作。在 App 启动服务之后才会被填上 */
     internal fun wireCommands() {
+        greet()
+        runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
         runtime.onCommand = { msg ->
             val cmd = msg.command?.cmd
             runtime.log("展示端指令 $cmd")

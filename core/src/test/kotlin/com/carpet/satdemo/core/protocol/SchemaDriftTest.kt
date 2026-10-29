@@ -31,6 +31,7 @@ class SchemaDriftTest {
             "event" to listOf("event"),
             "command" to listOf("command"),
             "ack" to listOf("ack"),
+            "dialog" to listOf("dialog"),
         )
         val descs = listOf<SerialDescriptor>(
             ScreenMessage.serializer().descriptor,
@@ -39,6 +40,7 @@ class SchemaDriftTest {
             EventPayload.serializer().descriptor,
             CommandPayload.serializer().descriptor,
             AckPayload.serializer().descriptor,
+            DialogPayload.serializer().descriptor,
         )
         // state 里再往里一层：这几块才是圆屏真正画的东西
         val inner = listOf(
@@ -67,6 +69,36 @@ class SchemaDriftTest {
         for (key in required) {
             assertTrue(key in props(state).keys, "state 的 required 说了个不存在的字段：$key")
             assertTrue(key !in defaulted, "$key 有默认值，App 漏发也不会报错，不该出现在 required 里")
+        }
+    }
+
+    @Test
+    fun `schema 说的 t 枚举和契约版本必须和 Kotlin 一致`() {
+        // 固件照 schema 手写 if-else 分派，所以"代码里加了个类型但 schema 没写"= 那条类型永远解不出来。
+        // dialog 就是这么差点漏掉的：Kotlin 有 MsgType.dialog、schema 没有，
+        // 表现是"屏能说话、App 装了没反应"，而现场只会怀疑网络
+        val root = schema()
+        val types = root["properties"]!!.jsonObject["t"]!!.jsonObject["enum"]!!
+            .jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(MsgType.values().map { it.name }.toSet(), types.toSet(), "t 的两边取值不一致")
+
+        val versions = root["properties"]!!.jsonObject["v"]!!.jsonObject["enum"]!!
+            .jsonArray.map { it.jsonPrimitive.content.toInt() }
+        assertEquals(ScreenCodec.SUPPORTED_VERSIONS, versions.toSet(), "schema 收的版本和 SUPPORTED_VERSIONS 不一样")
+        assertTrue(ScreenCodec.CONTRACT_VERSION in versions)
+    }
+
+    @Test
+    fun `dialog 的必填项在 Kotlin 侧真的没有默认值`() {
+        // turn_id / dir / text 缺任何一个，这条对话都钉不回那一轮：
+        // 少 turn_id 去重失效（屏上按两下出两条回答），少 dir 分不清是问还是答
+        val d = at(schema(), listOf("dialog"))!!
+        val required = d["required"]!!.jsonArray.map { it.jsonPrimitive.content }
+        val desc = DialogPayload.serializer().descriptor
+        val defaulted = (0 until desc.elementsCount).filter { desc.isElementOptional(it) }.map { desc.getElementName(it) }
+        for (key in required) {
+            assertTrue(key in props(d).keys, "dialog 的 required 说了个不存在的字段：$key")
+            assertTrue(key !in defaulted, "$key 有默认值，$key 就不该出现在 required 里")
         }
     }
 

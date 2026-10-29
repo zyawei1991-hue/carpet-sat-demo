@@ -31,6 +31,21 @@ class SkillRegistry(skills: List<Skill>) {
     fun byId(id: String): Skill? = list.firstOrNull { it.id == id }
 }
 
+/** 已经锁上星、正在窗口里的相位。这些时候"距下次过顶"这个数已经没有意义了 */
+private val IN_WINDOW = setOf("locked", "tx_pending", "tx_ok", "tx_fail", "tx_no_ack")
+
+/**
+ * 「下一次过顶」那半句。**窗口内 secondsToNextPass 就是 0**，照字面念成了"还有 0 秒"，
+ * 用户会以为星正在头顶，而其实我们已经锁住了 —— 那时候该说的是"正在窗口内"。
+ * 空串表示这事现在没得说（还没算出过境时间），由调用方决定兜底话。
+ */
+internal fun passSentence(c: SkillContext): String = when {
+    c.phase in IN_WINDOW -> "正在过境窗口内。"
+    c.secondsToNextPass == null -> ""
+    c.secondsToNextPass <= 0 -> "窗口已经打开。"
+    else -> "下一次过顶还有 ${c.secondsToNextPass} 秒。"
+}
+
 /**
  * 内置技能。每条都只说**自己那格数据里真有的东西**；
  * 没数据源的一律回"这条我现在说不了"，并且 `mocked=false` —— 桩不是 mock，桩是**不答**。
@@ -58,8 +73,7 @@ object BuiltinSkills {
                     skillId = "link.status",
                     intent = "链路状态查询",
                     fields = f,
-                    line = "当前相位 ${c.phase ?: "未知"}，$module。" +
-                        (c.secondsToNextPass?.let { "下一次过顶还有 $it 秒。" } ?: ""),
+                    line = "当前相位 ${c.phase ?: "未知"}，$module。" + passSentence(c),
                 )
             },
 
@@ -82,8 +96,8 @@ object BuiltinSkills {
                     line = when {
                         c.ephemerisFresh == false ->
                             "星历已经过期，窗口算不准了。联网更新一次才能给时间 —— 这不是说没卫星。"
-                        s == null -> "还没有可用的过境时间。"
-                        else -> "下一次过顶 $s 秒后，窗口大约 ${c.passWindowSec ?: "?"} 秒。"
+                        else -> passSentence(c).ifEmpty { "还没有可用的过境时间。" } +
+                            (c.passWindowSec?.takeIf { it > 0 }?.let { "窗口大约 $it 秒。" } ?: "")
                     },
                 )
             },
