@@ -1,6 +1,6 @@
 # 车宠卫星通信融合 Demo
 
-手机 + GT1005 卫星终端 + 微雪圆屏 三件套。对应《04_车宠卫星通信Demo_新架构方案_V2.0.docx》。
+手机 + GT1005 卫星终端 + 微雪圆屏 三件套。对应《04_车宠卫星通信Demo_新架构方案_V2.0.docx》，原件在 `docs/source/`。
 
 > **这个仓库含第三方给的二进制**：`apps/android/libs/*.aar` 是时空道宇 2026-10 提供的星历与基础通信 SDK，
 > 不是我们的成果，也按不到开源许可上。仓库保持 **private**；要公开或对外授权前，
@@ -20,6 +20,9 @@
 | `tools/validate_protocol.py` | 契约校验，CI 入口 |
 | `apps/android/` | Gradle `:app`。手机 App 薄壳（定位、蜂窝探测、展示端服务、按钮） |
 | `core/` | Gradle `:core`。纯 Kotlin JVM，协议 / 链路状态机 / SatelliteModem / DemoEngine |
+| `docs/source/` | 客户给的原始方案：`04_..._V2.0.docx` 原件 + `doc.txt` 纯文本（能 grep 的那份）。本仓库所有"文档里说…"的指认都以它为准 |
+| `docs/reference/` | 硬件选型时存下来的产品页快照（微雪 1.75 / 1.75B、PG 板、RP2350），DECISIONS 里那些屏参和芯片型号出自这几页 |
+| `vendor/gt1005/` | **时空道宇的原始交付物**：两个 SDK zip + 28 页《通用数据接口规范》正文。不是我们的成果，见该目录 README 的保密说明 |
 | `firmware/screen/` | 展示端固件的链路层：`screen_link` 组件、`HANDOFF.md` 操作手册、`tools/fake-phone.mjs` 假手机服务端 |
 | `simulator/` | 展示端桌面模拟器：假卫星模块 + 466×466 圆屏，硬件到货前把整条链路彩排一遍 |
 
