@@ -151,12 +151,12 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
                 if (sat?.moduleOk == false) "离线" else left?.let { if (it <= 0) "开窗" else "${it}s" } ?: "--",
                 satTone,
             ),
-            RailItem("守护", if (app.guardPinned) "在跑" else "未常驻", if (app.guardPinned) Tone.Ok else Tone.Wait),
+            RailItem("守护", if (app.guardPinned) "在跑" else "没跑", if (app.guardPinned) Tone.Ok else Tone.Wait),
         ),
     )
     // SOS 不在这条里。它原来钉在这行的右端，理由是"不滚动就能按到"—— 判断对，位置错：
     // 384dp（Mate60）上三枚芯片 + 一颗钮装不下，被挤的只能是那颗钮，全页最要紧的入口
-    // 被拆成两行竖排。现在它由装配层钉在导航栏上面一格（[SosFab]），四个页面都在
+    // 被拆成两行竖排。现在它在底部导航栏正中（[SosDial]），四个页面都在，也不挡任何内容
 }
 
 /**
@@ -191,15 +191,7 @@ private fun AssistantHero(app: AppRuntime) {
 
         if (chat.isEmpty()) Text("还没有对话。问一句，或者点下面那几个词。", style = Type.Caption, color = Ink.TextLow)
         chat.takeLast(3).forEach { line -> Bubble(app, line) }
-        if (chat.size > 3) Text("共 ${chat.size} 条，这里只显示最近 3 条", style = Type.Caption, color = Ink.TextLow)
-
-        AnimatedVisibility(visible = !endpoint.configured, enter = Motion.expandIn, exit = Motion.expandOut) {
-            Text(
-                "现在每一句回答都来自手机自己的状态：数字是真的，但说话的是规则不是模型。",
-                style = Type.Caption,
-                color = Ink.Wait,
-            )
-        }
+        if (chat.size > 3) Text("共 ${chat.size} 条，只显示最近 3 条", style = Type.Caption, color = Ink.TextLow)
 
         // **横向可滚，不许折行**：Row 不会换行，装不下的那颗只能把字竖着拆开
         // （截图里"车/在/哪"排成三行，是这一版最难看的一处）
@@ -273,11 +265,6 @@ private fun AssistantHero(app: AppRuntime) {
                     colors = ButtonDefaults.buttonColors(containerColor = Ink.Sat, contentColor = Ink.Deep),
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("保存并重连") }
-                CollapsableNote(
-                    "为什么填一半算没配",
-                    "三项填齐才算配上，填一半当作没配 —— 宁可退回本机规则，也不让首屏一直转圈。" +
-                        "要让它说本机以外的事，去「我的 → 主理人与模型」调权限档。",
-                )
             }
         }
     }
@@ -473,8 +460,8 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
             Text(if (open) "收起配对" else "配对新的圆屏", style = Type.Caption, color = Ink.Sat)
         }
         CollapsableNote(
-            "为什么配对是这三步",
-            "圆屏自己是客户端、手机是服务端，所以配对就是：放开接入 → 加白名单 → 圆屏填这个地址。",
+            "配对怎么做",
+            "手机这边放开接入、把圆屏编号加进白名单，再到圆屏上填上面那个接入点地址。",
         )
     }
 }
@@ -487,7 +474,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
 @Composable
 private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolean, onToggle: () -> Unit) {
     val sat = st.snapshot?.sat
-    val phase = sat?.phase?.name ?: "—"
+    val phase = sat?.phase?.let { phaseLabel(it) } ?: "—"
     val left = sat?.nextPassInS
     val moduleOff = sat != null && !sat.moduleOk
     val tone = when {
@@ -520,7 +507,7 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
                     style = Type.Body,
                 )
                 Text(
-                    if (open) "收起完整链路卡" else "展开：链路卡与过境卡",
+                    if (open) "收起卫星详情" else "展开卫星详情",
                     style = Type.Caption,
                     color = Ink.Sat,
                     modifier = Modifier.clickable { onToggle() },
@@ -533,7 +520,7 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
                 Text(t, style = Type.Numeric.copy(color = tone.color))
             }
         }
-        // **这颗钮挪到顶部状态条了，这里不再放第二颗**：同一页两个 SOS，出事时人只会先按错一个。
+        // 这里不放 SOS：那一颗在底部导航栏正中（[SosDial]），同一页两个入口只会让人按错一个。
         // 撤销那条回显留在原地 —— 它讲的是"刚才按的那下有没有生效"，属于这张卡的账
         val cancel by app.cancelLine.collectAsState()
         cancel?.let { Text(it, style = Type.Caption, color = Ink.Wait) }

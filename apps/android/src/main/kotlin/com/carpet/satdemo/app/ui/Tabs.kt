@@ -60,7 +60,7 @@ private fun Page(
 @Composable
 fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
-    Page("车辆", "用车养车 · 数据通道未接，卡片会打「示意数据」", modifier = modifier) {
+    Page("车辆", "用车养车 · 卡片标「示意数据」", modifier = modifier) {
         SceneActions(app.scene.value.profile.actions, app)
         CardStream(app.orderedCards(Scene.Vehicle), scope)
     }
@@ -86,7 +86,7 @@ fun MeTab(
 ) {
     val scope = CardScope(app, status)
     val flags by app.flags.collectAsState()
-    Page("我的", "设备与底座 · 订阅与流量包 · 隐私中心", modifier = modifier) {
+    Page("我的", "设备 · 订阅 · 隐私", modifier = modifier) {
         RenderCard("device.manager", scope)
         InkCard(icon = MIcons.task) {
             CardTitle("运行与服务")
@@ -176,13 +176,13 @@ private fun AssistantSettings(app: AppRuntime) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(r.title, style = Type.Body, modifier = Modifier.weight(1f))
-                Text(r.needs.label, style = Type.Caption, color = Ink.TextLow)
+                // 准许的那几条不重复标档位：它们要的都≤上面那个当前档，只有拦下的那条需要说清差在哪
+                if (!r.allowed) Text(r.needs.label, style = Type.Caption, color = Ink.TextLow)
                 Badge(if (r.allowed) "准许" else "拦下", if (r.allowed) Tone.Ok else Tone.Wait)
             }
         }
         Text(
-            "密钥只存这台手机，不进日志、不进原始数据。「发求救」那一档就算放开，它也只会提示你自己去长按 —— " +
-                "不可逆的动作不由对话触发。",
+            "密钥只存这台手机。「发求救」不会由对话发出，只会提示你自己去长按。",
             style = Type.Caption,
             color = Ink.TextLow,
         )

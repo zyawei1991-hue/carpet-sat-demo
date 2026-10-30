@@ -9,13 +9,13 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
@@ -52,31 +52,7 @@ fun CarpetRoot(app: AppRuntime) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = Ink.Deep,
-        bottomBar = {
-            Column {
-                // SOS 常驻位。**不做成悬浮胶囊**：悬浮那颗在「我的」这一页正好压在开关上
-                // （Mate60 截图），而这一页每一行的可点控件都贴着右边缘。
-                // 放在导航栏上面一格，四个页面都看得见、按得到，且永远不挡内容。
-                SosSlot(app)
-                NavigationBar(containerColor = Ink.Card, tonalElevation = 0.dp) {
-                    Tabs.forEachIndexed { i, t ->
-                        NavigationBarItem(
-                            selected = i == tab,
-                            onClick = { app.setTab(i) },
-                            icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
-                            label = { Text(t.label, style = Type.Caption) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = Ink.TextHigh,
-                                selectedTextColor = Ink.TextHigh,
-                                unselectedIconColor = Ink.TextLow,
-                                unselectedTextColor = Ink.TextLow,
-                                indicatorColor = Ink.Track,
-                            ),
-                        )
-                    }
-                }
-            }
-        },
+        bottomBar = { BottomBar(app, tab) },
     ) { insets ->
         Box(modifier = Modifier.padding(insets)) {
             AnimatedContent(
@@ -99,17 +75,41 @@ fun CarpetRoot(app: AppRuntime) {
 }
 
 /**
- * 导航栏上面那一格：常驻的 SOS 入口。
+ * 底部那一格：四个导航位 + 正中间一颗 SOS 圆钮。
  *
- * 四个产品页共用这一格 —— SOS 不该取决于"当前恰好停在哪个 Tab"。
- * 工程模式页在 [CarpetRoot] 开头就 return 了，走不到这里。
+ * 为什么在中间而不是悬浮胶囊或导航栏上面一格：这一颗是**常驻安全件**，
+ * 悬浮件可以压文字、不可以压控件（在「我的」那一页它正好压住开关行），
+ * 而导航栏正中既永远看得见、又永远不挡内容 —— 四个页面共用同一格位置。
+ *
+ * 中间那颗占一个和导航位等宽的位置，所以 360dp 窄屏上五格都装得下，
+ * 不会像原来那样把最要紧的东西挤成竖排。
  */
 @Composable
-private fun SosSlot(app: AppRuntime) {
-    Box(
-        modifier = Modifier.fillMaxWidth().background(Ink.Deep).padding(horizontal = Grid.Page, vertical = Grid.x8),
-        contentAlignment = Alignment.CenterEnd,
-    ) { SosFab(app) }
+private fun BottomBar(app: AppRuntime, tab: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth().height(80.dp).background(Ink.Card),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Tabs.forEachIndexed { i, t ->
+            if (i == 2) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) { SosDial(app) }
+            }
+            NavigationBarItem(
+                selected = i == tab,
+                onClick = { app.setTab(i) },
+                modifier = Modifier.weight(1f),
+                icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
+                label = { Text(t.label, style = Type.Caption) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Ink.TextHigh,
+                    selectedTextColor = Ink.TextHigh,
+                    unselectedIconColor = Ink.TextLow,
+                    unselectedTextColor = Ink.TextLow,
+                    indicatorColor = Ink.Track,
+                ),
+            )
+        }
+    }
 }
 
 private data class TabSpec(

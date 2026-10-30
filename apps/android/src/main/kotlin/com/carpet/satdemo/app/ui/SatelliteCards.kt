@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -30,6 +32,7 @@ import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.link.SosCopy
 import com.carpet.satdemo.core.protocol.GnssSource
+import com.carpet.satdemo.core.protocol.AccessService
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.SatState
 import com.carpet.satdemo.core.protocol.SosLevel
@@ -65,6 +68,25 @@ private fun phaseLine(p: LinkPhase, clients: Int): String = when (p) {
     LinkPhase.RECOVER -> "蜂窝已恢复，正在补发离线期间攒下的消息"
 }
 
+/** 那一行大字。枚举原名（CELL/PROBE）是线格式里的词，不该出现在车主屏幕上 */
+private fun linkWord(p: LinkPhase): String = when (p) {
+    LinkPhase.CELL -> "蜂窝"
+    LinkPhase.PROBE -> "探活中"
+    LinkPhase.SAT -> "卫星"
+    LinkPhase.RECOVER -> "补发中"
+}
+
+/** 卫星那一侧的相位。同样只念人话：tx_no_ack 这种串只有我们自己看得懂 */
+internal fun phaseLabel(p: SatPhase): String = when (p) {
+    SatPhase.idle -> "空闲"
+    SatPhase.searching -> "搜星中"
+    SatPhase.locked -> "已锁定"
+    SatPhase.tx_pending -> "排队中"
+    SatPhase.tx_ok -> "卫星已收到"
+    SatPhase.tx_fail -> "发送失败"
+    SatPhase.tx_no_ack -> "星上没确认"
+}
+
 internal fun minuteSecond(sec: Long): String {
     val m = sec / 60
     val r = sec % 60
@@ -79,7 +101,7 @@ fun LinkCard(s: CardScope) {
     val tone = phaseTone(st.phase)
     InkCard(icon = MIcons.signal, tone = tone, emphasis = true) {
         CardTitle("链路", trailing = st.localIp?.let { "接入点 $it" })
-        Text(st.phase.name, style = Type.Hero.copy(color = tone.color))
+        Text(linkWord(st.phase), style = Type.Hero.copy(color = tone.color))
         Text(phaseLine(st.phase, st.clients), style = Type.Body)
         if (snap == null) {
             Text("还没有收到第一条状态，稍等一下", style = Type.Caption)
@@ -164,10 +186,10 @@ fun SosCard(s: CardScope) {
                 }
             }
         } else {
-            // 这张卡里不再画第二颗长按钮：屏幕下角那颗常驻的（[SosFab]）每一页都在，
+            // 这张卡里不再画第二颗长按钮：导航栏正中那颗（[SosDial]）每一页都在，
             // 同一屏两颗 SOS，出事时人只会先按错一个。这张卡管的是"那颗按下去之后是什么状态"
             Text(
-                "按住屏幕下角那颗「长按 SOS」三秒才生效，中途松手就取消",
+                "按住底部中间那颗红色 SOS，三秒才生效，中途松手就取消",
                 style = Type.Caption,
                 color = Ink.TextLow,
             )
@@ -206,81 +228,46 @@ private fun ArmSegments(done: Int) {
 }
 
 /**
- * 按住才生效的那颗钮。**没用 Material 的 Button**：Button 自带 clickable，
- * 会和长按的手势抢事件，抢输的那一方会把"按住"变成"点一下就没了"。
- * 求救钮宁可样式土一点，也不能在关键时刻不按手势办事。
+ * 底部导航栏正中那颗 SOS 圆钮：按住三秒才生效，中途松手就取消。
+ *
+ * **没用 Material 的 Button**：Button 自带 clickable，会和长按的手势抢事件，
+ * 抢输的那一方把"按住"变成"点一下就没了"。求救钮宁可样式土一点，
+ * 也不能在关键时刻不按手势办事。
  *
  * `detectTapGestures(onPress = …)` + `tryAwaitRelease()` 是这条路唯一不留歧义的写法：
- * 抬手返回 true，被父级滚动抢走返回 false —— 两种都要走到 onUp，
- * 因为"没发出去"和"被页面滚动打断"对用户是同一件事：松手了，什么都没发生。
+ * 抬手返回 true，被父级抢走返回 false —— 两种都要走到 onUp，因为"没发出去"和
+ * "被页面滚动打断"对用户是同一件事：松手了，什么都没发生。
+ * 挂进导航栏之后这件事基本不会发生了 —— 它不在可滚的 Column 里。
  */
 @Composable
-internal fun HoldToFire(
-    onDown: () -> Unit,
-    onUp: () -> Unit,
-    label: String = "长按 3 秒触发 SOS",
-    compact: Boolean = false,
-    modifier: Modifier = Modifier,
-    /** 卡片里铺满一行；[SosFab] 那颗常驻钮要的是"一枚能按的胶囊"，那里传 false */
-    fill: Boolean = true,
-) {
-    val shape = RoundedCornerShape(if (compact) Round.Pill else Grid.x12)
+fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
+    val arm by app.arm.collectAsState()
     Box(
         modifier = modifier
-            .then(if (fill) Modifier.fillMaxWidth() else Modifier)
-            .shadow(if (compact) 10.dp else 0.dp, shape)
-            .background(Ink.Alert, shape)
+            .size(56.dp)
+            .shadow(10.dp, CircleShape)
+            .background(Ink.Alert, CircleShape)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = {
-                        onDown()
+                        app.pressDownSos()
                         tryAwaitRelease()
-                        onUp()
+                        app.releaseSos()
                     },
                 )
             },
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            label,
-            // **compact 一律不许换行**：这颗钮窄的时候是"一枚胶囊"，一旦折行就变成
-            // 两行竖排的红块，全页最要紧的入口长得最难看（Mate60 真机照片）
-            style = if (compact) Type.Body.copy(fontWeight = FontWeight.SemiBold) else Type.Hero,
+            // 按下去之后钮上就是剩下的秒数：教"松手能取消"这件事，不必另外写一行字
+            if (arm.active) "${arm.leftMs / 1000 + 1}" else "SOS",
+            style = Type.Body.copy(fontWeight = FontWeight.Bold),
             color = Color.White,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip,
-            modifier = Modifier.padding(
-                horizontal = if (compact) Grid.x16 else 0.dp,
-                vertical = if (compact) Grid.x12 else Grid.x16,
-            ),
         )
     }
-}
-
-/**
- * 常驻的 SOS 入口。装配层把它钉在导航栏上面那一格（`CarpetRoot.SosSlot`）。
- *
- * 它原来钉在首页顶部状态条的右端 —— **"安全件不许藏进折叠线以下"这个判断是对的，
- * 排版的位置是错的**：那一行还要装三枚设备芯片，384dp（华为 Mate60）上装不下，
- * 被挤的恰好只能是 SOS，于是全页最重要的一颗钮被拆成了两行竖排（用户真机照片）。
- *
- * 中间一度改成"悬浮胶囊"，结果在「我的」这一页正好压住开关行的右半截 ——
- * 那一页每一行的可点控件都贴着右边缘。**悬浮件可以压文字，不可以压控件。**
- * 现在它占导航栏上面一格：不挡任何东西，四个页面都在，长按手势也不挂在可滚的 Column 里
- * （挂在里面时，手指按住后稍微一动就被父级抢去滚动，对用户是"我按了，什么都没发生"）。
- */
-@Composable
-fun SosFab(app: AppRuntime, modifier: Modifier = Modifier) {
-    val arm by app.arm.collectAsState()
-    HoldToFire(
-        onDown = { app.pressDownSos() },
-        onUp = { app.releaseSos() },
-        label = if (arm.active) "松手取消 ${arm.leftMs / 1000 + 1}" else "长按 SOS",
-        compact = true,
-        fill = false,
-        modifier = modifier,
-    )
 }
 
 /**
@@ -335,9 +322,9 @@ fun PassWindowCard(s: CardScope) {
             }
             Text(
                 when {
-                    sat?.ephState == null -> "没接星历源"
+                    sat?.ephState == null -> "还没取到星历"
                     ephOk -> "星历可用"
-                    else -> sat.ephFail ?: "星历不可用（${sat.ephState}）"
+                    else -> sat.ephFail ?: "星历暂时算不出来"
                 },
                 style = Type.Caption,
                 color = if (ephOk) Ink.Ok else Ink.Wait,
@@ -355,7 +342,7 @@ fun TerminalCard(s: CardScope) {
         CardTitle("卫星终端", trailing = sat?.fw?.let { "版本 $it" })
         Text(
             when {
-                sat == null -> "还没读到第一帧状态"
+                sat == null -> "还没收到终端状态"
                 !sat.moduleOk -> "终端离线：没供电或者线断了，消息只能先留在手机这边"
                 pct != null -> "终端正在升级，这段时间所有发送都会被挡下"
                 else -> "终端就绪"
@@ -369,7 +356,7 @@ fun TerminalCard(s: CardScope) {
             },
         )
         if (pct != null) ProgressBar(pct / 100f)
-        ValueRow("状态", sat?.phase?.name)
+        ValueRow("状态", sat?.phase?.let { phaseLabel(it) })
         ValueRow("终端电量", sat?.moduleBattery?.let { "$it%" })
     }
 }
@@ -396,11 +383,9 @@ fun QueueCard(s: CardScope) {
 }
 
 /**
- * TPI 位置推送卡。
- *
- * 措辞上限就是"最近一次推送于 N 秒前"：〔码〕实测 `updateLocation()` 返回 void、
- * SDK 又没有 TPI 监听器，**这条路不可观测**（§9 #17），
- * 所以这里不许写"位置已同步"，哪怕底层刚返回 true。
+ * TPI 位置推送卡。**这一张的措辞上限是"最近一次推送于 N 秒前"**：
+ * 厂商的 updateLocation() 是 void、又没有 TPI 监听器，推没推进去在应用侧不可观测，
+ * 所以这里永远不许写"位置已同步"，哪怕底层刚返回 true。
  */
 @Composable
 fun TpiCard(s: CardScope) {
@@ -408,7 +393,7 @@ fun TpiCard(s: CardScope) {
     val age = sat?.tpiAgeS
     val stale = sat?.tpiStale == true
     InkCard(icon = MIcons.terminal, tone = if (stale) Tone.Alert else Tone.Ok) {
-        CardTitle("终端里的位置", trailing = "终端只认手机推给它的这份")
+        CardTitle("终端里的位置")
         Text(
             when {
                 age == null -> "这条链路还没推过位置"
@@ -417,11 +402,6 @@ fun TpiCard(s: CardScope) {
             },
             style = Type.Body,
             color = if (stale) Ink.Alert else Ink.TextHigh,
-        )
-        Text(
-            "推送结果不可回执：SDK 的 updateLocation 没有返回值，所以这里只报时间不报成功",
-            style = Type.Caption,
-            color = Ink.TextLow,
         )
     }
 }
@@ -439,9 +419,8 @@ fun PositionCard(s: CardScope) {
             "新鲜度",
             g?.fixAgeS?.let { if (it > 30) "%.0f 秒前（已过期）".format(it) else "%.0f 秒前".format(it) },
         )
-        Text(
-            if (hasFix) "定位一进来就推给卫星终端，够新就不再推"
-            else "还没有定位。进屋、车里、高楼之间会这样；SOS 仍会发，但会带上「定位已过期」的标记",
+        if (!hasFix) Text(
+            "还没有定位。进屋、车里、高楼之间会这样",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -465,7 +444,7 @@ fun FenceCard(s: CardScope) {
         Text(
             when {
                 f == null || !f.active -> "围栏没开。开了之后越界会走卫星发一条，不等蜂窝"
-                d == null -> if (f.inside) "已在围栏内（距离判定还没接：需要一条轨迹进来）" else "已越界"
+                d == null -> if (f.inside) "已在围栏内" else "已越界"
                 f.inside -> "在围栏内，离边界 %.0f 米".format(d)
                 else -> "已越界 %.0f 米".format(-d)
             },
@@ -491,23 +470,18 @@ fun SentinelCard(s: CardScope) {
     }
 }
 
-/** 展示端（圆屏）接入卡。这一张全是真数据：连了几台、接入点是什么 */
+/** 圆屏接入卡。这一张全是真数据：连了几台、接入点是什么 */
 @Composable
 fun DockCard(s: CardScope) {
     val st = s.status
     InkCard(icon = MIcons.dock, tone = if (st.clients > 0) Tone.Ok else Tone.Wait) {
-        CardTitle("展示端", trailing = if (st.clients > 0) "已连接" else "未连接")
+        CardTitle("圆屏", trailing = if (st.clients > 0) "已连接" else "未连接")
         Text(
-            if (st.clients > 0) "${st.clients} 台圆屏在线，每秒刷一次画面"
+            if (st.clients > 0) "${st.clients} 台圆屏在线"
             else "还没有圆屏连上来。手机和圆屏要在同一个 Wi-Fi，接入点 ws://${st.localIp ?: "—"}",
             style = Type.Body,
         )
         ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)
-        Text(
-            "圆屏和手机显示的是同一份状态，所以两边说法一致",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
     }
 }
 
@@ -534,18 +508,22 @@ fun UsageCard(s: CardScope) {
             // 无效卡的时候连额度都不能信：那组数是从没就绪的模组里读出来的
             Text("这张卡没就绪。额度、等级都不可信，先查卡是否插反", style = Type.Body, color = Ink.Alert)
         }
-        ValueRow("长度等级", u.level?.let { "等级 ${it.level} · ${it.maxBytes} B" }, mono = true)
-        ValueRow("单条可用载荷", "${u.budget.dataFieldBytes} B（按最短的一档算）")
-        ValueRow("业务类型", u.service?.name, mono = true)
+        ValueRow("长度等级", u.level?.let { "${it.level} · ${it.maxBytes} B" }, mono = true)
+        ValueRow("单条可用载荷", "${u.budget.dataFieldBytes} B（按最保守的一档）")
+        ValueRow(
+            "回复接收",
+            u.service?.let { if (it == AccessService.LONG) "终端自动收" else "要主动查" },
+        )
         ValueRow("卡号", u.cardId?.takeIf { it != "1" }, mono = true)
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
         ValueRow("已交终端 / 额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 未知")
+        Text("还在手机里排队的", style = Type.Caption, color = Ink.TextLow)
         QueueDots(u.waiting, u.capacity.takeIf { it > 0 }, Tone.Sat)
         ValueRow("手机这边丢弃", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
         ValueRow("过境后收回", "${u.reclaimed} 条")
         Text(
-            if (u.model == null) "还没读到终端型号，所以额度总数空着 —— 空着比写一个猜出来的数好"
-            else "额度总数还没定，先按最保守的一档显示；「已交终端」只代表交给了终端，不代表已经发出去",
+            if (u.model == null) "还没读到终端型号，额度总数先空着"
+            else "「已交终端」只代表交给了终端，不代表已经发出去",
             style = Type.Caption,
             color = Ink.TextLow,
         )

@@ -137,7 +137,7 @@ class DemoGuardService : Service() {
         }
         return listOfNotNull(
             "链路 $link",
-            "展示端 ${st.clients} 台",
+            "圆屏 ${st.clients} 台",
             if (u.waiting > 0) "待补发 ${u.waiting} 条" else null,
             quota,
         ).joinToString(" · ")

@@ -40,11 +40,6 @@ fun VehicleStatusCard(s: CardScope) {
         ValueRow("油量", "3/4")
         ValueRow("胎压", "2.4 / 2.4 / 2.3 / 2.5 bar")
         ValueRow("累计里程", "23,417 km")
-        Text(
-            "还没接上车机，上面这几个数是示例",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
     }
 }
 
@@ -61,9 +56,9 @@ fun VehicleFindCard(s: CardScope) {
             mono = true,
         )
         ValueRow("记录时间", g?.fixAgeS?.let { "%.0f 秒前".format(it) })
-        ValueRow("车位编号", "B2-073（示意）")
-        Text(
-            if (hasFix) "熄火那一瞬的位置由手机侧记下，不需要车机配合" else "还没有定位，寻车只能靠上一次记下的车位",
+        ValueRow("车位编号", "B2-073")
+        if (!hasFix) Text(
+            "还没有定位，寻车只能靠上一次记下的车位",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -77,7 +72,6 @@ fun VehicleServiceCard(s: CardScope) {
         RowWork("保养", "还有 830 km", Tone.Wait)
         RowWork("轮胎换位", "已逾期 12 天", Tone.Alert)
         RowWork("年检", "明年 3 月", Tone.Neutral)
-        Text("这里是示例数据。接上真车以后，这一格读的是故障码和门店排期", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -109,12 +103,12 @@ fun VehicleEnergyCard(s: CardScope) {
 @Composable
 fun KidsControlCard(s: CardScope) {
     InkCard(icon = MIcons.kid, mock = s.mock(Capability.ChildDevice)) {
-        CardTitle("亲子管控", trailing = "底座：项圈")
+        CardTitle("亲子管控", trailing = "设备：项圈")
         ValueRow("今日屏幕时长", "37 分钟 / 上限 60")
-        ValueRow("内容白名单", "故事、英语、汉字（示意）")
+        ValueRow("内容白名单", "故事、英语、汉字")
         ValueRow("夜间禁用", "21:30 – 06:30")
         Text(
-            "管控规则在家长手机上定，圆屏侧只读。孩子那边没有\"取消\"这个按钮",
+            "规则在家长手机上定，孩子那边没有「取消」",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -125,7 +119,7 @@ fun KidsControlCard(s: CardScope) {
 fun KidsGrowthCard(s: CardScope) {
     InkCard(icon = MIcons.growth, mock = s.mock(Capability.ChildDevice)) {
         CardTitle("成长记录")
-        ValueRow("今天新词", "5 个（示意）")
+        ValueRow("今天新词", "5 个")
         ValueRow("连续打卡", "12 天")
         ValueRow("上次录音", "昨天 19:04")
         Text("记录默认留在这台手机上，云端只存摘要", style = Type.Caption, color = Ink.TextLow)
@@ -139,7 +133,7 @@ fun KidsAiCard(s: CardScope) {
         Text("「今天孩子主动问了 3 次『为什么』，集中在机械类。」", style = Type.Body)
         Text("「建议：把睡前故事换成齿轮主题的绘本。」", style = Type.Body)
         Text(
-            "AI 在这里不给孩子下结论，也不替家长做处罚。任何涉及评价孩子的输出都要能追溯到原文",
+            "AI 不给孩子下结论，也不替家长处罚",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -150,11 +144,11 @@ fun KidsAiCard(s: CardScope) {
 fun HealthVitalsCard(s: CardScope) {
     InkCard(icon = MIcons.health, mock = s.mock(Capability.HealthBand)) {
         CardTitle("体征", trailing = "心率带未接")
-        ValueRow("心率", "72 bpm（示意）")
-        ValueRow("体温", "36.5 ℃（示意）")
+        ValueRow("心率", "72 bpm")
+        ValueRow("体温", "36.5 ℃")
         ValueRow("上次测量", "8 分钟前")
         Text(
-            "体征超阈值走卫星发一条，不等蜂窝。这一张还是示例数据，别当依据",
+            "超阈值走卫星发一条，不等蜂窝",
             style = Type.Caption,
             color = Ink.Wait,
         )
@@ -177,7 +171,6 @@ fun HealthAgentCard(s: CardScope) {
         CardTitle("健康主理人")
         Text("「用药还差一次。要不要现在提醒？」", style = Type.Body)
         Text("动作：提醒一次 / 今天不提醒 / 转给家人", style = Type.Caption)
-        Text("主理人的每一条建议都要能被家长一键关掉，且关掉之后不再重试", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -185,11 +178,11 @@ fun HealthAgentCard(s: CardScope) {
 fun AvatarCard(s: CardScope) {
     InkCard(icon = MIcons.model, mock = s.mock(Capability.AiAgent)) {
         CardTitle("数字分身", trailing = "代答中")
-        ValueRow("今日代答", "9 条（示意）")
+        ValueRow("今日代答", "9 条")
         ValueRow("转真人", "2 条")
         ValueRow("被否决", "1 条")
         Text(
-            "分身代答必须先亮身份。任何一条被对方发现是AI而没提前说明，这个功能就得下线",
+            "每一条代答都会先告诉对方是 AI",
             style = Type.Caption,
             color = Ink.Wait,
         )
@@ -199,10 +192,9 @@ fun AvatarCard(s: CardScope) {
 @Composable
 fun A2aCard(s: CardScope) {
     InkCard(icon = MIcons.chat, mock = s.mock(Capability.AiAgent)) {
-        CardTitle("A2A 社交")
-        ValueRow("在线对象", "3（示意）")
+        CardTitle("分身社交")
+        ValueRow("在线对象", "3")
         ValueRow("待授权共享", "位置 · 行程")
-        Text("跨端协商的授权粒度到字段，不到 App。这里是壳，协议还没定", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -232,9 +224,8 @@ fun SubscriptionCard(s: CardScope) {
             if (u.pressure >= 0.9f) Tone.Alert else Tone.Neutral,
         )
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
-        ValueRow("到期", "2026-12-01（示意）")
-        ValueRow("套餐", "守护版（示意）")
-        Text("额度读的是终端现场，和「卫星用量」那一格是同一个数；套餐与资费还没定，先按示例显示", style = Type.Caption, color = Ink.TextLow)
+        ValueRow("到期", "2026-12-01")
+        ValueRow("套餐", "守护版")
     }
 }
 
@@ -249,7 +240,7 @@ fun PrivacyCard(s: CardScope) {
     val eff = PrivacyTier.effective(base, picked)
     InkCard(icon = MIcons.privacy, mock = s.mock(Capability.Account)) {
         CardTitle("隐私中心", trailing = "取更严的那个")
-        TierRow("底座默认", base, null)
+        TierRow("场景默认", base, null)
         HairLine()
         TierRow("家长设置", picked) { s.app.setPrivacyChoice(it) }
         HairLine()
@@ -306,7 +297,7 @@ fun DeviceManagerCard(s: CardScope) {
     val now = System.currentTimeMillis()
     val allowed = s.app.allowedScreens()
     InkCard(icon = MIcons.terminal) {
-        CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")
+        CardTitle("我的设备", trailing = if (st.running) "守护运行中" else "守护已停")
         // 这一行必须是"钉住了没"，不是"守护开着没"：权限没批的时候 1Hz 照跑，
         // 但锁屏久了会被系统冻住，报"运行中"就是假话
         ValueRow(
@@ -318,7 +309,7 @@ fun DeviceManagerCard(s: CardScope) {
             },
         )
         if (list.isEmpty()) {
-            Text("还没有设备。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)
+            Text("还没有设备。开启守护后会自动登记", style = Type.Caption)
         }
         list.forEach { d -> LedgerRow(s.app, d, now) }
         ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)

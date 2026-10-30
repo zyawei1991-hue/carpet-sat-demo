@@ -627,7 +627,7 @@ fun QueueDots(pending: Int, capacity: Int?, tone: Tone) {
                 )
             }
             if (pending > shown) Text("+${pending - shown}", style = Type.Caption)
-            if (pending == 0) Text("队列空", style = Type.Caption)
+            if (pending == 0) Text("没在排队", style = Type.Caption)
         }
         Text(
             capacity?.let { "$pending/$it" } ?: "$pending",

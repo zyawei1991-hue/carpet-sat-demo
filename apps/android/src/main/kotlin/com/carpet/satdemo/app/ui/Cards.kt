@@ -20,7 +20,7 @@ object Cards {
             CardDescriptor("position", "位置", setOf(Capability.PositionSource)) { PositionCard(it) },
             CardDescriptor("fence", "电子围栏", setOf(Capability.Geofence)) { FenceCard(it) },
             CardDescriptor("sentinel", "哨兵模式", setOf(Capability.Sentinel)) { SentinelCard(it) },
-            CardDescriptor("dock", "展示端", setOf(Capability.Dock)) { DockCard(it) },
+            CardDescriptor("dock", "圆屏", setOf(Capability.Dock)) { DockCard(it) },
 
             // 用车养车
             CardDescriptor("vehicle.status", "车况", setOf(Capability.VehicleBus)) { VehicleStatusCard(it) },
@@ -44,7 +44,7 @@ object Cards {
             CardDescriptor("share.objects", "共享对象", setOf(Capability.Account)) { ShareObjectsCard(it) },
 
             // 我的
-            CardDescriptor("device.manager", "设备与底座", setOf(Capability.Dock)) { DeviceManagerCard(it) },
+            CardDescriptor("device.manager", "我的设备", setOf(Capability.Dock)) { DeviceManagerCard(it) },
             CardDescriptor("subscription", "订阅与流量包", setOf(Capability.Account)) { SubscriptionCard(it) },
             CardDescriptor("privacy", "隐私中心", setOf(Capability.Account)) { PrivacyCard(it) },
         ),

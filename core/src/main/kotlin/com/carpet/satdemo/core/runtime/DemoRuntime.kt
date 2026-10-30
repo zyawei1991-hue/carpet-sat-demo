@@ -318,7 +318,7 @@ class DemoRuntime(
     private fun screenDetail(hello: com.carpet.satdemo.core.protocol.HelloPayload): List<String> =
         listOfNotNull(
             "固件 ${hello.fw}",
-            "底座 ${hello.dockType}",
+            "圆屏 ${hello.dockType}",
             hello.wifiRssi?.let { "Wi-Fi ${it} dBm" },
             hello.batteryMv?.let { "电池 ${it / 1000.0} V" } ?: "外接供电",
             hello.protocols?.let { "契约 ${it.joinToString("/")}" } ?: "契约 未申报 · 按 v1 处理",
