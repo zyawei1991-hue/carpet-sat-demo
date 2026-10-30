@@ -35,9 +35,9 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
 fun VehicleStatusCard(s: CardScope) {
     val parked = s.status.snapshot?.sentinel?.armed == true
     InkCard(icon = MIcons.vehicle, mock = s.mock(Capability.VehicleBus)) {
-        CardTitle("车况", trailing = if (parked) "哨兵布防中" else "熄火停车")
+        CardTitle("整车状态", trailing = if (parked) "哨兵布防中" else "熄火停车")
         ValueRow("剩余续航", "412 km")
-        ValueRow("油量", "3/4")
+        ValueRow("油量", "3/4 箱")
         ValueRow("胎压", "2.4 / 2.4 / 2.3 / 2.5 bar")
         ValueRow("累计里程", "23,417 km")
     }
@@ -46,22 +46,19 @@ fun VehicleStatusCard(s: CardScope) {
 /** 寻车：最后已知位置是**真**的（来自手机 GNSS），只有"车位记忆"那部分是桩 */
 @Composable
 fun VehicleFindCard(s: CardScope) {
-    val g = s.snap?.gnss
-    val hasFix = g != null && !(g.lat == 0.0 && g.lon == 0.0 && g.fixAgeS == null)
+    val fix = s.snap?.gnss?.takeIf { !(it.lat == 0.0 && it.lon == 0.0 && it.fixAgeS == null) }
     InkCard(icon = MIcons.parking, mock = s.mock(Capability.VehicleBus)) {
-        CardTitle("寻车", trailing = "记一次车位")
-        ValueRow(
-            "最后已知位置",
-            if (hasFix) "%.5f, %.5f".format(g!!.lat, g.lon) else null,
-            mono = true,
-        )
-        ValueRow("记录时间", g?.fixAgeS?.let { "%.0f 秒前".format(it) })
+        CardTitle("寻车", trailing = "记一次车位", trailingAction = { s.app.runtime.log("记一次车位：还没接车辆总线，先记在手机这边") })
+        // **没定位就不摆两行 `--`**：那两行说的和下面那句"还没有定位"是同一件事，
+        // 说三遍不只啰嗦，还会让卡片看着像填不满的表（真机照片里"终端电量 --"是同一条 bug）
         ValueRow("车位编号", "B2-073")
-        if (!hasFix) Text(
-            "还没有定位，寻车只能靠上一次记下的车位",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
+        if (fix != null) {
+            ValueRow("记录时间", fix.fixAgeS?.let { "%.0f 秒前".format(it) })
+            // 经纬度是"复制进地图"用的，不是给人读的：排最后、降一档字号，不跟上面两行抢
+            Text("经纬度 %.5f, %.5f".format(fix.lat, fix.lon), style = Type.Mono, color = Ink.TextLow)
+        } else {
+            Text("还没有定位，寻车只能靠上一次记下的车位", style = Type.Caption, color = Ink.TextLow)
+        }
     }
 }
 

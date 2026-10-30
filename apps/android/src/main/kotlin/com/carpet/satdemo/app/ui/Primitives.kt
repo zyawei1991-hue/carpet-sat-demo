@@ -480,7 +480,13 @@ fun Badge(text: String, tone: Tone) {
  * 上一版标题借用 15sp 正文加粗，和正文只差字重，扫读时抓不到锚点。
  */
 @Composable
-fun CardTitle(text: String, trailing: String? = null, icon: ImageVector? = null, tone: Tone = Tone.Neutral) {
+fun CardTitle(
+    text: String,
+    trailing: String? = null,
+    trailingAction: (() -> Unit)? = null,
+    icon: ImageVector? = null,
+    tone: Tone = Tone.Neutral,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -500,7 +506,19 @@ fun CardTitle(text: String, trailing: String? = null, icon: ImageVector? = null,
             }
             Text(text, style = Type.Title)
         }
-        trailing?.let { Text(it, style = Type.Caption, color = Ink.TextLow) }
+        trailing?.let { t ->
+            // 同一个槽位里，"状态"和"能按的动作"必须长得不一样：
+            // 之前"记一次车位"和"熄火停车"都是灰字，用户只能靠试才知道哪个能按
+            if (trailingAction == null) Text(t, style = Type.Caption, color = Ink.TextLow)
+            else Text(
+                t,
+                style = Type.Caption,
+                color = Ink.Sat,
+                modifier = Modifier
+                    .padding(vertical = Grid.x4)
+                    .clickable(onClick = trailingAction),
+            )
+        }
     }
 }
 
@@ -547,13 +565,13 @@ fun HeroStat(
 @Composable
 fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boolean = false) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = Grid.x4),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top,
+        // 标签 12.5、值 15：行高统一到值的 21，两个字号才落在同一条基线带上。
+        // 行距交给卡片的 Column 管，这里不再自己加 padding
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = Type.Caption, modifier = Modifier.padding(end = Grid.x12))
+        Text(label, style = Type.Caption.copy(lineHeight = 21.sp), modifier = Modifier.padding(end = Grid.x12))
         Text(
             value ?: "--",
             // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
@@ -570,6 +588,15 @@ fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boo
 /**
  * 倒计时环。**圆环 = 剩余**（§5.2 第 4 条）。
  * fraction 是"还剩多少"，不是"已经过了多少" —— 反过来会让人以为窗口在变大。
+ *
+ * **这个环只留给"整圈就是全部"的场景**（SOS 那三秒：0→100% 每一步都对应一个动作）。
+ * 过境倒计时原来是画在它上面的，12 分钟的视野里"还剩 9 分"只有 6% 的弧，
+ * 真机照片里那根细绿弧看着像仪表坏了 —— 已改到 [PassWindowCard] 的时间条上。
+ *
+ * **中间那串数字一行装得下才算数**：原来是 [Type.Hero]（24sp 比例字体）写"9 分 21 秒"，
+ * 104dp 的圆里量不到那么宽，于是折成两行、孤零零一个"秒"字压在环的描边上（真机照片第二条）。
+ * 现在换成 [Type.Numeric]（等宽、1Hz 跳秒不抖行）+ maxLines=1 硬约束：
+ * 装不下宁可裁，绝不让它拆行把卡撑歪。
  */
 @Composable
 fun CountdownRing(
@@ -609,119 +636,75 @@ fun CountdownRing(
                 )
             }
         }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(center, style = Type.Hero.copy(color = c))
-            sub?.let { Text(it, style = Type.Caption) }
+        // 内径 = 104 - 2×(线宽 6 + 留白 6) ≈ 76dp：给这串数字的实际可用宽度就是这个数，
+        // "9:21" 四个等宽字符 24sp 约 58dp，留得下；再长就会被裁，所以调用方给的是钟表写法
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(Grid.x4),
+        ) {
+            Text(
+                center,
+                style = Type.Numeric.copy(color = c),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
+            )
+            sub?.let {
+                Text(
+                    it,
+                    style = Type.Caption,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(88.dp),
+                )
+            }
         }
     }
 }
 
 /**
- * 过顶窗口弧线。**弧线 = 一轮卫星周期里能用的那一段**。
+ * 朝向指引。**点 = 该把天线/车头朝哪边**，正北 0° 顺时针（aim_az 的口径）。
  *
- * 只画算得出来的东西：窗口长度 / (等待 + 窗口)。契约里没有"整周期多长"这个字段
- * （SatState 只有 next_pass_in_s / next_pass_dur_s），所以不假装画得出星下点轨迹。
+ * 指针**从 hub 往外画，不穿过圆心**：上一版是从圆心拉一条 4dp 粗的线到边上，
+ * 而中间那枚 "N45°" 正好钉在圆心上 —— 真机照片里那条线把自家标签切成两半，
+ * 这张卡最要紧的两个信息（方向、度数）互相盖住了。现在圆心让给文字，指针只做指针。
+ *
+ * 尺寸从 72dp 降到 56dp：它旁边已经写了"朝 45°（东北）"，一个 56dp 的盘足够说明方位，
+ * 再大就是抢整张卡的注意力。
  */
 @Composable
-fun PassArc(
-    windowFraction: Float,
-    progressInWindow: Float? = null,
-    tone: Tone = Tone.Sat,
-    modifier: Modifier = Modifier,
-) {
-    Canvas(modifier = modifier.fillMaxWidth().height(56.dp)) {
-        val stroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-        // **画成扁椭圆，不画正半圆。** 半径取宽度一半的正圆要 200dp 高才装得下，
-        // 而 Compose 的 Canvas 默认不裁切 —— 第一版就是这么把弧线画到框外，
-        // 直接穿过了上面的倒计时环（截图 harness 拍出来的第一条 bug）。
-        val rx = size.width / 2f - stroke.width
-        val ry = size.height - stroke.width
-        val c = Offset(size.width / 2f, size.height - stroke.width / 2f)
-        val box = Size(rx * 2f, ry * 2f)
-        val origin = Offset(c.x - rx, c.y - ry)
-        drawArc(
-            color = Ink.Track,
-            startAngle = 180f,
-            sweepAngle = 180f,
-            useCenter = false,
-            topLeft = origin,
-            size = box,
-            style = stroke,
-        )
-        drawArc(
-            color = tone.color,
-            startAngle = 180f,
-            sweepAngle = 180f * windowFraction.coerceIn(0f, 1f),
-            useCenter = false,
-            topLeft = origin,
-            size = box,
-            style = stroke,
-        )
-        progressInWindow?.let { p ->
-            val a = Math.toRadians(180.0 + 180.0 * p.coerceIn(0f, 1f))
-            drawCircle(
-                color = Ink.TextHigh,
-                radius = stroke.width,
-                center = Offset(c.x + rx * cos(a).toFloat(), c.y + ry * sin(a).toFloat()),
+fun AimDial(azimuthDeg: Double, tone: Tone = Tone.Sat, modifier: Modifier = Modifier) {
+    val c = if (tone === Tone.Neutral) Ink.TextMid else tone.color
+    Box(modifier = modifier.size(56.dp), contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.matchParentSize()) {
+            val hub = Offset(size.width / 2f, size.height / 2f)
+            val r = size.minDimension / 2f - 5.dp.toPx()
+            drawCircle(color = Ink.Track, radius = r, center = hub, style = Stroke(width = 2.dp.toPx()))
+            // 正北那根刻度：没有它，"盘上那根线"和"北偏东 45°"之间要靠用户自己推
+            drawLine(
+                color = Ink.Outline,
+                start = Offset(hub.x, hub.y - r),
+                end = Offset(hub.x, hub.y - r + 5.dp.toPx()),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
+            val a = Math.toRadians(azimuthDeg - 90.0).toFloat()
+            val ux = cos(a)
+            val uy = sin(a)
+            // 从 0.34r 起画：圆心那格留给标签，指针尾部不越过去
+            drawLine(
+                color = c,
+                start = Offset(hub.x + r * 0.34f * ux, hub.y + r * 0.34f * uy),
+                end = Offset(hub.x + r * ux, hub.y + r * uy),
+                strokeWidth = 3.5.dp.toPx(),
+                cap = StrokeCap.Round,
             )
         }
-    }
-}
-
-/** 朝向指引。**点 = 该把天线/车头朝哪边**，正北 0° 顺时针（aim_az 的口径） */
-@Composable
-fun AimDial(azimuthDeg: Double?, tone: Tone = Tone.Sat, modifier: Modifier = Modifier) {
-    Box(modifier = modifier.size(72.dp), contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.matchParentSize()) {
-            val c = Offset(size.width / 2f, size.height / 2f)
-            val r = size.minDimension / 2f - 6.dp.toPx()
-            drawCircle(color = Ink.Track, radius = r, center = c, style = Stroke(width = 2.dp.toPx()))
-            azimuthDeg?.let { deg ->
-                val a = Math.toRadians(deg - 90.0)
-                drawLine(
-                    color = tone.color,
-                    start = c,
-                    end = Offset(c.x + r * cos(a).toFloat(), c.y + r * sin(a).toFloat()),
-                    strokeWidth = 4.dp.toPx(),
-                    cap = StrokeCap.Round,
-                )
-            }
-        }
-        Text(if (azimuthDeg == null) "无方位" else "N${azimuthDeg.toInt()}°", style = Type.Caption)
-    }
-}
-
-/**
- * 队列点阵。**点 = 待补发的条数**，额度写在右下角（E.10 #8：
- * 光说"待补发 47 条"，没人知道离 GM1003 那 50 个槽只差 3 条）。
- * 点最多画 24 个，多的用 +N 表示 —— 画 500 个点不是信息，是噪声。
- */
-@Composable
-fun QueueDots(pending: Int, capacity: Int?, tone: Tone) {
-    val full = capacity != null && pending >= capacity
-    val shown = min(pending, 24)
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(Grid.x4),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            repeat(shown) {
-                Box(
-                    modifier = Modifier
-                        .size(Grid.x4)
-                        .background(if (full) Ink.Alert else tone.color, CircleShape),
-                )
-            }
-            if (pending > shown) Text("+${pending - shown}", style = Type.Caption)
-            if (pending == 0) Text("没在排队", style = Type.Caption)
-        }
         Text(
-            capacity?.let { "$pending/$it" } ?: "$pending",
-            style = Type.Mono.copy(color = if (full) Ink.Alert else Ink.TextMid),
+            "${azimuthDeg.toInt()}°",
+            style = Type.Caption.copy(color = c, fontWeight = FontWeight.SemiBold),
+            maxLines = 1,
         )
     }
 }

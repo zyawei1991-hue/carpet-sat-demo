@@ -2,6 +2,7 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -22,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.runtime.DemoRuntime
 
@@ -50,14 +53,38 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     }
 }
 
-/** 卡片流。缺能力的卡在这里直接被跳过，不画占位也不报错（§5.3 硬要求 #3） */
+/**
+ * 卡片流。缺能力的卡在这里直接被跳过，不画占位也不报错（§5.3 硬要求 #3）。
+ *
+ * `grouped = true` 时按 [CardGroup] 分段，每段一个 [SectionHead]。**分组只重排"段"，
+ * 段内仍是传进来的顺序** —— 那串 key 是用户在"排列这些卡"里排出来的，页面不许把它按自己的
+ * 表覆盖掉（否则同一个设置在两个页上说法不一样）。段的顺序取每组第一次出现的先后。
+ */
 @Composable
-fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifier) {
+fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifier, grouped: Boolean = false) {
+    if (!grouped) {
+        Column(
+            modifier = modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(Grid.Card),
+        ) {
+            keys.forEach { key -> RenderCard(key, scope) }
+        }
+        return
+    }
+    // 先滤掉没能力的卡：一段里没有一张能画的卡，就不该留一个孤零零的标题
+    val live = keys.filter { Cards.registry.resolve(it, scope) != null }
+    val order = mutableListOf<CardGroup>()
+    live.forEach { if (!order.contains(Cards.registry.group(it))) order += Cards.registry.group(it) }
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(Grid.Card),
+        verticalArrangement = Arrangement.spacedBy(Grid.x16),
     ) {
-        keys.forEach { key -> RenderCard(key, scope) }
+        order.forEach { g ->
+            Column(verticalArrangement = Arrangement.spacedBy(Grid.Card)) {
+                if (g !== CardGroup.Inline) SectionHead(g.label, g.note)
+                live.filter { Cards.registry.group(it) === g }.forEach { RenderCard(it, scope) }
+            }
+        }
     }
 }
 
@@ -68,20 +95,27 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
  *
  * **画成小字块，不画成三颗大按钮**：三颗等高按钮摆在页首，视觉上就是本页的"主行动"，
  * 可它们一个都没接。降级成文字块之后，它读起来是"这个场景会做的事"，而不是"快点我"。
+ *
+ * **不横向滚**：三个词在任何一档视口都装得下，而横向滚动会让人以为后面还有第四个。
+ * 高度给到 44dp —— 它是可点的，点得着比它长得瘦重要。
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
     Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
     ) {
         actions.forEach { a ->
+            // 等宽 + 描边：三颗只填 Ink.Sunk 的方块贴在黑底上，读出来是"页面坏了一块"，不是"能按"
             Box(
                 modifier = Modifier
-                    .background(Ink.Sunk, RoundedCornerShape(Round.Chip))
-                    .clickable { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") }
-                    .padding(horizontal = Grid.x12, vertical = Grid.x8),
-            ) { Text(a, style = Type.Caption, color = Ink.TextMid) }
+                    .weight(1f)
+                    .height(44.dp)
+                    .background(Ink.Raise, RoundedCornerShape(Round.Chip))
+                    .border(1.dp, Ink.Outline, RoundedCornerShape(Round.Chip))
+                    .clickable { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") },
+                contentAlignment = Alignment.Center,
+            ) { Text(a, style = Type.Body, maxLines = 1) }
         }
     }
 }

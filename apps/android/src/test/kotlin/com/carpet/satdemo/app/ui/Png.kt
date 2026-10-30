@@ -14,6 +14,13 @@ import java.util.zip.DeflaterOutputStream
  *  - `Bitmap.compress` 要走 native 图像编码器，Robolectric 给不给全凭版本心情。
  * `java.util.zip`（Deflater/CRC32）在 android.jar 和 JDK 里都在，所以手写 4 个 chunk 最省。
  */
+/**
+ * 截图底噪。真机上这层底色是 `themes.xml` 的 windowBackground 画的，`View.draw()` 不负责它 ——
+ * 不先填进 Bitmap，空白处就是透明，看图工具一律铺白底：近白的标题字被"洗"掉，
+ * 看着像对比度缺陷，其实是 harness 少画了一层。
+ */
+internal val WindowBg: Int = 0xFF0E1116.toInt()
+
 internal fun writePng(file: java.io.File, width: Int, height: Int, argb: IntArray) {
     require(argb.size == width * height) { "像素数对不上：$width x $height != ${argb.size}" }
     val raw = ByteArrayOutputStream(width * height * 4)

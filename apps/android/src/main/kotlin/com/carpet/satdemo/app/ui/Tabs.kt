@@ -56,13 +56,22 @@ private fun Page(
     }
 }
 
-/** Tab2 车辆：车载守护场景的完整卡片流。切到这里**不重新连接任何设备**，只是换一批卡 */
+/**
+ * Tab2 车辆：车载守护场景的完整卡片流。切到这里**不重新连接任何设备**，只是换一批卡。
+ *
+ * 三件事是照着真机照片改的：
+ *  - **分组**（[CardStream] grouped）：这一页原来是 11 张同权重方块，其中 8 张讲卫星管道，
+ *    标题却写着"车辆"。现在按 车况 / 守护 / 卫星兜底 三段走，车主那一问先有答案。
+ *  - **动作挪到页尾**：那三个按钮一个都没接（要车机总线），摆在标题下面就是页面第一眼看
+ *    见的三颗主行动 —— 而它们按下去只会在日志里写一句"还没接"。
+ *  - **不再横向滚**：三个词装得下 360dp，横向滚动那条手势是"你以为还有第四个"的错觉来源。
+ */
 @Composable
 fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
     Page("车辆", "用车养车 · 卫星兜底", modifier = modifier) {
+        CardStream(app.orderedCards(Scene.Vehicle), scope, grouped = true)
         SceneActions(app.scene.value.profile.actions, app)
-        CardStream(app.orderedCards(Scene.Vehicle), scope)
     }
 }
 

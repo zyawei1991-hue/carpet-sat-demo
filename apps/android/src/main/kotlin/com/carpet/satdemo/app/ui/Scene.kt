@@ -69,7 +69,12 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         "用车养车 · 卫星兜底",
         SceneProfile(
             headline = "dock",
-            cards = listOf("sos", "link", "pass", "terminal", "vehicle.status", "vehicle.energy", "fence", "queue", "usage", "position", "vehicle.find"),
+            // **顺序按"车主先看什么"，不按"我们后写的哪张卡"**：
+            // 上一版是 sos/link/pass/terminal 打头，一个写着"车辆"的页，第一屏讲的是卫星管道。
+            // usage 也从这一串里拿掉了 —— 它在「我的」里已经画了一次，一页两张同名重卡是最直接的"乱"。
+            // position 同理：它报的是"手机现在在哪"，而车辆页要的是"车在哪"，那是寻车那张卡的事；
+            // 原始经纬度和 HDOP 留在「户外无网」那一串里，徒步的人才需要自己核对坐标
+            cards = listOf("sos", "link", "vehicle.status", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue"),
             actions = listOf("寻车", "远程熄火", "上报车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
@@ -156,6 +161,7 @@ class CardScope(val app: AppRuntime, val status: DemoRuntime.Status) {
 data class CardDescriptor(
     val key: String,
     val title: String,
+    val group: CardGroup,
     val needs: Set<Capability>,
     val body: @Composable (CardScope) -> Unit,
 )
@@ -170,6 +176,8 @@ class CardRegistry(descriptors: List<CardDescriptor>) {
     }
 
     fun title(key: String): String = byKey[key]?.title ?: key
+
+    fun group(key: String): CardGroup = byKey[key]?.group ?: CardGroup.Inline
 
     val all: List<CardDescriptor> get() = byKey.values.toList()
 }

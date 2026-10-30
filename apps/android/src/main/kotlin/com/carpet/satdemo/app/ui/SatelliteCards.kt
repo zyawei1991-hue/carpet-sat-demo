@@ -1,5 +1,6 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -43,9 +44,6 @@ import com.carpet.satdemo.core.protocol.SosLevel
  */
 
 private const val DAY_S = 86_400L
-
-/** 环按十分钟一圈画，倒计时超过这个视野就只报时间不报比例 */
-private const val HORIZON_S = 600L
 
 /**
  * 倒计时秒数。负数或超过一天的一律当"不知道"：
@@ -91,6 +89,40 @@ internal fun minuteSecond(sec: Long): String {
     val m = sec / 60
     val r = sec % 60
     return if (m > 0) "$m 分 $r 秒" else "$r 秒"
+}
+
+/**
+ * 钟表写法。**大图元旁边那一串数字用它，不用 [minuteSecond]**：
+ * "9 分 21 秒"是 6 个汉字宽，24sp 摆在 104dp 的圆里量不出来，于是折行、"秒"字被裁到描边上
+ * —— 那是真机照片里最难看的一处。"9:21" 四个等宽字符怎么都不会折。
+ */
+private fun clock(sec: Long): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) {
+        "%d:%02d:%02d".format(h, m, s)
+    } else {
+        "%d:%02d".format(m, s)
+    }
+}
+
+/** 图例里的时间只到"分"：精确秒数已经在那个大数字上了，这里再说一遍就是抢位置 */
+private fun minuteOnly(sec: Long): String = if (sec >= 60) "${sec / 60} 分" else "${sec} 秒"
+
+/**
+ * 方位角 → 车主看得懂的方向。数字给的是精确值，汉字给的是"我该往哪边转车身"，
+ * 两个都要：只写 45° 得先想一下东北是多少度（§5.2 第 4 条：形和数都要能读）。
+ */
+private fun dirName(az: Double): String = when (((az + 22.5) % 360.0).toInt() / 45) {
+    0 -> "正北"
+    1 -> "东北"
+    2 -> "正东"
+    3 -> "东南"
+    4 -> "正南"
+    5 -> "西南"
+    6 -> "正西"
+    else -> "西北"
 }
 
 /** 链路主卡。首页首屏那张"状态优先"的卡就是它（§5.1） */
@@ -271,7 +303,7 @@ fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
 }
 
 /**
- * 过境窗口卡。环=剩余，弧线=窗口占这一轮的比例，指北针=该朝哪边。
+ * 过境窗口卡。
  *
  * 星历算不出来时那行人话必须上屏（E.9 / E.10 #7）：`NETWORK_ERROR` 的意思是
  * "没星历也没缓存"，该做的是连一次网；写成"没卫星信号"，用户会举着天线在空旷处白等。
@@ -279,6 +311,17 @@ fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
  * **没数就不画那几个图元。** 上一版没星历时照样画 104dp 的环、56dp 的弧、72dp 的指北针，
  * 一张四百多 dp 高的卡里只有三个 `--` 和一句"还没取到星历" —— 车辆页最难看的就是这张。
  * 图元是给数据准备的容器，没数据时它退成 [EmptyCard] 一行。
+ *
+ * **有数的时候这张卡也整个换过版式**（真机照片：它一个人占了 55% 的视口）：
+ *  - 104dp 的倒计时环 → 去掉。十分钟视野里"还剩 9 分"只有 6% 的绿弧，读出来是"仪表坏了"，
+ *    可它想说的只是一个时间。环形那种"整圈就是全部"的语义留给 SOS 那三秒（[SosCard]）。
+ *  - 56dp 的弧线 → 换成一根 [StackedBar]。同一件事横条 8dp 就说完，还能挂两条图例；
+ *    弧线那 56dp 里一大截是空轨道，占着位置不回答问题。
+ *  - 三行 ValueRow（窗口长度 / 最大仰角 / 仰角判断）→ 合成一句。它们讲的是同一件事
+ *    （"这轮窗口好不好用"），拆三行就成了一张三行的表。
+ *  - 指北针 72dp → 56dp，度数挪到盘旁边那句话里（旧版那根针正压着自己的标签）。
+ *
+ * 四百多 dp 降到一百六十上下，四个信息一个没少。
  */
 @Composable
 fun PassWindowCard(s: CardScope) {
@@ -300,50 +343,80 @@ fun PassWindowCard(s: CardScope) {
         )
         return
     }
-    InkCard(icon = MIcons.pass, tone = Tone.Sat, mock = mock) {
+    val inWindow = left != null && left <= 0L
+    val tone = if (sat?.phase == SatPhase.locked || inWindow) Tone.Ok else Tone.Sat
+    val c = tone.color
+    InkCard(icon = MIcons.pass, tone = tone, mock = mock) {
         CardTitle("下次过境", trailing = sat?.satName?.let { "锁定 $it" })
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CountdownRing(
-                fraction = left?.let { 1f - (it.toFloat() / HORIZON_S).coerceIn(0f, 1f) } ?: 0f,
-                center = left?.let { minuteSecond(it) } ?: "--",
-                tone = if (sat?.phase == SatPhase.locked) Tone.Ok else Tone.Sat,
-                sub = if (left == null) "时间未知" else "剩余",
-            )
-            Column(modifier = Modifier.padding(start = Grid.x16)) {
-                ValueRow("窗口长度", if (dur > 0) minuteSecond(dur) else null)
-                ValueRow("最大仰角", maxEl?.let { "%.0f°".format(it) })
-                ValueRow(
-                    "仰角判断",
-                    maxEl?.let { if (it < 20) "偏低，楼和山体容易挡" else "够用" },
-                    if (maxEl != null && maxEl < 20) Tone.Wait else Tone.Neutral,
+        // 第一行只回答"还要等多久"这一个问题：数字等宽（1Hz 跳秒不抖行），后面跟一句人话
+        if (left == null) {
+            // 窗口算出来了、进入时间没算出来：这是真状态，不许画一个 0:00 让人以为现在就能发
+            Text("这一轮窗口已知，进入时间还在算", style = Type.Body, color = Ink.TextMid)
+        } else {
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            ) {
+                AnimatedContent(
+                    targetState = if (inWindow) "现在" else clock(left),
+                    transitionSpec = { Motion.slideForward(true) },
+                    label = "pass",
+                ) { t ->
+                    Text(t, style = Type.Numeric.copy(color = c))
+                }
+                Text(
+                    if (inWindow) "窗口开着，能直接发" else "后进入窗口",
+                    style = Type.Body,
+                    color = Ink.TextMid,
+                    modifier = Modifier.padding(bottom = 2.dp),
                 )
             }
         }
-        PassArc(
-            windowFraction = if (left == null || dur <= 0 || left + dur <= 0L) 0f
-            else (dur.toFloat() / (left + dur)).coerceIn(0f, 1f),
-            progressInWindow = if (left != null && left <= 0L) 0.5f else null,
-        )
+        // 等待 : 窗口 = 从现在到窗口结束这一整段时间的两段
+        if (left != null && !inWindow && dur > 0) {
+            StackedBar(listOf(left.toInt().coerceAtLeast(1) to Ink.Track, dur.toInt() to c))
+            Row(horizontalArrangement = Arrangement.spacedBy(Grid.x16)) {
+                LegendDot(Ink.Track, "还要等", minuteOnly(left))
+                LegendDot(c, "窗口能发", minuteOnly(dur))
+            }
+        }
+        // 仰角和"够不够用"合成一句：分开写的话没人会分别读它们
+        maxEl?.let { el ->
+            Text(
+                if (el < 20) "最大仰角 %.0f°，偏低：楼和山体容易挡".format(el)
+                else "最大仰角 %.0f°，够用".format(el),
+                style = Type.Caption,
+                color = if (el < 20) Ink.Wait else Ink.TextMid,
+            )
+        }
         // 指北针只在真算得出方向时画。之前没方位也画一个空圆写着"无方位"，
         // 那是把"我们不知道"画成一个待填的图形，用户会去转车身找那个不存在的答案
         sat?.aimAz?.let { az ->
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Grid.x16),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x12),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                AimDial(az)
-                Text("天线/车头朝这个方向", style = Type.Caption, color = Ink.TextMid)
+                AimDial(az, tone)
+                Text(
+                    // 度数只在盘里出现一次：旁边那句话再念一遍 45°，就成了同一件事说两遍
+                    "车头/天线朝%s".format(dirName(az)),
+                    style = Type.Body,
+                    color = Ink.TextHigh,
+                )
             }
         }
     }
 }
 
-/** GT1005 终端卡。升级进度画在这张卡上，因为它决定那排按钮能不能按（E.10 #6） */
+/**
+ * GT1005 终端卡。
+ *
+ * **"终端电量"那一行删了**：core 那个字段是写死的 null（`DemoEngine.snapshot()` 里
+ * `moduleBattery = null` —— 假模组没电可报，真模组的电量口径〔§9〕也还没确认）。
+ * 一行**永远**只会画 `--` 的键值对不是"缺数据"，是"这条根本没有来源"，
+ * 挂在卡上就是真机照片里最扎眼的"看着像坏了"。相位挪进标题右侧，整张卡收成两行。
+ * 升级进度仍画在这张卡上，因为它决定那排按钮能不能按（E.10 #6）。
+ */
 @Composable
 fun TerminalCard(s: CardScope) {
     val sat = s.snap?.sat
@@ -352,12 +425,12 @@ fun TerminalCard(s: CardScope) {
         EmptyCard(
             title = "卫星终端",
             icon = MIcons.hardware,
-            hint = "还没收到终端状态。终端接上后这里给相位、电量和升级进度",
+            hint = "还没收到终端状态。终端接上后这里给相位和升级进度",
         )
         return
     }
     InkCard(icon = MIcons.hardware, tone = if (!sat.moduleOk) Tone.Alert else Tone.Neutral) {
-        CardTitle("卫星终端", trailing = sat.fw?.let { "版本 $it" })
+        CardTitle("卫星终端", trailing = phaseLabel(sat.phase))
         Text(
             when {
                 !sat.moduleOk -> "终端离线：没供电或者线断了，消息只能先留在手机这边"
@@ -372,28 +445,35 @@ fun TerminalCard(s: CardScope) {
             },
         )
         if (pct != null) ProgressBar(pct / 100f)
-        ValueRow("状态", phaseLabel(sat.phase))
-        ValueRow("终端电量", sat.moduleBattery?.let { "$it%" })
     }
 }
 
-/** 补发队列卡。数字和额度一起画（E.10 #8：光说"待补发 47 条"没人知道离 50 只差 3 条） */
+/**
+ * 补发队列卡。数字和额度一起画（E.10 #8：光说"待补发 47 条"没人知道离 50 只差 3 条）。
+ * 额度用一条水位表示满不满，不再画点阵 —— 47 个点既数不过来，也答不出"还剩多少"。
+ */
 @Composable
 fun QueueCard(s: CardScope) {
     val sat = s.snap?.sat
     val pending = sat?.queuePending ?: 0
+    val capacity = sat?.queueCapacity
     val dropped = sat?.queueDropped
-    InkCard(icon = MIcons.queue, tone = if (dropped != null) Tone.Alert else if (pending > 0) Tone.Wait else Tone.Ok) {
-        CardTitle("待发队列", trailing = "点=条数")
-        QueueDots(pending, sat?.queueCapacity, if (pending > 0) Tone.Wait else Tone.Ok)
+    val full = capacity != null && pending >= capacity
+    val tone = if (dropped != null || full) Tone.Alert else if (pending > 0) Tone.Wait else Tone.Ok
+    InkCard(icon = MIcons.queue, tone = tone) {
+        CardTitle("待发队列", trailing = capacity?.let { "$pending / $it 条" } ?: "$pending 条")
+        if (capacity != null && capacity > 0 && pending > 0) {
+            StackedBar(listOf(pending to tone.color, (capacity - pending).coerceAtLeast(0) to Ink.Track))
+        }
         Text(
             when {
                 dropped != null -> "有 $dropped 条因为超时或队列满被挤掉，已重新排队"
+                full -> "队列满了，新的内容先进不来"
                 pending > 0 -> "蜂窝断了也不丢：链路一恢复就补发出去"
                 else -> "没有欠账"
             },
             style = Type.Caption,
-            color = if (dropped != null) Ink.Alert else Ink.TextMid,
+            color = if (dropped != null || full) Ink.Alert else Ink.TextMid,
         )
     }
 }
@@ -536,8 +616,7 @@ fun UsageCard(s: CardScope) {
         ValueRow("卡号", u.cardId?.takeIf { it != "1" }, mono = true)
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
         ValueRow("已交终端 / 额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 未知")
-        Text("还在手机里排队的", style = Type.Caption, color = Ink.TextLow)
-        QueueDots(u.waiting, u.capacity.takeIf { it > 0 }, Tone.Sat)
+        ValueRow("还在手机里排队", "${u.waiting} 条")
         ValueRow("手机这边丢弃", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
         ValueRow("过境后收回", "${u.reclaimed} 条")
         Text(
