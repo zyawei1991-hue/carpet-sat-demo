@@ -72,7 +72,7 @@ class AiGatewayTest {
     fun `没命中时不许编答案`() = runBlocking {
         val r = AiGateway(provider = LocalRuleProvider()).ask("帮我写一首诗", base)
         assertEquals(ReplySource.LocalFallback, r.source)
-        assertContains(r.text, "没有对应的数据口径")
+        assertContains(r.text, "这件事我现在没有数据")
     }
 
     @org.junit.jupiter.api.Test

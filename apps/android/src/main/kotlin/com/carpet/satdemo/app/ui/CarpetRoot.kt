@@ -7,8 +7,11 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
@@ -20,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -49,21 +53,27 @@ fun CarpetRoot(app: AppRuntime) {
         modifier = Modifier.fillMaxSize(),
         containerColor = Ink.Deep,
         bottomBar = {
-            NavigationBar(containerColor = Ink.Card, tonalElevation = 0.dp) {
-                Tabs.forEachIndexed { i, t ->
-                    NavigationBarItem(
-                        selected = i == tab,
-                        onClick = { app.setTab(i) },
-                        icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
-                        label = { Text(t.label, style = Type.Caption) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = Ink.TextHigh,
-                            selectedTextColor = Ink.TextHigh,
-                            unselectedIconColor = Ink.TextLow,
-                            unselectedTextColor = Ink.TextLow,
-                            indicatorColor = Ink.Track,
-                        ),
-                    )
+            Column {
+                // SOS 常驻位。**不做成悬浮胶囊**：悬浮那颗在「我的」这一页正好压在开关上
+                // （Mate60 截图），而这一页每一行的可点控件都贴着右边缘。
+                // 放在导航栏上面一格，四个页面都看得见、按得到，且永远不挡内容。
+                SosSlot(app)
+                NavigationBar(containerColor = Ink.Card, tonalElevation = 0.dp) {
+                    Tabs.forEachIndexed { i, t ->
+                        NavigationBarItem(
+                            selected = i == tab,
+                            onClick = { app.setTab(i) },
+                            icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
+                            label = { Text(t.label, style = Type.Caption) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Ink.TextHigh,
+                                selectedTextColor = Ink.TextHigh,
+                                unselectedIconColor = Ink.TextLow,
+                                unselectedTextColor = Ink.TextLow,
+                                indicatorColor = Ink.Track,
+                            ),
+                        )
+                    }
                 }
             }
         },
@@ -86,6 +96,20 @@ fun CarpetRoot(app: AppRuntime) {
             }
         }
     }
+}
+
+/**
+ * 导航栏上面那一格：常驻的 SOS 入口。
+ *
+ * 四个产品页共用这一格 —— SOS 不该取决于"当前恰好停在哪个 Tab"。
+ * 工程模式页在 [CarpetRoot] 开头就 return 了，走不到这里。
+ */
+@Composable
+private fun SosSlot(app: AppRuntime) {
+    Box(
+        modifier = Modifier.fillMaxWidth().background(Ink.Deep).padding(horizontal = Grid.Page, vertical = Grid.x8),
+        contentAlignment = Alignment.CenterEnd,
+    ) { SosFab(app) }
 }
 
 private data class TabSpec(

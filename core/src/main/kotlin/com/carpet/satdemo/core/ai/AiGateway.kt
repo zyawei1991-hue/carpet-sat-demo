@@ -110,7 +110,7 @@ class AiGateway(
         private const val MAX_TURNS = 20
 
         private const val NO_MATCH =
-            "这件事我现在没有对应的数据口径，不能凭印象答。可以说「链路」「过境」「额度」「圆屏配对」「车在哪」。"
+            "这件事我现在没有数据，不能凭印象答。可以说「链路」「过境」「额度」「圆屏配对」「车在哪」。"
 
         /** 发给模型的事实表。null 一律写成「未知」，不留给模型自由发挥的空位 */
         fun summarize(c: SkillContext): String = buildString {

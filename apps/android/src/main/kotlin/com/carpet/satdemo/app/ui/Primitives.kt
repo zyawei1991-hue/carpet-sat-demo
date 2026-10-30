@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlin.math.cos
 import kotlin.math.min
@@ -225,30 +226,46 @@ fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifi
 /**
  * 一行式设备状态条。**首页顶部用它回答"现在能不能用"，而不是让用户滚三屏去找**。
  * 每枚 chip 只写"什么 + 状态"，颜色一律从 [Tone] 取，不引入第二种表达方式。
+ *
+ * **芯片按权重分宽度、装不下只走省略号，绝不折行。** Row 不换行，非权重的子节点只能按
+ * 自身宽度量：411dp（Pixel 口径）上三枚芯片 + 一颗 SOS 刚好塞满，我据此以为没问题；
+ * 384dp（华为 Mate60）上余量一负，被挤的那一枚就把字**竖着拆成两列**（真机照片第一条）。
+ * 只按一种视口自测，等于没测。
  */
 @Composable
-fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier, trailing: (@Composable () -> Unit)? = null) {
+fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        items.forEach { it0 ->
+        items.forEach { item ->
             Row(
                 modifier = Modifier
+                    .weight(1f, fill = false)
                     .background(Ink.Card, RoundedCornerShape(Round.Pill))
                     .padding(horizontal = Grid.x12, vertical = Grid.x8),
                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Dot(it0.tone)
-                Text(it0.label, style = Type.Caption.copy(color = Ink.TextHigh, fontWeight = FontWeight.Medium))
-                it0.value?.let { Text(it, style = Type.Caption, color = it0.tone.color) }
+                // 点不缩，标签不缩，缩的只可能是那个"值"—— 它是这行里唯一可推断的信息
+                Dot(item.tone)
+                Text(
+                    item.label,
+                    style = Type.Caption.copy(color = Ink.TextHigh, fontWeight = FontWeight.Medium),
+                    maxLines = 1,
+                )
+                item.value?.let {
+                    Text(
+                        it,
+                        style = Type.Caption,
+                        color = item.tone.color,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
-        // 右边那格空着是浪费：状态条是首页唯一"不滚动就在"的位置，安全件该钉在这里
-        Spacer(modifier = Modifier.weight(1f))
-        trailing?.invoke()
     }
 }
 

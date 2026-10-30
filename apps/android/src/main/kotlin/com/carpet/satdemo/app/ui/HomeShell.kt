@@ -69,7 +69,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = Grid.Page)
-            .padding(top = Grid.x12, bottom = Grid.x32),
+            .padding(top = Grid.x12, bottom = Grid.x24),
         verticalArrangement = Arrangement.spacedBy(Grid.Group),
     ) {
         HomeRail(app, status)
@@ -111,18 +111,15 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                 )
             }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                if (editing) "完成" else "编辑卡片流",
-                style = Type.Caption,
-                color = Ink.Sat,
-                modifier = Modifier.clickable { editing = !editing },
-            )
-            Text("SOS 不参与排序", style = Type.Caption, color = Ink.TextLow)
-        }
+        Text(
+            if (editing) "完成" else "编辑卡片流",
+            style = Type.Caption,
+            color = Ink.Sat,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { editing = !editing }
+                .padding(vertical = Grid.x8),
+        )
         if (editing) CardManager(app, app.managedCards(scene))
     }
 }
@@ -146,7 +143,6 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
         left <= 0 -> Tone.Ok
         else -> Tone.Sat
     }
-    val arm by app.arm.collectAsState()
     StatusRail(
         listOf(
             RailItem("圆屏", if (st.clients > 0) "${st.clients} 台" else "未连", dockTone),
@@ -157,19 +153,10 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
             ),
             RailItem("守护", if (app.guardPinned) "在跑" else "未常驻", if (app.guardPinned) Tone.Ok else Tone.Wait),
         ),
-        // **SOS 钉在状态条上**。之前它只在"卫星兜底"那张卡里，而那张卡在第一屏折叠线以下 ——
-        // "安全件不许藏进二级页"这条红线，是整页截图拍给我看的：不滚动就按不到，等于藏了
-        trailing = {
-            HoldToFire(
-                onDown = { app.pressDownSos() },
-                onUp = { app.releaseSos() },
-                label = if (arm.active) "取消（${(arm.leftMs / 1000).toInt() + 1}）" else "长按 SOS",
-                compact = true,
-                fill = false,
-                modifier = Modifier.widthIn(min = 116.dp),
-            )
-        },
     )
+    // SOS 不在这条里。它原来钉在这行的右端，理由是"不滚动就能按到"—— 判断对，位置错：
+    // 384dp（Mate60）上三枚芯片 + 一颗钮装不下，被挤的只能是那颗钮，全页最要紧的入口
+    // 被拆成两行竖排。现在它由装配层钉在导航栏上面一格（[SosFab]），四个页面都在
 }
 
 /**
@@ -197,19 +184,18 @@ private fun AssistantHero(app: AppRuntime) {
         // 屏上说的话会出现在这里，这里答的话会上屏 —— 而不是两块屏各存一份再对齐
         Text(
             if (app.screenDialog) "圆屏也能问：屏上说的话会出现在这里，这里答的话会上屏"
-            else "圆屏还不能对话（固件没申报契约 v2）。这里说的每一条，屏上看不到",
+            else "圆屏还没接通：这里说的每一条，屏上看不到",
             style = Type.Caption,
             color = if (app.screenDialog) Ink.Ok else Ink.TextLow,
         )
 
         if (chat.isEmpty()) Text("还没有对话。问一句，或者点下面那几个词。", style = Type.Caption, color = Ink.TextLow)
-        chat.takeLast(3).forEach { line -> Bubble(line) }
+        chat.takeLast(3).forEach { line -> Bubble(app, line) }
         if (chat.size > 3) Text("共 ${chat.size} 条，这里只显示最近 3 条", style = Type.Caption, color = Ink.TextLow)
 
         AnimatedVisibility(visible = !endpoint.configured, enter = Motion.expandIn, exit = Motion.expandOut) {
             Text(
-                "现在每一句回答都来自手机自己的状态：数字是真的，但说话的是规则不是模型。" +
-                    "要接真模型，把 OpenAI 兼容端点填进来。",
+                "现在每一句回答都来自手机自己的状态：数字是真的，但说话的是规则不是模型。",
                 style = Type.Caption,
                 color = Ink.Wait,
             )
@@ -258,8 +244,8 @@ private fun AssistantHero(app: AppRuntime) {
             IconButton(onClick = { app.askAi(draft); draft = "" }) {
                 Icon(MIcons.send, contentDescription = "发送", tint = Ink.Sat)
             }
-            // 语音这条链路在圆屏那侧（板载双麦 + ES7210），手机只做入口：按下去必须说清还没接
-            IconButton(onClick = { app.runtime.log("语音输入还没接：等圆屏固件那条链路（附录 A.3）") }) {
+            // 语音这条链路在圆屏那侧（板载双麦），手机只做入口：按下去必须说清还没接
+            IconButton(onClick = { app.runtime.log("语音输入还没接：麦克风在圆屏那一侧") }) {
                 Icon(MIcons.mic, contentDescription = "语音（未接）", tint = Ink.TextMid)
             }
         }
@@ -289,9 +275,8 @@ private fun AssistantHero(app: AppRuntime) {
                 ) { Text("保存并重连") }
                 CollapsableNote(
                     "为什么填一半算没配",
-                    "只认 OpenAI 兼容的 /chat/completions。三项填齐才算配上，填一半当作没配 —— " +
-                        "宁可乐观地退回本机规则，也不让首屏转 12 秒圈。" +
-                        "要出网或放开不可逆动作，去「我的 → 主理人与模型」调权限档。",
+                    "三项填齐才算配上，填一半当作没配 —— 宁可退回本机规则，也不让首屏一直转圈。" +
+                        "要让它说本机以外的事，去「我的 → 主理人与模型」调权限档。",
                 )
             }
         }
@@ -318,7 +303,7 @@ private fun FieldRow(label: String, value: String, onChange: (String) -> Unit) {
 
 /** 一条对话。左右对齐就够，不做头像、不做气泡尾巴 —— 那两个都会把一屏能看的条数压掉一条 */
 @Composable
-private fun Bubble(line: Turn) {
+private fun Bubble(app: AppRuntime, line: Turn) {
     val mine = line.from == TurnFrom.Me
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -360,7 +345,9 @@ private fun Bubble(line: Turn) {
                         modifier = Modifier.size(14.dp),
                     )
                     Text(sourceLabel(line), style = Type.Caption, color = if (line.ours) Ink.TextLow else Ink.Wait)
-                    if (line.skill != null) Text("· ${line.skill}", style = Type.Caption, color = Ink.TextLow)
+                    // 写的是技能名（"圆屏怎么连"），不是注册表 id（"dock.pair"）——
+                    // 后者是我们内部的键名，车主看见只会看见一个键名
+                    line.skill?.let { Text("· ${app.skillTitle(it)}", style = Type.Caption, color = Ink.TextLow) }
                 }
             }
         }
@@ -410,8 +397,8 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f).padding(end = Grid.x12)) {
-                Text("允许展示端接入", style = Type.Body)
-                Text("默认关。白名单之外的一律拒", style = Type.Caption, color = Ink.TextLow)
+                Text("允许圆屏接入", style = Type.Body)
+                Text("开起来才能配对；白名单之外一律拒绝", style = Type.Caption, color = Ink.TextLow)
             }
             Switch(checked = flags.acceptScreens, onCheckedChange = { app.setFlag(flags.copy(acceptScreens = it)) })
         }
@@ -450,7 +437,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
                     OutlinedTextField(
                         value = draft,
                         onValueChange = { draft = it },
-                        label = { Text("screen_id", style = Type.Caption) },
+                        label = { Text("圆屏编号", style = Type.Caption) },
                         singleLine = true,
                         textStyle = Type.Body,
                         colors = OutlinedTextFieldDefaults.colors(
@@ -487,9 +474,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
         }
         CollapsableNote(
             "为什么配对是这三步",
-            "圆屏自己是客户端、手机是服务端，所以配对就是：放开接入 → 加白名单 → 圆屏填这个地址。" +
-                "现在还没有\"自动发现\"：扫描结果的形状得等真固件上报了 hello 才能定，" +
-                "先编一个协议，到货一定对不上。",
+            "圆屏自己是客户端、手机是服务端，所以配对就是：放开接入 → 加白名单 → 圆屏填这个地址。",
         )
     }
 }
@@ -527,7 +512,7 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
                 Text(
                     when {
-                        moduleOff -> "GT1005 不在线，心跳先攒在队列里"
+                        moduleOff -> "卫星终端没在线，要发的内容先攒在手机这边"
                         left == null -> "还没有可用的过境时间"
                         left <= 0 -> "窗口开着，现在就能发"
                         else -> "距下次过顶 ${left}s"

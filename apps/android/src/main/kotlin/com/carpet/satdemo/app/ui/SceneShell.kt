@@ -22,7 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.runtime.DemoRuntime
 
@@ -37,7 +36,7 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     var more by remember { mutableStateOf(false) }
     val shown = if (more) Scene.entries.toList() else Scene.quick
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x12)) {
-        SectionHead(current.label, current.subtitle + " · 底座默认隐私 " + current.profile.basePrivacy.label)
+        SectionHead(current.label, current.subtitle + " · 默认隐私：" + current.profile.basePrivacy.label)
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
@@ -65,8 +64,9 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
 }
 
 /**
- * 场景的可用动作。**只有 SOS 是真接的**，其余按下去只记一行日志说"没接" ——
- * 一个看着能按、按了什么都没发生的按钮，比没有这个按钮更糟。
+ * 场景的可用动作。这些动作全都还要靠车机总线或账号侧接口才能真做，
+ * 所以现在按下去只如实说没接 —— 一个看着能按、按了什么都没发生的按钮，
+ * 比没有这个按钮更糟。
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
@@ -75,17 +75,10 @@ fun SceneActions(actions: List<String>, app: AppRuntime) {
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
     ) {
         actions.take(3).forEach { a ->
-            if (a.contains("SOS")) {
-                Button(
-                    onClick = { app.pressSos() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink.Alert, contentColor = Color.White),
-                ) { Text(a) }
-            } else {
-                Button(
-                    onClick = { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") },
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
-                ) { Text(a) }
-            }
+            Button(
+                onClick = { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") },
+                colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
+            ) { Text(a) }
         }
     }
 }

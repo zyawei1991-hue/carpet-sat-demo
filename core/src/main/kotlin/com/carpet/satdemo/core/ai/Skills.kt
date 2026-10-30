@@ -119,7 +119,7 @@ object BuiltinSkills {
                     ),
                     line = when {
                         c.queueCapacity == null || c.queueCapacity <= 0 ->
-                            "还没读到模组型号，额度说不准（§9 #12 待厂商给口径）。"
+                            "还没读到终端型号，额度说不准。"
                         else -> "待发 ${wait ?: 0} 条 / 槽位 ${c.queueCapacity} 条，已交核心网 ${c.handedOver ?: 0} 条。"
                     },
                 )
@@ -135,8 +135,8 @@ object BuiltinSkills {
                     skillId = "dock.pair",
                     intent = "设备配对指引",
                     fields = mapOf("screens_online" to (c.screensOnline?.toString() ?: "null")),
-                    line = "手机这侧是服务端：首页「圆屏」那张卡先放开允许展示端接入，" +
-                        "再把圆屏的 screen_id 加进白名单，圆屏连 ws://<手机IP>:8443 就能出画面。" +
+                    line = "手机这侧是服务端：首页「圆屏」那一组先放开「允许圆屏接入」，" +
+                        "再把圆屏编号加进白名单，圆屏连手机的地址就能出画面。" +
                         (c.screensOnline?.let { "现在在线 $it 台。" } ?: ""),
                 )
             },

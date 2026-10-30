@@ -78,6 +78,58 @@ class HomeScreenRenderTest {
     }
 
     /**
+     * **华为 Mate60 那一档：1260×2720 / 密度 3.25 → 可视宽 384dp。**
+     *
+     * 这条是用户拿真机照片打出来的。我此前只按 411dp（Pixel 口径）拍，而 411 与 384 差的那 27dp
+     * 恰好是顶部状态条能不能装下"SOS"那一格的余量 —— 在 411 上刚好不折行，在 384 上就把字竖着拆开了。
+     * 所以视口不能只拍一个：**按最窄的常见机型拍，才叫没藏也没裂**。
+     * 360dp 是这一档的下限（老机型、分屏、字体放大都在这），一起拍。
+     */
+    @Test
+    @Config(qualifiers = "w384dp-h836dp-xhdpi")
+    fun renderMate60() {
+        shootBothTabs("mate60")
+    }
+
+    @Test
+    @Config(qualifiers = "w360dp-h780dp-xhdpi")
+    fun renderNarrowest() {
+        shootBothTabs("narrow")
+    }
+
+    /** 首屏 + 我的页：真机照片里出问题的是这两张，其余页同一套原语 */
+    private fun shootBothTabs(prefix: String) {
+        val app = AppRuntime(ApplicationProvider.getApplicationContext())
+        app.pairScreen("desk-01")
+        compose.setContent { CarpetTheme { CarpetRoot(app) } }
+        compose.waitForIdle()
+        shoot("$prefix-home")
+        app.setTab(3)
+        compose.waitForIdle()
+        shoot("$prefix-me")
+    }
+
+    /**
+     * 长视口 + 已配端点：**有些状态默认拍不到**。
+     *
+     * 未接模型时首页那张主卡挂着一整块空态说明，把下面的内容全推走了；「隐私中心」在「我的」页
+     * 第三屏之后，一屏高的视口根本滚不到。这两处都得拍一遍，否则"改完了"只是我猜的。
+     */
+    @Test
+    @Config(qualifiers = "w384dp-h3400dp-xhdpi")
+    fun renderMate60DeepStates() {
+        val app = AppRuntime(ApplicationProvider.getApplicationContext())
+        app.pairScreen("desk-01")
+        app.setAiEndpoint("https://example.invalid/v1", "sk-test", "gpt-test")
+        compose.setContent { CarpetTheme { CarpetRoot(app) } }
+        compose.waitForIdle()
+        shoot("deep-home")
+        app.setTab(3)
+        compose.waitForIdle()
+        shoot("deep-me")
+    }
+
+    /**
      * **不走 Compose 的 `captureToImage()`**：它在 Robolectric 下要先等一个"帧可用"的条件，
      * 那个条件在本机 2 秒都不满足（而 `waitForIdle()` 是过的，说明界面早就稳了）。
      * 直接把根 View 画进 Bitmap，路径全程在我手里：绘制是 native 的，取像素是纯拷贝。

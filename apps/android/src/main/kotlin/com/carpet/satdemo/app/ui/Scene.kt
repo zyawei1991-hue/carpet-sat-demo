@@ -70,7 +70,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         SceneProfile(
             headline = "dock",
             cards = listOf("sos", "link", "pass", "terminal", "vehicle.status", "vehicle.energy", "fence", "queue", "usage", "position", "vehicle.find"),
-            actions = listOf("一键 SOS", "寻车", "远程熄火", "上报车况"),
+            actions = listOf("寻车", "远程熄火", "上报车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
         ),
@@ -83,7 +83,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         SceneProfile(
             headline = "pass",
             cards = listOf("sos", "pass", "position", "tpi", "queue", "usage", "sentinel", "terminal"),
-            actions = listOf("一键 SOS", "上报轨迹", "静默心跳"),
+            actions = listOf("上报轨迹", "静默上报"),
             input = InputMode.Touch,
             basePrivacy = PrivacyTier.Guarded,
         ),

@@ -2,6 +2,7 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,7 +45,7 @@ private fun Page(
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = Grid.x16, vertical = Grid.x12)
-            .padding(bottom = Grid.x32),
+            .padding(bottom = Grid.x24),
         verticalArrangement = Arrangement.spacedBy(Grid.x12),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
@@ -92,12 +93,12 @@ fun MeTab(
             ToggleRow(
                 "守护服务",
                 status.running,
-                "常驻通知会钉住进程，锁屏后 1Hz 那一圈照跑；关掉就断开与圆屏的连接",
+                "关掉会断开与圆屏的连接，锁屏后的定时上报也会停",
             ) { on -> app.setGuard(on) }
-            ToggleRow("允许展示端接入", flags.acceptScreens, "默认关。演示现场才放开") {
+            ToggleRow("允许圆屏接入", flags.acceptScreens, "开起来才能配对圆屏；关掉时白名单外一律拒绝") {
                 app.setFlag(flags.copy(acceptScreens = it))
             }
-            ToggleRow("演示模式", flags.demoMode, "压缩时间轴，让窗口和队列在几分钟内演完") {
+            ToggleRow("演示模式", flags.demoMode, "把等待和窗口压缩到几分钟内，一次能看完") {
                 app.setFlag(flags.copy(demoMode = it))
             }
         }
@@ -120,7 +121,7 @@ fun MeTab(
             onClick = onEngineer,
             colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("工程模式（彩排开关与线路原文）") }
+        ) { Text("工程模式（原始数据与开关）") }
     }
 }
 
@@ -158,7 +159,11 @@ private fun AssistantSettings(app: AppRuntime) {
         ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() })
         ValueRow("密钥", if (endpoint.apiKey.isBlank()) null else "已存本机")
         SectionLabel("权限档：${granted.label}（往右每高一档都更危险）")
-        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        // 五档一排，384dp 装不下。Row 不换行，装不下就把字竖着拆成一列一列 —— 和隐私档位那一格同一条 bug
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        ) {
             PermissionTier.entries.forEach { t ->
                 Chip(t.label, selected = t === granted) { app.setAiGranted(t) }
             }
@@ -176,8 +181,8 @@ private fun AssistantSettings(app: AppRuntime) {
             }
         }
         Text(
-            "密钥只写进本机 SharedPreferences，不进日志、不进线路原文窗。「发求救」那一档就算放开，" +
-                "网关也只回一句「提示你自己去按」—— 不可逆动作不由对话触发（§6.1）。",
+            "密钥只存这台手机，不进日志、不进原始数据。「发求救」那一档就算放开，它也只会提示你自己去长按 —— " +
+                "不可逆的动作不由对话触发。",
             style = Type.Caption,
             color = Ink.TextLow,
         )

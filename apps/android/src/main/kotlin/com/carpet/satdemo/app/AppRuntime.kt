@@ -398,13 +398,22 @@ class AppRuntime(private val host: Application) {
         )
     }
 
-    /** 首屏那一句开场白。走记录而不是硬塞进 UI，是为了让它也镜像得到圆屏 */
+    private var greeted = false
+
+    /**
+     * 首屏那一句开场白。走记录而不是硬塞进 UI，是为了让它也镜像得到圆屏。
+     *
+     * **只在真接了模型之后才说**。没接的时候它是一句自我介绍，把首屏撑到三行，
+     * 内容还是"我会答这五个词"—— 那五个词就在输入框上面一排，不需要再念一遍。
+     * 空态由界面上那句"还没有对话"负责。
+     */
     private fun greet() {
+        if (greeted || !_endpoint.value.configured) return
+        greeted = true
         dialog.log.append(
             Turn(
                 from = TurnFrom.Ai,
-                text = "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答 —— " +
-                    "回答只来自手机这边的真实状态，没配模型端点之前不会编话。",
+                text = "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答。",
                 source = ReplySource.LocalRule,
                 turnId = "t-greet",
             ),
@@ -419,6 +428,7 @@ class AppRuntime(private val host: Application) {
         prefs.edit().putString(KEY_AI_URL, next.baseUrl).putString(KEY_AI_KEY, next.apiKey)
             .putString(KEY_AI_MODEL, next.model).apply()
         runtime.log(if (next.configured) "模型端点已配：${next.model}" else "模型端点未配齐，回到本机规则")
+        greet()
     }
 
     fun setAiGranted(tier: PermissionTier) {
@@ -434,6 +444,9 @@ class AppRuntime(private val host: Application) {
     data class AiSkillRow(val title: String, val needs: PermissionTier, val allowed: Boolean)
 
     fun aiSkills(): List<AiSkillRow> = ai.skills.all.map { AiSkillRow(it.title, it.needs, ai.can(it.id)) }
+
+    /** 注册表 id → 人话名字。界面上只许出现后者：`dock.pair` 是我们的键名，不是车主的词 */
+    fun skillTitle(id: String): String = ai.skills.all.firstOrNull { it.id == id }?.title ?: id
 
     /** 事实表：本体在 `core/ai/Facts`，和桌面彩排台共用同一份实现 */
     fun aiContext(): SkillContext =
@@ -549,7 +562,6 @@ class AppRuntime(private val host: Application) {
 
     /** 圆屏上的按键动作。在 App 启动服务之后才会被填上 */
     internal fun wireCommands() {
-        greet()
         runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
         runtime.onCommand = { msg ->
             val cmd = msg.command?.cmd

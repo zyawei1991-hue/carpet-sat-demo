@@ -54,7 +54,7 @@ class Heartbeat(
             },
             Rule("terminal.offline", 5 * 60_000) { c ->
                 if (c.moduleOnline != false) null
-                else ProactiveTip("link.status", "卫星终端不在线，心跳只能先在 App 队列里攒着，一条不会丢。")
+                else ProactiveTip("link.status", "卫星终端不在线，要发的内容先攒在手机这边，一条不会丢。")
             },
             Rule("fence.breach", 60_000) { c ->
                 if (c.fenceActive != true || c.fenceInside != false) null
@@ -67,7 +67,7 @@ class Heartbeat(
             },
             Rule("dock.waiting", 15 * 60_000) { c ->
                 if (c.screensOnline != 0) null
-                else ProactiveTip("dock.pair", "还没圆屏连上来。要演示的话：先放开接入，再把它那串 screen_id 加进白名单。")
+                else ProactiveTip("dock.pair", "还没有圆屏连上来。先放开「允许圆屏接入」，再把圆屏编号加进白名单。")
             },
         )
     }

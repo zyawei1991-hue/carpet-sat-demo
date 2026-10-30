@@ -2,11 +2,13 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -39,7 +41,7 @@ fun VehicleStatusCard(s: CardScope) {
         ValueRow("胎压", "2.4 / 2.4 / 2.3 / 2.5 bar")
         ValueRow("累计里程", "23,417 km")
         Text(
-            "这些字段来自前装 CAN 的假设口径。真接上车以后取值口径要按车型再对一遍",
+            "还没接上车机，上面这几个数是示例",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -75,7 +77,7 @@ fun VehicleServiceCard(s: CardScope) {
         RowWork("保养", "还有 830 km", Tone.Wait)
         RowWork("轮胎换位", "已逾期 12 天", Tone.Alert)
         RowWork("年检", "明年 3 月", Tone.Neutral)
-        Text("工单来自桩数据。真做的时候这里是 OBD 故障码 + 4S 店的排期接口", style = Type.Caption, color = Ink.TextLow)
+        Text("这里是示例数据。接上真车以后，这一格读的是故障码和门店排期", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -126,7 +128,7 @@ fun KidsGrowthCard(s: CardScope) {
         ValueRow("今天新词", "5 个（示意）")
         ValueRow("连续打卡", "12 天")
         ValueRow("上次录音", "昨天 19:04")
-        Text("记录默认留在本地，云端只存摘要 —— 这是隐私档位 Strict 的要求（§6）", style = Type.Caption, color = Ink.TextLow)
+        Text("记录默认留在这台手机上，云端只存摘要", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -152,7 +154,7 @@ fun HealthVitalsCard(s: CardScope) {
         ValueRow("体温", "36.5 ℃（示意）")
         ValueRow("上次测量", "8 分钟前")
         Text(
-            "体征超阈值走卫星发一条，不等蜂窝。到货前这一张全是桩，数字别当依据",
+            "体征超阈值走卫星发一条，不等蜂窝。这一张还是示例数据，别当依据",
             style = Type.Caption,
             color = Ink.Wait,
         )
@@ -225,14 +227,14 @@ fun SubscriptionCard(s: CardScope) {
     InkCard(icon = MIcons.plan, mock = s.mock(Capability.Account)) {
         CardTitle("订阅与流量包")
         ValueRow(
-            "卫星报文额度",
-            if (u.capacity > 0) "${u.handedOver} / ${u.capacity} 条" else "还没读到模组型号",
+            "卫星消息额度",
+            if (u.capacity > 0) "${u.handedOver} / ${u.capacity} 条" else "还没读到终端型号",
             if (u.pressure >= 0.9f) Tone.Alert else Tone.Neutral,
         )
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
         ValueRow("到期", "2026-12-01（示意）")
         ValueRow("套餐", "守护版（示意）")
-        Text("额度和用量页同源，读的是终端现场；套餐与资费都等时空道宇给口径（§11 的 P0）", style = Type.Caption, color = Ink.TextLow)
+        Text("额度读的是终端现场，和「卫星用量」那一格是同一个数；套餐与资费还没定，先按示例显示", style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -248,34 +250,44 @@ fun PrivacyCard(s: CardScope) {
     InkCard(icon = MIcons.privacy, mock = s.mock(Capability.Account)) {
         CardTitle("隐私中心", trailing = "取更严的那个")
         TierRow("底座默认", base, null)
+        HairLine()
         TierRow("家长设置", picked) { s.app.setPrivacyChoice(it) }
+        HairLine()
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("生效档位", style = Type.Caption)
+            Text("生效档位", style = Type.Body, color = Ink.TextMid)
             Badge(eff.label, if (eff === PrivacyTier.Strict) Tone.Ok else Tone.Wait)
         }
     }
 }
 
+/**
+ * 一档隐私。**不排成"标签 — 芯片 — 说明"三列**：384dp（Mate60）上三列装不下，
+ * 最右那一列被压成一字一行的竖排、左边留一整片空白 —— Row 不换行，装不下就只能拆字。
+ * 改成上下两行，档位那一行走横向滚动。
+ *
+ * 只读的那一档（底座默认）不给三枚可点的芯片：它不能选，画成能选的样子是骗人。
+ */
 @Composable
 private fun TierRow(label: String, tier: PrivacyTier, onPick: ((PrivacyTier) -> Unit)?) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = Grid.x4),
+        verticalArrangement = Arrangement.spacedBy(Grid.x8),
     ) {
-        Text(label, style = Type.Caption)
-        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x4)) {
-            PrivacyTier.entries.forEach { t ->
-                val on = t === tier
-                Box(
-                    modifier = if (onPick == null) Modifier else Modifier.clickable { onPick(t) },
-                ) {
-                    Badge(t.label, if (on) Tone.Sat else Tone.Neutral)
-                }
+        Text(label, style = Type.Body, color = Ink.TextMid)
+        if (onPick == null) {
+            Text(tier.label, style = Type.Caption, color = Ink.TextLow)
+        } else {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            ) {
+                PrivacyTier.entries.forEach { t -> Chip(t.label, selected = t === tier) { onPick(t) } }
             }
         }
     }
@@ -301,12 +313,12 @@ fun DeviceManagerCard(s: CardScope) {
             "常驻",
             when {
                 !st.running -> "没跑"
-                s.app.guardPinned -> "已钉住进程，锁屏也不断"
-                else -> "只在 App 里跑：定位权限没批，锁屏会停"
+                s.app.guardPinned -> "后台常驻，锁屏也不断"
+                else -> "只在 App 开着时跑：定位权限没批，锁屏会停"
             },
         )
         if (list.isEmpty()) {
-            Text("台账还是空的。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)
+            Text("还没有设备。守护一开就会登记卫星终端，圆屏连上来会多一行", style = Type.Caption)
         }
         list.forEach { d -> LedgerRow(s.app, d, now) }
         ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)
@@ -316,13 +328,8 @@ fun DeviceManagerCard(s: CardScope) {
             Button(
                 onClick = { s.app.allowScreen(ScreenLinkServer.DEFAULT_SCREEN_ID) },
                 colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
-            ) { Text("放回出厂屏的 screen_id", style = Type.Caption) }
+            ) { Text("放回出厂那台圆屏", style = Type.Caption) }
         }
-        Text(
-            "工程模式（开关台、线路原文）在下面的入口，演示救场时用",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
     }
 }
 
