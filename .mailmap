@@ -1,0 +1,6 @@
+# 这台云电脑的默认 git 身份换过三次（qoder@local / bot@local / workbuddy@example.com），
+# 提交都是同一个执行体在这台机器上当场做的，不是三个人。收成一个署名，
+# 免得 GitHub 的 Contributors 图出现两个查无此人。
+zyawei1991-hue <zyawei1991-hue@users.noreply.github.com> Qoder <qoder@local>
+zyawei1991-hue <zyawei1991-hue@users.noreply.github.com> qoder-bot <bot@local>
+zyawei1991-hue <zyawei1991-hue@users.noreply.github.com> workbuddy <workbuddy@example.com>
