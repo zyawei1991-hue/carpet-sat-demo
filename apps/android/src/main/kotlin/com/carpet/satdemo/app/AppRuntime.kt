@@ -487,6 +487,33 @@ class AppRuntime(private val host: Application) {
     /** 额度与队列水位。**现场读模组**，不是写死的数（§9 #12/#16 那两个口径未定，所以只能读） */
     fun usage(): DemoEngine.Usage = runtime.engine.usage()
 
+    /** 星历重算在跑。那张卡上的「重试」按下去得立刻有个形状变化回应，不然用户只会在三秒内再按两次 */
+    private val _ephRetrying = MutableStateFlow(false)
+    val ephRetrying: StateFlow<Boolean> = _ephRetrying
+
+    /**
+     * 「重试」按钮的实现：**只重算星历这一件事**，不重连模组、不清队列。
+     * 结果必须回话，包括"还是不行"那一支 —— 静默的按钮比没有按钮更让人怀疑 App 坏了。
+     */
+    fun retryEphemeris() {
+        if (_ephRetrying.value) return
+        _ephRetrying.value = true
+        runtime.retryEphemeris { status ->
+            // 回调跑在 runtime 的 Default 线程上；say() 会写 1Hz 那条日志列表，
+            // 那边同一时刻也在写，所以这句要挪回主线程，别让两条写撞出一行丢字
+            scope.launch {
+                _ephRetrying.value = false
+                say(
+                    when {
+                        status == null -> "这一屏没有星历源，重试没有东西可算"
+                        status.state == EphState.SUCCESS -> "星历重算完了，窗口出来了"
+                        else -> "还是算不出来：" + (status.failMessage ?: "终端没回应")
+                    },
+                )
+            }
+        }
+    }
+
     /**
      * 圆屏配对入口：**只负责"放开接入 + 把 screen_id 加进白名单 + 把接入点地址念出来"这三件事**，
      * 剩下的都在圆屏那侧（它自己是 WebSocket 客户端）。

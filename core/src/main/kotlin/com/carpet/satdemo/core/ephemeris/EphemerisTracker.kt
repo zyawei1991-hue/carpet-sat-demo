@@ -38,6 +38,14 @@ class EphemerisTracker(
         val networkNeeded: Boolean,
         /** 距下次入境的秒数。在窗口里给 0；没窗口给 null（**别给 0**，0 会被读成"现在就能发"） */
         val nextPassInS: Long?,
+        /**
+         * 上一次**算成功**是几点。失败块里那句"上次成功是 09:14"靠它。
+         *
+         * 记的是成功、不是尝试：拿"最后一次尝试"去说"上次成功"，会在连着失败四次之后
+         * 报出一个刚刚过去的时间，用户读到的意思是"数据是新的"，正好反了。
+         * 从没成功过就留 null，屏上说"还没算出过窗口"，不许编一个。
+         */
+        val lastSuccessAtMs: Long?,
     ) {
         val failMessage: String? get() = EphemerisCopy.failMessage(state)
         val actionable: Boolean get() = state == EphState.SUCCESS && nextPass != null
@@ -47,6 +55,7 @@ class EphemerisTracker(
     private var state: EphState = EphState.NO_FIX
     private var dataTimestampMs: Long? = null
     private var computedAtMs: Long? = null
+    private var lastSuccessAtMs: Long? = null
     private var cachedPosition: GeodeticPosition? = null
     private var lastUpdateAtMs: Long? = null
     private var networkNeeded = false
@@ -96,6 +105,7 @@ class EphemerisTracker(
         passes = result.passes.sortedBy { it.startMs }
         dataTimestampMs = result.dataTimestampMs ?: dataTimestampMs
         computedAtMs = now
+        if (result.state == EphState.SUCCESS) lastSuccessAtMs = now
         cachedPosition = position
         if (result.state != EphState.SUCCESS) {
             log("星历不可用：${result.state.name} —— ${EphemerisCopy.failMessage(result.state)}")
@@ -135,6 +145,7 @@ class EphemerisTracker(
             aimAzimuthDeg = next?.let { if (inPass != null) it.azimuthAt(now) else it.startAzimuthDeg },
             networkNeeded = networkNeeded,
             nextPassInS = next?.secondsUntilStart(now),
+            lastSuccessAtMs = lastSuccessAtMs,
         )
     }
 }

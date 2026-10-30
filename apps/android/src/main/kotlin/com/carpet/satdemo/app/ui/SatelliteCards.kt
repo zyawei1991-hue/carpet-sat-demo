@@ -357,7 +357,8 @@ internal fun SosArmRing(fraction: Float, modifier: Modifier = Modifier) {
  *
  * **没数就不画那几个图元。** 上一版没星历时照样画 104dp 的环、56dp 的弧、72dp 的指北针，
  * 一张四百多 dp 高的卡里只有三个 `--` 和一句"还没取到星历" —— 车辆页最难看的就是这张。
- * 图元是给数据准备的容器，没数据时它退成 [EmptyCard] 一行。
+ * 图元是给数据准备的容器，没数据时它退成一块 [BlockError]：一句话说清哪种算不出来，
+ * 加上"上次成功是几点"和一个真会重算的「重试」。
  *
  * **有数的时候这张卡也整个换过版式**（真机照片：它一个人占了 55% 的视口）：
  *  - 104dp 的倒计时环 → 去掉。十分钟视野里"还剩 9 分"只有 6% 的绿弧，读出来是"仪表坏了"，
@@ -379,16 +380,38 @@ fun PassWindowCard(s: CardScope) {
     val maxEl = sat?.nextPassMaxEl
     val ephOk = sat?.ephState == EphState.SUCCESS
     val mock = s.mock(Capability.Ephemeris)
+    // 首帧还没到：这是"还没到"，不是"取不到"，画骨架不画错误块。
+    // 版式就是真数据那一版的形状（一个大数字 + 一行说明 + 一根条），落地时一个字都不位移
+    if (s.snap == null) {
+        InkCard(icon = MIcons.pass, tone = Tone.Neutral) {
+            CardTitle("下次过境")
+            SkeletonBar(width = 112.dp, height = 28.dp)
+            SkeletonBar(width = 188.dp)
+        }
+        return
+    }
     if (left == null && maxEl == null) {
-        EmptyCard(
-            title = "下次过境",
-            icon = MIcons.pass,
-            hint = when {
-                sat?.ephState == null -> "还没取到星历。取到之后这里会给出过顶倒计时和该朝哪个方向"
-                ephOk -> "星历可用，但这一轮还没算出窗口"
-                else -> sat?.ephFail ?: "星历暂时算不出来：先连一次网，不必举着天线等"
-            },
-        )
+        val retrying = s.app.ephRetrying.collectAsState().value
+        // 没定位时不给「重试」：星历重算第一步就是拿位置，位置没有，按十次也是这句。
+        // 那条路要走定位，不是走星历
+        val canRetry = sat?.ephState != null && sat.ephState != EphState.NO_FIX
+        InkCard(icon = MIcons.pass, tone = Tone.Neutral, mock = mock) {
+            CardTitle("下次过境")
+            BlockError(
+                reason = when {
+                    sat?.ephState == null -> "这一屏没有星历源，算不出窗口"
+                    ephOk -> "星历可用，但这一轮还没排上窗口"
+                    else -> sat?.ephFail ?: "星历暂时算不出来：先连一次网，不必举着天线等"
+                },
+                lastOkAtMs = sat?.ephOkAtMs,
+                busy = retrying,
+                onRetry = if (canRetry) {
+                    { s.app.retryEphemeris() }
+                } else {
+                    null
+                },
+            )
+        }
         return
     }
     val inWindow = left != null && left <= 0L
@@ -467,16 +490,18 @@ fun PassWindowCard(s: CardScope) {
  */
 @Composable
 fun TerminalCard(s: CardScope) {
-    val sat = s.snap?.sat
-    val pct = sat?.upgradePct
-    if (sat == null) {
-        EmptyCard(
-            title = "卫星终端",
-            icon = MIcons.hardware,
-            hint = "还没收到终端状态。终端接上后这里给相位和升级进度",
-        )
+    val snap = s.snap
+    if (snap == null) {
+        // 首帧：标题留着、真句那一行垫一条同高的灰条。
+        // 空卡上只写"稍等"是没有形状的，用户分不清它是在等还是在坏
+        InkCard(icon = MIcons.hardware, tone = Tone.Neutral) {
+            CardTitle("卫星终端")
+            SkeletonBar(width = 168.dp)
+        }
         return
     }
+    val sat = snap.sat
+    val pct = sat.upgradePct
     InkCard(icon = MIcons.hardware, tone = if (!sat.moduleOk) Tone.Alert else Tone.Neutral) {
         CardTitle("卫星终端", trailing = phaseLabel(sat.phase))
         Text(
@@ -554,6 +579,14 @@ fun TpiCard(s: CardScope) {
 @Composable
 fun PositionCard(s: CardScope) {
     val g = s.snap?.gnss
+    if (s.snap == null) {
+        InkCard(icon = MIcons.position, tone = Tone.Neutral) {
+            CardTitle("位置")
+            ValueRow("经纬度", null, warming = true)
+            ValueRow("精度 HDOP", null, warming = true)
+        }
+        return
+    }
     val hasFix = g != null && !(g.lat == 0.0 && g.lon == 0.0 && g.fixAgeS == null)
     if (!hasFix || g == null) {
         EmptyCard(
@@ -612,7 +645,9 @@ fun SentinelCard(s: CardScope) {
             if (armed) "布防中：静止超过阈值发一条状态，动了就打一个轨迹点" else "未布防",
             style = Type.Body,
         )
-        ValueRow("上次运动", sn?.lastMotionTs?.let { "$it" }, mono = true)
+        // 这里原来直接把 epoch 毫秒念上屏（一串 1730…）。那不是"时间"，那是我们内部的数：
+        // 车主看得懂的是几点几分
+        ValueRow("上次运动", clockTime(sn?.lastMotionTs))
         ValueRow("位移", sn?.driftM?.let { "%.0f 米".format(it) })
     }
 }

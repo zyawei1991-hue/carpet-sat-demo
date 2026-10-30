@@ -138,6 +138,45 @@ class EphemerisTrackerTest {
     }
 
     @Test
+    fun `上次成功只记成功那一次`() = runBlocking {
+        val c = Clock()
+        val src = ScriptedSource().apply { nextResult = EphResult(EphState.SUCCESS, listOf(pass(c.now + 60_000)), 1L) }
+        val t = EphemerisTracker(src, c)
+
+        assertNull(t.status().lastSuccessAtMs, "一次都没算过的时候必须是 null —— 屏上那句「上次成功是几点」不能凭空写")
+
+        val ok = t.refresh(hangzhou)
+        assertEquals(c.now, ok.lastSuccessAtMs, "算成功那一刻才是「上次成功」")
+
+        // 换一批坏星历，到重算点再问一次：时间不能跟着失败的尝试走
+        src.nextResult = EphResult(EphState.TIME_OUT, emptyList(), null)
+        c.advance(EphemerisConfig().refreshMs)
+        val bad = t.refresh(hangzhou)
+        assertEquals(EphState.TIME_OUT, bad.state)
+        assertEquals(c.now - EphemerisConfig().refreshMs, bad.lastSuccessAtMs, "拿「最后一次尝试」冒充「上次成功」，用户读到的是数据还新，正好反了")
+
+        // 没定位那一支同理：这一轮算不出，但历史上成功过的那次仍然要说得出
+        val noFix = t.refresh(null)
+        assertEquals(EphState.NO_FIX, noFix.state)
+        assertEquals(c.now - EphemerisConfig().refreshMs, noFix.lastSuccessAtMs)
+    }
+
+    @Test
+    fun `手动重试绕过退避 立刻再问一遍`() = runBlocking {
+        val c = Clock()
+        val src = ScriptedSource().apply { nextResult = EphResult(EphState.NETWORK_ERROR, emptyList(), null) }
+        val t = EphemerisTracker(src, c, EphemerisConfig(retryBackoffMs = 60_000L))
+
+        t.refresh(hangzhou)
+        c.advance(1_000)
+        t.refresh(hangzhou)
+        assertEquals(1, src.calculates, "退避没到，1Hz 那圈不该替用户反复问")
+
+        t.refresh(hangzhou, force = true)
+        assertEquals(2, src.calculates, "用户按了「重试」就是明确要现在再问一次，退避是给自动循环定的，不是给人按的")
+    }
+
+    @Test
     fun `星历失效的每句话都不许说成没卫星`() {
         for (state in EphState.entries) {
             val msg = EphemerisCopy.failMessage(state) ?: continue

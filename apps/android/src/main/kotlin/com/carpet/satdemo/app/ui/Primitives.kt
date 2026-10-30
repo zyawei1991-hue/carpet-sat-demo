@@ -64,6 +64,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -316,14 +319,22 @@ fun HairLine(modifier: Modifier = Modifier) {
  * 纪律三条：**不闪（shimmer 是装饰，不是进度）、不动、和真值同高**，
  * 这样第一条数据落地时整张卡一行都不会位移。
  *
+ * [height] 跟着它要替的那个值走：24sp 的大数字就垫 24dp 高的条，13dp 的行给 13dp。
+ * 一律用同一种高度的灰条，读起来是"一排在加载"，而不是"这一块本来就是空的"。
+ *
  * [color] 必须比它站的那个底再亮一档。截图里栽过一次：气泡底本来就是 `Track`，
  * 条也用 `Track`，拍出来是一颗完全空的气泡 —— 看着像坏了。
  */
 @Composable
-fun SkeletonBar(modifier: Modifier = Modifier, width: Dp = 72.dp, color: Color = Ink.Track) {
+fun SkeletonBar(
+    modifier: Modifier = Modifier,
+    width: Dp = 72.dp,
+    height: Dp = 13.dp,
+    color: Color = Ink.Track,
+) {
     Box(
         modifier = modifier
-            .size(width, 13.dp)
+            .size(width, height)
             .background(color, RoundedCornerShape(3.dp)),
     )
 }
@@ -380,6 +391,70 @@ fun GhostAction(text: String, modifier: Modifier = Modifier, onClick: () -> Unit
         Text(text, style = Type.Caption.copy(color = Ink.Sat, fontWeight = FontWeight.SemiBold))
     }
 }
+
+/**
+ * 块内错误。**坏掉的那一块里说清三件事**：什么没拿到、最后一次拿到是几点、能做什么。
+ *
+ * 三条纪律，都是从截图里逼出来的：
+ *  - **不做整屏横幅**。一条卡坏了就在这一条里说，跳到别处去解释，用户找不到"是哪儿坏了"；
+ *  - **红只用在那 8dp 的一点上**，正文保持正常字色。整段红字在这套深色底上不但不显眼，
+ *    反而和别的红一起变成一片噪声（一张卡里两处红就已经数不出重点了）；
+ *  - **卡片的标题和框都留着**。空掉的块最容易被整块删掉，那一删就把"这里本来有什么"也删没了，
+ *    用户下次来认不出这是同一处。
+ *
+ * [lastOkAtMs] 只填**成功**取到数据的时刻。没成功过就传 null，这一句整行不写；
+ * 拿"最后一次尝试"去凑，连着失败几次之后会报出一个刚刚过去的时间，
+ * 用户读到的意思是"数据是新的"，恰好说反了。
+ * [onRetry] 没成真动作就别传：按下去什么都不发生的按钮，比没有按钮更让人怀疑 App 坏了。
+ */
+@Composable
+fun BlockError(
+    reason: String,
+    lastOkAtMs: Long? = null,
+    busy: Boolean = false,
+    retry: String = "重试",
+    onRetry: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        // **顶对齐**。居中那版在 384dp 上被拍到：句子一换行，红点正落在第二行「重试」左边，
+        // 读起来像是给"重试"这个动作标了红 —— 红点标的应该是"这一整块坏了"
+        verticalAlignment = Alignment.Top,
+    ) {
+        // 红点贴第一行字：8dp 的点在 21dp 的高上居中，就是这 7dp
+        Dot(Tone.Alert, modifier = Modifier.padding(top = 7.dp))
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(Grid.x4),
+        ) {
+            Text(reason, style = Type.Body, color = Ink.TextHigh)
+            clockTime(lastOkAtMs)?.let { Text("上次成功是 $it", style = Type.Caption, color = Ink.TextMid) }
+        }
+        if (onRetry != null) {
+            if (busy) {
+                // 和 GhostAction 同一块尺寸：重算那一下把"重试"换成"正在重算"，卡片不该跟着抖一下
+                Box(
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).padding(horizontal = Grid.x8),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("正在重算", style = Type.Caption.copy(color = Ink.TextMid, fontWeight = FontWeight.SemiBold))
+                }
+            } else {
+                GhostAction(retry, onClick = onRetry)
+            }
+        }
+    }
+}
+
+/** epoch 毫秒 → 钟表写法「09:14」。null 原样返回 null，让调用方决定那一行写不写 */
+internal fun clockTime(epochMs: Long?): String? {
+    if (epochMs == null) return null
+    return CLOCK_FMT.format(Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()))
+}
+
+private val CLOCK_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 /**
  * 小节标题。**它必须大过自己那行说明**：上一版标题 11sp、说明 12.5sp，

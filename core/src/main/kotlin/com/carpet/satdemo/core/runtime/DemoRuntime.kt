@@ -414,13 +414,32 @@ class DemoRuntime(
             log("心跳进离线队列，共 ${engine.pending.size} 条")
         }
         val snap = engine.snapshot()
-        // 1Hz 全量状态。断线时展示端保留最后一帧，所以这条同时也是它的"还活着"信号
+        publishState(snap, now)
+    }
+
+    /**
+     * 把当前这一帧全量状态推给展示端并进 [status]。
+     * 1Hz 循环和「重试」都走这里 —— 手动重算完必须立刻上屏，等下一秒才动会让人以为那一下没按到。
+     */
+    private fun publishState(snap: StatePayload, now: Long) {
+        // 断线时展示端保留最后一帧，所以这条同时也是它的"还活着"信号
         push(listOf(ScreenMessage(t = MsgType.state, seq = seq.getAndIncrement(), ts = now, state = snap)))
         _status.value = _status.value.copy(
             phase = engine.phase,
             snapshot = snap,
             clients = server.clientCount,
         )
+    }
+
+    /**
+     * 卡片上那颗「重试」：立刻重算一次星历，算完当场回话（成功还是没成功，措辞由调用方定）。
+     * 没星历源（场景替身那种）就回 null，调用方不许把 null 当成"成功"报给用户。
+     */
+    fun retryEphemeris(onDone: (EphemerisTracker.Status?) -> Unit = {}): Job = scope.launch {
+        val status = engine.retryEphemeris()
+        if (status != null) noteEph(status)
+        publishState(engine.snapshot(), clockMs())
+        onDone(status)
     }
 
     /**

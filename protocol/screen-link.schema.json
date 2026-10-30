@@ -76,6 +76,7 @@
               "description": "星历计算结果状态，值和〔SDK文 §5.1.2〕的 resultState 一一对应（NO_FIX 是我们自己加的：没定位不该去问 SDK）。**它说的是'我们不知什么时候有窗'，不是'天上没卫星'** —— 两件事不能画在同一个提示里（E.10 #7）"
             },
             "eph_fail": { "type": ["string", "null"], "description": "星历不可用时那行人话，**由 App 出成品文案**：〔E.9〕最容易犯的错是把 NETWORK_ERROR 显示成「无卫星信号」，用户会举着天线在空旷处干等，而真正该做的是连一次网。固件不要再自己编这句" },
+            "eph_ok_at_ms": { "type": ["integer", "null"], "description": "上一次星历**算成功**的时刻，epoch 毫秒。失败块里那句「上次成功是 09:14」用它。记的是成功不是尝试：连着失败几次之后拿尝试时刻冒充，用户读到的是「数据还新」，正好说反。null = 从没成功过，这时这一行不写" },
             "next_pass_dur_s": { "type": ["integer", "null"], "minimum": 0, "description": "当前（或下个）窗口长度秒数，厂商给的 endTime-startTime。比'还有 N 秒'能用的地方多：能判断这条窗口够不够发完队列" },
             "next_pass_max_el": { "type": ["number", "null"], "description": "这次过境的最大仰角，度。低仰角那颗容易被楼和山体挡掉，野外选址就看这个" },
             "aim_az": { "type": ["number", "null"], "minimum": 0, "maximum": 360, "description": "该把车头/天线朝哪边：正北 0° 顺时针 0~360。窗口内是按进出方位角线性插值出来的瞬时值 —— 画指针够用，别拿它当测算依据" }

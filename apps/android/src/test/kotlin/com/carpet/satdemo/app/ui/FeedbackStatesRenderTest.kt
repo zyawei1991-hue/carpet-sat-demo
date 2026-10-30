@@ -14,8 +14,13 @@ import androidx.compose.material.ripple.LocalRippleTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -42,7 +47,15 @@ class FeedbackStatesRenderTest {
 
     private val outDir = File("build/screenshots").apply { mkdirs() }
 
+    /** 「上次成功是 09:14」那个瞬间。按本机时区凑出来，这张图是自查用的，不该跟着 CI 的时区变一个数 */
+    private val EPOCH_0914: Long = ZonedDateTime
+        .of(LocalDate.now(), LocalTime.of(9, 14), ZoneId.systemDefault())
+        .toInstant().toEpochMilli()
+
+    /** 视口给到 2600dp 高：这张是**状态对照表**，不是"首屏"，一屏装不下就得整张拍全，
+     *  不然最下面那一档永远没被看过 —— 而它恰恰是新加的那一档 */
     @Test
+    @Config(sdk = [34], qualifiers = "w384dp-h2600dp-xhdpi")
     fun renderFeedbackStates() {
         compose.setContent {
             CarpetTheme {
@@ -68,6 +81,26 @@ class FeedbackStatesRenderTest {
                         ValueRow("载噪比", null, warming = true)
                         ValueRow("主路", "蜂窝", tone = Tone.Ok)
                         ValueRow("载噪比", "12.4 dB")
+                    }
+                    InkCard {
+                        // 过境卡/终端卡的首帧形状。整页那张拍到折线以下就没了，所以在这里单摆一份量：
+                        // 28dp 那条替的是 24sp 的大数字，13dp 那条替的是正文 —— 真值落地时行高不能变
+                        Text("首帧：大数字先垫一条和它同高的", style = Type.Caption)
+                        SkeletonBar(width = 112.dp, height = 28.dp)
+                        SkeletonBar(width = 188.dp)
+                        SkeletonBar(width = 168.dp)
+                    }
+                    InkCard {
+                        Text("这一块坏了：说清哪没拿到、上次成功是几点、能做什么", style = Type.Caption)
+                        BlockError(
+                            reason = "星历数据已过期，联网更新后重试",
+                            lastOkAtMs = EPOCH_0914,
+                            onRetry = { },
+                        )
+                        // 按下去那一下换成不可点的同尺寸标签：字换了但卡片不能跟着抖
+                        BlockError(reason = "星历数据已过期，联网更新后重试", lastOkAtMs = EPOCH_0914, busy = true, onRetry = { })
+                        // 从没成功过：那一行整个不写；没定位时「重试」也不给，按十次也是这句
+                        BlockError(reason = "还没有定位，暂时算不出过境窗口")
                     }
                 }
             }

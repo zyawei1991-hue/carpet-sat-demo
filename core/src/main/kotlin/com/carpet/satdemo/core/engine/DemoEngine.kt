@@ -421,7 +421,22 @@ class DemoEngine(
      */
     suspend fun tickEphemeris(): EphemerisTracker.Status? {
         val tracker = ephemeris ?: return null
-        val status = tracker.refresh(fix?.let { GeodeticPosition.of(it.lat, it.lon) })
+        return syncCountdown(tracker.refresh(fix?.let { GeodeticPosition.of(it.lat, it.lon) }))
+    }
+
+    /**
+     * 用户点「重试」那一下：**绕过 tracker 的"还没到点"，立刻再问一遍星历**（force）。
+     *
+     * 只重算星历这一件事 —— 不动发送队列、不重连模组。把 retry 做成"重启一遍运行时"
+     * 是拿用户的按钮去赌别的东西会不会跟着坏。
+     */
+    suspend fun retryEphemeris(): EphemerisTracker.Status? {
+        val tracker = ephemeris ?: return null
+        return syncCountdown(tracker.refresh(fix?.let { GeodeticPosition.of(it.lat, it.lon) }, force = true))
+    }
+
+    /** 算出来的倒计时以星历为准；星历这一轮没数才退回模组那个粗估 */
+    private suspend fun syncCountdown(status: EphemerisTracker.Status): EphemerisTracker.Status {
         nextPassInS = if (status.state == EphState.SUCCESS) {
             status.nextPassInS
         } else {
@@ -518,6 +533,7 @@ class DemoEngine(
                 // 星历（E.10 #7）。文案在 App 侧就定稿，固件只负责画——它一编就可能把"去联网"说成"没卫星"
                 ephState = ephStatus?.state,
                 ephFail = ephStatus?.failMessage,
+                ephOkAtMs = ephStatus?.lastSuccessAtMs,
                 nextPassDurS = ephStatus?.nextPass?.windowSec?.toInt(),
                 nextPassMaxEl = ephStatus?.nextPass?.maxElevationDeg,
                 aimAz = ephStatus?.aimAzimuthDeg,

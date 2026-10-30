@@ -172,6 +172,11 @@ data class SatState(
      * 用户会举着天线在空旷处等，而真正该做的是连一次网。
      */
     @SerialName("eph_fail") val ephFail: String? = null,
+    /**
+     * 上一次星历**算成功**的时刻（epoch 毫秒）。失败块里那句"上次成功是 09:14"用它。
+     * null = 从没算成功过，这时屏上只能说"还没算出过窗口"，不许拿别的字段凑一个时间。
+     */
+    @SerialName("eph_ok_at_ms") val ephOkAtMs: Long? = null,
     /** 当前（或下个）窗口长度，秒。厂商给的 endTime-startTime，比"还有 N 秒"能用的地方多 */
     @SerialName("next_pass_dur_s") val nextPassDurS: Int? = null,
     /** 这次过境的最大仰角，度。低仰角那颗容易被楼和山体挡掉 */

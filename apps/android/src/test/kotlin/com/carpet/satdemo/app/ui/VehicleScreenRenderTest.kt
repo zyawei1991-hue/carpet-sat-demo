@@ -24,6 +24,10 @@ import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.StatePayload
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import java.io.File
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -81,7 +85,7 @@ class VehicleScreenRenderTest {
         phoneBattery = 87,
     )
 
-    /** 星历没取到：车辆页必须收成一行，不许留三个 `--` */
+    /** 星历没取到：车辆页必须收成块内那一句，不许留三个 `--` */
     private fun noEph(): StatePayload = live().copy(
         sat = live().sat.copy(
             phase = SatPhase.idle,
@@ -91,6 +95,27 @@ class VehicleScreenRenderTest {
             ephState = EphState.NETWORK_ERROR,
             // 用产品侧那句成品文案，不是我自己编的：这张图也要能核对"E.9 那句人话上没上屏"
             ephFail = EphemerisCopy.failMessage(EphState.NETWORK_ERROR),
+            // 曾经成功过一次：块里要能看出"上次成功是几点"，这一句决定用户现在动不动手
+            ephOkAtMs = ZonedDateTime.of(LocalDate.now(), LocalTime.of(9, 14), ZoneId.systemDefault())
+                .toInstant().toEpochMilli(),
+            nextPassDurS = null,
+            nextPassMaxEl = null,
+            aimAz = null,
+        ),
+        gnss = GnssState(0.0, 0.0, altM = null, hdop = null, source = GnssSource.phone, fixAgeS = null),
+        fence = FenceState(active = false, inside = true, name = null, distM = null),
+    )
+
+    /** 从没算成功过 + 没定位：那句「上次成功是几点」整行不写，「重试」也不该出现 */
+    private fun neverOk(): StatePayload = live().copy(
+        sat = live().sat.copy(
+            phase = SatPhase.idle,
+            satName = null,
+            cnr = null,
+            nextPassInS = null,
+            ephState = EphState.NO_FIX,
+            ephFail = EphemerisCopy.failMessage(EphState.NO_FIX),
+            ephOkAtMs = null,
             nextPassDurS = null,
             nextPassMaxEl = null,
             aimAz = null,
@@ -132,6 +157,20 @@ class VehicleScreenRenderTest {
         shootPage("vehicle-384-empty", noEph())
     }
 
+    /** 从没算成功过：这一张专盯"别把没有历史也写成 09:14"和"没定位时不许挂重试" */
+    @Test
+    @Config(qualifiers = "w384dp-h836dp-xhdpi")
+    fun renderNeverSucceeded() {
+        shootPage("vehicle-384-never-ok", neverOk())
+    }
+
+    /** 首帧：`snapshot` 还是 null。这一张盯的是骨架 —— 它必须和后面的真值同高，落地时不位移 */
+    @Test
+    @Config(qualifiers = "w384dp-h836dp-xhdpi")
+    fun renderFirstFrame() {
+        shootPage("vehicle-384-warming", null)
+    }
+
     /** 384dp 但只有**一屏**高：这张才回答"用户点开车辆页第一眼看的是什么" */
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
@@ -167,7 +206,7 @@ class VehicleScreenRenderTest {
         compose.activity.resources.updateConfiguration(cfg, null)
     }
 
-    private fun shootPage(name: String, payload: StatePayload) {
+    private fun shootPage(name: String, payload: StatePayload?) {
         val app = AppRuntime(ApplicationProvider.getApplicationContext())
         app.pairScreen("desk-01")
         val status = DemoRuntime.Status(
