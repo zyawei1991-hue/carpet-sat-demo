@@ -5,7 +5,7 @@
 | `protocollibrary_1.0.0.aar` | `com.geesatcom.protocollibrary` | 1.0.0 | 24 | 基础通信。classes.jar 里全是 `io/reactivex/rxjava3/**`，**它不传递依赖**，app 必须自己声明 rxjava 3.1.12 |
 | `ephemerislibrary-release.aar` | `com.example.ephemerislibrary` | 1.0.9 | 24（manifest）| 星历。带 `jni/arm64-v8a/libdecodeutil.so`，所以 abiFilters 只能到 arm64；文档要求 minSdk 26，取大的那个 |
 
-来源：时空道宇 2026-10 给的《星历及基础通信SDK资料包》，原始压缩包在仓库外 `vendor/gt1005/out/`。
+来源：时空道宇 2026-10 给的《星历及基础通信SDK资料包》，原始压缩包、28 页规范正文都在仓库内 `vendor/gt1005/`（那里还有一份厂商材料的保密说明）。
 换版本时这三件事要重新看一遍，别只换个文件：
 
 1. **`ephemerislibrary` 的 AndroidManifest 里有 `android:usesCleartextTraffic="true"`**，
