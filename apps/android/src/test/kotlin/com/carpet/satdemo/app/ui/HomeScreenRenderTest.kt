@@ -26,6 +26,11 @@ import org.robolectric.annotation.GraphicsMode
  * 终于可以看图说，而不是看算式说。
  *
  * 产物落 `build/screenshots/` 下的 png，**不进版本库**：它是给我自查的草稿，不是给观众的证据。
+ *
+ * **本机踩过的坑**：Robolectric 自带的下载器在这台机器上取 `android-all-instrumented` 会报
+ * `SHA-512 mismatch`（它自己那套 HTTP 拿到的字节和 curl 拿到的不是一份），一次要耗掉二十分钟。
+ * 用 curl 把 jar + pom + 两个 `.sha512` 放进 `~/.m2/repository/org/robolectric/android-all-instrumented/14-robolectric-10818077-i6/`
+ * 就绕开了 —— 本地仓库命中就不再联网。换台机器重跑，先怀疑这里。
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], qualifiers = "w411dp-h891dp-xxhdpi")
