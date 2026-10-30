@@ -2,6 +2,10 @@
 
 手机 + GT1005 卫星终端 + 微雪圆屏 三件套。对应《04_车宠卫星通信Demo_新架构方案_V2.0.docx》。
 
+> **这个仓库含第三方给的二进制**：`apps/android/libs/*.aar` 是时空道宇 2026-10 提供的星历与基础通信 SDK，
+> 不是我们的成果，也按不到开源许可上。仓库保持 **private**；要公开或对外授权前，
+> 先把那两个 aar 和 `docs/` 里的客户材料处理干净，别当既成事实带过去。
+
 ## 目录
 
 | 路径 | 内容 |
@@ -16,13 +20,13 @@
 | `tools/validate_protocol.py` | 契约校验，CI 入口 |
 | `apps/android/` | Gradle `:app`。手机 App 薄壳（定位、蜂窝探测、展示端服务、按钮） |
 | `core/` | Gradle `:core`。纯 Kotlin JVM，协议 / 链路状态机 / SatelliteModem / DemoEngine |
-| `firmware/screen/` | 展示端固件（fork 小智 AI）· 待建 |
+| `firmware/screen/` | 展示端固件的链路层：`screen_link` 组件、`HANDOFF.md` 操作手册、`tools/fake-phone.mjs` 假手机服务端 |
 | `simulator/` | 展示端桌面模拟器：假卫星模块 + 466×466 圆屏，硬件到货前把整条链路彩排一遍 |
 
 ## 现在能跑的东西
 
 ```bash
-./gradlew :core:test              # 43 条单测，含与 sos_frame.py 的逐字节对拍
+./gradlew :core:test              # 222 条单测，含与 sos_frame.py 的逐字节对拍
 ./gradlew :app:assembleDebug      # 出 APK（debug 签名，可直接装演示机）
 python protocol/sos_frame.py      # SOS 帧编解码自检
 python tools/validate_protocol.py # 契约示例校验
