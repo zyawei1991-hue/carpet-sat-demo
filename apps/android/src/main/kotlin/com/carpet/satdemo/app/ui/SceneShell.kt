@@ -33,22 +33,20 @@ import com.carpet.satdemo.core.runtime.DemoRuntime
 @Composable
 fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     val current by app.scene.collectAsState()
-    var more by remember { mutableStateOf(false) }
-    val shown = if (more) Scene.entries.toList() else Scene.quick
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x12)) {
-        SectionHead(current.label, current.subtitle + " · 默认隐私：" + current.profile.basePrivacy.label)
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        // 五个全排在一条横向可滚的带上，不再"先摆三个 + 更多场景（2）"：
+        // 那一行折叠让首屏多出一条只有我们自己在乎的链接，而滚动条本来就装得下五个。
+        // **上面不再重复写一遍场景名** —— 选中那枚是实底蓝，它自己就是标题，
+        // 标题行再念一次就是同一屏两个重心（截图里"车载守护"出现过两次）
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
-            shown.forEach { sc -> Chip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
+            Scene.entries.toList().forEach { sc -> Chip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
         }
-        Text(
-            if (more) "收起场景" else "更多场景（${Scene.entries.size - Scene.quick.size}）",
-            style = Type.Caption,
-            color = Ink.Sat,
-            modifier = Modifier.clickable { more = !more },
-        )
+        // 副标题只留场景自己那句话。"默认隐私：只上传必要字段"是我们内部的档位口径，
+        // 挂在标题下面，用户读到的是"这行在跟我讲规则"，不是"现在是什么模式"
+        Text(current.subtitle, style = Type.Caption, color = Ink.TextLow)
     }
 }
 
@@ -67,18 +65,23 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
  * 场景的可用动作。这些动作全都还要靠车机总线或账号侧接口才能真做，
  * 所以现在按下去只如实说没接 —— 一个看着能按、按了什么都没发生的按钮，
  * 比没有这个按钮更糟。
+ *
+ * **画成小字块，不画成三颗大按钮**：三颗等高按钮摆在页首，视觉上就是本页的"主行动"，
+ * 可它们一个都没接。降级成文字块之后，它读起来是"这个场景会做的事"，而不是"快点我"。
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
     ) {
-        actions.take(3).forEach { a ->
-            Button(
-                onClick = { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") },
-                colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
-            ) { Text(a) }
+        actions.forEach { a ->
+            Box(
+                modifier = Modifier
+                    .background(Ink.Sunk, RoundedCornerShape(Round.Chip))
+                    .clickable { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") }
+                    .padding(horizontal = Grid.x12, vertical = Grid.x8),
+            ) { Text(a, style = Type.Caption, color = Ink.TextMid) }
         }
     }
 }

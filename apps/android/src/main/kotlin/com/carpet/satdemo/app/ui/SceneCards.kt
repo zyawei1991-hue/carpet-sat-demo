@@ -90,11 +90,16 @@ private fun RowWork(name: String, state: String, tone: Tone) {
 fun VehicleEnergyCard(s: CardScope) {
     InkCard(icon = MIcons.battery, mock = s.mock(Capability.VehicleBus)) {
         CardTitle("能耗", trailing = "近 30 天")
-        Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
-            Text("驱动 78% · 空调 14% · 待机 8%", style = Type.Body)
-            ProgressBar(0.78f, Tone.Ok)
-            ProgressBar(0.14f, Tone.Wait)
-            ProgressBar(0.08f, Tone.Neutral)
+        // 这三项加起来是 100%，所以是一根条的三段。原来画成三根独立进度条，
+        // 第二第三根在截图里看着像画坏了的空槽
+        StackedBar(listOf(78 to Ink.Ok, 14 to Ink.Wait, 8 to Ink.Track))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x12),
+        ) {
+            LegendDot(Ink.Ok, "驱动", "78%")
+            LegendDot(Ink.Wait, "空调", "14%")
+            LegendDot(Ink.Track, "待机", "8%")
         }
         ValueRow("平均电耗", "15.8 kWh/100km")
     }

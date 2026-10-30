@@ -60,7 +60,7 @@ private fun Page(
 @Composable
 fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
-    Page("车辆", "用车养车 · 卡片标「示意数据」", modifier = modifier) {
+    Page("车辆", "用车养车 · 卫星兜底", modifier = modifier) {
         SceneActions(app.scene.value.profile.actions, app)
         CardStream(app.orderedCards(Scene.Vehicle), scope)
     }
@@ -154,11 +154,13 @@ private fun AssistantSettings(app: AppRuntime) {
     val endpoint by app.aiEndpoint.collectAsState()
     val granted by app.aiGranted.collectAsState()
     val rows = remember(granted) { app.aiSkills() }
-    InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Wait) {
-        CardTitle("主理人与模型", trailing = if (endpoint.configured) endpoint.model else "本机规则")
+    InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
+        CardTitle("主理人与模型", trailing = if (endpoint.configured) endpoint.model else "只用本机状态作答")
         ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() })
         ValueRow("密钥", if (endpoint.apiKey.isBlank()) null else "已存本机")
-        SectionLabel("权限档：${granted.label}（往右每高一档都更危险）")
+        // 档位标题必须大过它管的三枚芯片。之前这里用 11sp 的 SectionLabel，
+        // 而下面的芯片是 12.5sp —— 屏幕上是小字在领读，标题在当注脚
+        SectionHead("权限档：${granted.label}", "往右每高一档都更危险")
         // 五档一排，384dp 装不下。Row 不换行，装不下就把字竖着拆成一列一列 —— 和隐私档位那一格同一条 bug
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -168,7 +170,7 @@ private fun AssistantSettings(app: AppRuntime) {
                 Chip(t.label, selected = t === granted) { app.setAiGranted(t) }
             }
         }
-        SectionLabel("它现在会做什么")
+        SectionHead("它现在会做什么")
         rows.forEach { r ->
             Row(
                 modifier = Modifier.fillMaxWidth(),

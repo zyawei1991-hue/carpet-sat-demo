@@ -275,6 +275,10 @@ fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
  *
  * 星历算不出来时那行人话必须上屏（E.9 / E.10 #7）：`NETWORK_ERROR` 的意思是
  * "没星历也没缓存"，该做的是连一次网；写成"没卫星信号"，用户会举着天线在空旷处白等。
+ *
+ * **没数就不画那几个图元。** 上一版没星历时照样画 104dp 的环、56dp 的弧、72dp 的指北针，
+ * 一张四百多 dp 高的卡里只有三个 `--` 和一句"还没取到星历" —— 车辆页最难看的就是这张。
+ * 图元是给数据准备的容器，没数据时它退成 [EmptyCard] 一行。
  */
 @Composable
 fun PassWindowCard(s: CardScope) {
@@ -283,7 +287,20 @@ fun PassWindowCard(s: CardScope) {
     val dur = (sat?.nextPassDurS ?: 0).toLong()
     val maxEl = sat?.nextPassMaxEl
     val ephOk = sat?.ephState == EphState.SUCCESS
-    InkCard(icon = MIcons.pass, tone = Tone.Sat, mock = s.mock(Capability.Ephemeris)) {
+    val mock = s.mock(Capability.Ephemeris)
+    if (left == null && maxEl == null) {
+        EmptyCard(
+            title = "下次过境",
+            icon = MIcons.pass,
+            hint = when {
+                sat?.ephState == null -> "还没取到星历。取到之后这里会给出过顶倒计时和该朝哪个方向"
+                ephOk -> "星历可用，但这一轮还没算出窗口"
+                else -> sat?.ephFail ?: "星历暂时算不出来：先连一次网，不必举着天线等"
+            },
+        )
+        return
+    }
+    InkCard(icon = MIcons.pass, tone = Tone.Sat, mock = mock) {
         CardTitle("下次过境", trailing = sat?.satName?.let { "锁定 $it" })
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -311,24 +328,17 @@ fun PassWindowCard(s: CardScope) {
             else (dur.toFloat() / (left + dur)).coerceIn(0f, 1f),
             progressInWindow = if (left != null && left <= 0L) 0.5f else null,
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text("天线/车头朝向", style = Type.Caption)
-                AimDial(sat?.aimAz)
+        // 指北针只在真算得出方向时画。之前没方位也画一个空圆写着"无方位"，
+        // 那是把"我们不知道"画成一个待填的图形，用户会去转车身找那个不存在的答案
+        sat?.aimAz?.let { az ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x16),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AimDial(az)
+                Text("天线/车头朝这个方向", style = Type.Caption, color = Ink.TextMid)
             }
-            Text(
-                when {
-                    sat?.ephState == null -> "还没取到星历"
-                    ephOk -> "星历可用"
-                    else -> sat.ephFail ?: "星历暂时算不出来"
-                },
-                style = Type.Caption,
-                color = if (ephOk) Ink.Ok else Ink.Wait,
-            )
         }
     }
 }
@@ -338,26 +348,32 @@ fun PassWindowCard(s: CardScope) {
 fun TerminalCard(s: CardScope) {
     val sat = s.snap?.sat
     val pct = sat?.upgradePct
-    InkCard(icon = MIcons.hardware, tone = if (sat?.moduleOk == false) Tone.Alert else Tone.Neutral) {
-        CardTitle("卫星终端", trailing = sat?.fw?.let { "版本 $it" })
+    if (sat == null) {
+        EmptyCard(
+            title = "卫星终端",
+            icon = MIcons.hardware,
+            hint = "还没收到终端状态。终端接上后这里给相位、电量和升级进度",
+        )
+        return
+    }
+    InkCard(icon = MIcons.hardware, tone = if (!sat.moduleOk) Tone.Alert else Tone.Neutral) {
+        CardTitle("卫星终端", trailing = sat.fw?.let { "版本 $it" })
         Text(
             when {
-                sat == null -> "还没收到终端状态"
                 !sat.moduleOk -> "终端离线：没供电或者线断了，消息只能先留在手机这边"
                 pct != null -> "终端正在升级，这段时间所有发送都会被挡下"
                 else -> "终端就绪"
             },
             style = Type.Body,
             color = when {
-                sat == null -> Ink.TextMid
                 !sat.moduleOk -> Ink.Alert
                 pct != null -> Ink.Wait
                 else -> Ink.Ok
             },
         )
         if (pct != null) ProgressBar(pct / 100f)
-        ValueRow("状态", sat?.phase?.let { phaseLabel(it) })
-        ValueRow("终端电量", sat?.moduleBattery?.let { "$it%" })
+        ValueRow("状态", phaseLabel(sat.phase))
+        ValueRow("终端电量", sat.moduleBattery?.let { "$it%" })
     }
 }
 
@@ -406,23 +422,26 @@ fun TpiCard(s: CardScope) {
     }
 }
 
-/** 位置卡。没定位就画 --，不画 0,0 —— core 里 GnssState 的默认值正是 0,0 */
+/** 位置卡。没定位就一行说清为什么，不画三行 `--` —— 空态不是内容 */
 @Composable
 fun PositionCard(s: CardScope) {
     val g = s.snap?.gnss
     val hasFix = g != null && !(g.lat == 0.0 && g.lon == 0.0 && g.fixAgeS == null)
-    InkCard(icon = MIcons.position, tone = if (hasFix) Tone.Ok else Tone.Wait) {
-        CardTitle("位置", trailing = g?.let { sourceLabel(it.source) })
-        ValueRow("经纬度", if (hasFix && g != null) "%.5f, %.5f".format(g.lat, g.lon) else null, mono = true)
-        ValueRow("精度 HDOP", g?.hdop?.let { "%.1f".format(it) }, mono = true)
+    if (!hasFix || g == null) {
+        EmptyCard(
+            title = "位置",
+            icon = MIcons.position,
+            hint = "还没有定位。圆屏那块板不带 GPS，位置由手机供；进屋、车里、高楼之间会拿不到",
+        )
+        return
+    }
+    InkCard(icon = MIcons.position, tone = Tone.Ok) {
+        CardTitle("位置", trailing = sourceLabel(g.source))
+        ValueRow("经纬度", "%.5f, %.5f".format(g.lat, g.lon), mono = true)
+        ValueRow("精度 HDOP", g.hdop?.let { "%.1f".format(it) }, mono = true)
         ValueRow(
             "新鲜度",
-            g?.fixAgeS?.let { if (it > 30) "%.0f 秒前（已过期）".format(it) else "%.0f 秒前".format(it) },
-        )
-        if (!hasFix) Text(
-            "还没有定位。进屋、车里、高楼之间会这样",
-            style = Type.Caption,
-            color = Ink.TextLow,
+            g.fixAgeS?.let { if (it > 30) "%.0f 秒前（已过期）".format(it) else "%.0f 秒前".format(it) },
         )
     }
 }
@@ -474,11 +493,11 @@ fun SentinelCard(s: CardScope) {
 @Composable
 fun DockCard(s: CardScope) {
     val st = s.status
-    InkCard(icon = MIcons.dock, tone = if (st.clients > 0) Tone.Ok else Tone.Wait) {
+    InkCard(icon = MIcons.dock, tone = if (st.clients > 0) Tone.Ok else Tone.Neutral) {
         CardTitle("圆屏", trailing = if (st.clients > 0) "已连接" else "未连接")
         Text(
             if (st.clients > 0) "${st.clients} 台圆屏在线"
-            else "还没有圆屏连上来。手机和圆屏要在同一个 Wi-Fi，接入点 ws://${st.localIp ?: "—"}",
+            else "还没有圆屏连上来。首页那张「圆屏」卡里配对",
             style = Type.Body,
         )
         ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)

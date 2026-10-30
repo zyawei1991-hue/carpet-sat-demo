@@ -25,10 +25,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -40,6 +42,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -50,6 +53,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
@@ -131,8 +135,11 @@ fun InkCard(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(Grid.Inner),
             ) {
-                if (mock) MockChip()
                 content()
+                // 「示意数据」挂在**卡尾**，不挂卡头。它原来占掉第一行，
+                // 于是左边那枚图标对齐的是标注、而不是标题 —— 每张桩数据卡的标题都比图标低一行。
+                // 挪到末尾之后图标和标题重新对齐，标注仍然逐卡挂着，一个字没少
+                if (mock) MockChip()
             }
         }
     }
@@ -212,6 +219,53 @@ fun HairLine(modifier: Modifier = Modifier) {
 }
 
 /**
+ * 空状态卡。**没有数据的时候，它只许占一行。**
+ *
+ * 这条是照着截图加的：「下次过境」在还没取到星历时，照样画了 104dp 的倒计时环、
+ * 56dp 的弧线、72dp 的指北针 —— 一张四百多 dp 高的卡里只有三个 `--`。
+ * 大图元是**为数据准备的**，没数据还画，就是把空态当内容渲染，
+ * 整页因此显得既空又坏。有数了再换回带环的那版，一行代码的事。
+ */
+@Composable
+fun EmptyCard(
+    title: String,
+    icon: ImageVector,
+    hint: String,
+    action: String? = null,
+    onAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    InkCard(modifier = modifier, icon = icon) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x12),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(Grid.x4),
+            ) {
+                Text(title, style = Type.Title)
+                Text(hint, style = Type.Caption, color = Ink.TextLow)
+            }
+            if (action != null && onAction != null) GhostAction(action, onClick = onAction)
+        }
+    }
+}
+
+/** 文字型次要动作。**不再画成一颗灰底大按钮**：一屏五颗按钮的时候，没有一颗是重点 */
+@Composable
+fun GhostAction(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Text(
+        text,
+        style = Type.Caption.copy(color = Ink.Sat, fontWeight = FontWeight.SemiBold),
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = Grid.x8, vertical = Grid.x8),
+    )
+}
+
+/**
  * 小节标题。**它必须大过自己那行说明**：上一版标题 11sp、说明 12.5sp，
  * 屏幕上是说明在领读、标题在当注脚 —— 这条只有整页截图能看出来，读代码看不出来。
  */
@@ -224,10 +278,17 @@ fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifi
 }
 
 /**
- * 一行式设备状态条。**首页顶部用它回答"现在能不能用"，而不是让用户滚三屏去找**。
- * 每枚 chip 只写"什么 + 状态"，颜色一律从 [Tone] 取，不引入第二种表达方式。
+ * 顶部状态栏。**一条栏，三段，不三枚胶囊。**
  *
- * **芯片按权重分宽度、装不下只走省略号，绝不折行。** Row 不换行，非权重的子节点只能按
+ * 上一版是三枚各自带底色的 pill，三枚 pill 之间的间距和卡片间距一模一样 ——
+ * 于是它在屏幕上读起来就是"三张卡"，首屏凭空多出三个方块。现在合成一根背板、
+ * 段与段之间一根 [Ink.Track] 细线：一个视觉单元，回答一个问题。
+ *
+ * **没数据用 [Tone.Neutral]，画空心圈。** 之前"未连 / -- / 没跑"三格全上琥珀 [Ink.Wait]，
+ * 而 Wait 在这套色里是"正在等一个已知会来的东西"，用户看到的是"三处告警"。
+ * 没连上和正在等本来就不该一个颜色，形上也分开：实心=有状态，空心=还不知道。
+ *
+ * **段按权重分宽度、装不下只走省略号，绝不折行。** Row 不换行，非权重的子节点只能按
  * 自身宽度量：411dp（Pixel 口径）上三枚芯片 + 一颗 SOS 刚好塞满，我据此以为没问题；
  * 384dp（华为 Mate60）上余量一负，被挤的那一枚就把字**竖着拆成两列**（真机照片第一条）。
  * 只按一种视口自测，等于没测。
@@ -235,16 +296,24 @@ fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifi
 @Composable
 fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
     Row(
-        modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Ink.Sunk, RoundedCornerShape(Round.Pill))
+            .padding(horizontal = Grid.x12, vertical = Grid.x8),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        items.forEach { item ->
+        items.forEachIndexed { i, item ->
+            if (i > 0) {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = Grid.x12)
+                        .width(1.dp)
+                        .height(16.dp)
+                        .background(Ink.Track),
+                )
+            }
             Row(
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .background(Ink.Card, RoundedCornerShape(Round.Pill))
-                    .padding(horizontal = Grid.x12, vertical = Grid.x8),
+                modifier = Modifier.weight(1f, fill = false),
                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -259,7 +328,7 @@ fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
                     Text(
                         it,
                         style = Type.Caption,
-                        color = item.tone.color,
+                        color = if (item.tone === Tone.Neutral) Ink.TextLow else item.tone.color,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -351,25 +420,46 @@ fun IconBadge(icon: ImageVector, tint: Color, modifier: Modifier = Modifier, siz
     }
 }
 
-/** 语义点。§5.2 第 4 条：形要有语义，所以这个点只用来标状态，不当装饰 */
+/**
+ * 语义点。§5.2 第 4 条：形要有语义，所以这个点只用来标状态，不当装饰。
+ * **[Tone.Neutral] 画空心圈**：实心=系统知道现在是什么状态，空心=还不知道。
+ * 上一版"没连上"和"正在等"都是实心黄点，用户读到的是三处故障。
+ */
 @Composable
 fun Dot(tone: Tone, modifier: Modifier = Modifier) {
     val c by animateColorAsState(tone.color, tween(Motion.Normal), label = "dot")
-    Box(
-        modifier = modifier
-            .size(Grid.x8)
-            .background(c, CircleShape),
-    )
+    if (tone === Tone.Neutral) {
+        Box(
+            modifier = modifier
+                .size(Grid.x8)
+                .border(1.5.dp, Ink.TextLow, CircleShape),
+        )
+    } else {
+        Box(
+            modifier = modifier
+                .size(Grid.x8)
+                .background(c, CircleShape),
+        )
+    }
 }
 
+/**
+ * 「示意数据」标。**必须一直挂着，但它可以很轻** ——
+ * 之前它是一枚带底的 12.5sp 琥珀砖，一页出现三次，比它标注的数字还抢眼，
+ * "诚实标注"这条要求反过来变成了噪声。现在去掉底色、降到 11sp，只留一颗点：
+ * 读得见，但不抢。文字一个字没减，"未接真源"这半句恰恰是最要紧的那半。
+ */
 @Composable
 fun MockChip() {
-    Box(
-        modifier = Modifier
-            .background(Ink.Wait.copy(alpha = Ink.TINT), RoundedCornerShape(Round.Chip))
-            .padding(horizontal = Grid.x8, vertical = Grid.x4),
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(Grid.x4),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("示意数据 · 未接真源", style = Type.Caption.copy(color = Ink.Wait))
+        Box(modifier = Modifier.size(5.dp).background(Ink.Wait, CircleShape))
+        Text(
+            "示意数据 · 未接真源",
+            style = Type.Overline.copy(color = Ink.Wait, letterSpacing = 0.2.sp, lineHeight = 14.sp),
+        )
     }
 }
 
@@ -657,6 +747,39 @@ fun ProgressBar(fraction: Float, tone: Tone = Tone.Wait, modifier: Modifier = Mo
                 .height(Grid.x8)
                 .background(c, CircleShape),
         )
+    }
+}
+
+/**
+ * 占比分段条。**加起来是 100% 的几项，画一根分段条，不画几根独立进度条** ——
+ * 能耗那张卡原来就是三根：驱动 78% 一根、空调 14% 一根、待机 8% 一根，
+ * 后两根在截图里看着像画坏了的空槽，而且三根条并不能让人读出"这是一整体被分成三份"。
+ */
+@Composable
+fun StackedBar(parts: List<Pair<Int, Color>>, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(Grid.x8)
+            .clip(RoundedCornerShape(Grid.x4)),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        parts.forEach { (v, c) ->
+            if (v > 0) Box(modifier = Modifier.weight(v.toFloat()).fillMaxHeight().background(c))
+        }
+    }
+}
+
+/** 分段条的图例：一颗点 + 名字 + 数。点和条上的颜色一一对应，不另设第二套色 */
+@Composable
+fun LegendDot(color: Color, label: String, value: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(Grid.x4),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(6.dp).background(color, CircleShape))
+        Text("$label $value", style = Type.Caption, color = Ink.TextMid)
     }
 }
 
