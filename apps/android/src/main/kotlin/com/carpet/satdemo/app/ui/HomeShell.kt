@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -145,6 +146,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
         left <= 0 -> Tone.Ok
         else -> Tone.Sat
     }
+    val arm by app.arm.collectAsState()
     StatusRail(
         listOf(
             RailItem("圆屏", if (st.clients > 0) "${st.clients} 台" else "未连", dockTone),
@@ -155,6 +157,18 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
             ),
             RailItem("守护", if (app.guardPinned) "在跑" else "未常驻", if (app.guardPinned) Tone.Ok else Tone.Wait),
         ),
+        // **SOS 钉在状态条上**。之前它只在"卫星兜底"那张卡里，而那张卡在第一屏折叠线以下 ——
+        // "安全件不许藏进二级页"这条红线，是整页截图拍给我看的：不滚动就按不到，等于藏了
+        trailing = {
+            HoldToFire(
+                onDown = { app.pressDownSos() },
+                onUp = { app.releaseSos() },
+                label = if (arm.active) "取消（${(arm.leftMs / 1000).toInt() + 1}）" else "长按 SOS",
+                compact = true,
+                fill = false,
+                modifier = Modifier.widthIn(min = 116.dp),
+            )
+        },
     )
 }
 
@@ -201,7 +215,14 @@ private fun AssistantHero(app: AppRuntime) {
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        // **横向可滚，不许折行**：Row 不会换行，装不下的那颗只能把字竖着拆开
+        // （截图里"车/在/哪"排成三行，是这一版最难看的一处）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        ) {
             listOf("链路", "过境", "额度", "圆屏配对", "车在哪").forEach { q ->
                 Box(
                     modifier = Modifier
@@ -388,7 +409,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(modifier = Modifier.padding(end = Grid.x12)) {
+            Column(modifier = Modifier.weight(1f).padding(end = Grid.x12)) {
                 Text("允许展示端接入", style = Type.Body)
                 Text("默认关。白名单之外的一律拒", style = Type.Caption, color = Ink.TextLow)
             }
@@ -490,7 +511,6 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
         left <= 0 -> Tone.Ok
         else -> Tone.Sat
     }
-    val arm by app.arm.collectAsState()
     val big = when {
         moduleOff -> "离线"
         left == null -> "--"
@@ -528,12 +548,8 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
                 Text(t, style = Type.Numeric.copy(color = tone.color))
             }
         }
-        HoldToFire(
-            onDown = { app.pressDownSos() },
-            onUp = { app.releaseSos() },
-            label = if (arm.active) "松手即取消（${(arm.leftMs / 1000).toInt() + 1}）" else "长按 3 秒发 SOS",
-            compact = true,
-        )
+        // **这颗钮挪到顶部状态条了，这里不再放第二颗**：同一页两个 SOS，出事时人只会先按错一个。
+        // 撤销那条回显留在原地 —— 它讲的是"刚才按的那下有没有生效"，属于这张卡的账
         val cancel by app.cancelLine.collectAsState()
         cancel?.let { Text(it, style = Type.Caption, color = Ink.Wait) }
     }

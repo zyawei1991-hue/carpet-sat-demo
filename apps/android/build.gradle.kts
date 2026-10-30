@@ -91,6 +91,19 @@ android {
         resources.excludes += setOf("META-INF/*.kotlin_module", "META-INF/DEPENDENCIES")
     }
 
+    /**
+     * **截图 harness**（V1.10.1）。这台机器上没有手机也没有 emulator，所以"UI 乱不乱"这句
+     * 我一直只能靠数学说 —— 而 §5.2 里"一屏密度""看着挤不挤"那半条恰恰是眼睛的活。
+     * Robolectric 的 NATIVE 图形模式能在 JVM 里把 Compose 真画出来（不是影子绘制），
+     * 于是 `captureToImage()` 出一张真 PNG。要它就必须带上资源：合并后的 manifest 与 R 都由它读。
+     */
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+    }
+
     lint {
         // 白名单还没填真域名，别把"明文"这件事糊过去：让它继续报错，报给我们自己看
         abortOnError = true
@@ -119,9 +132,24 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // 只在 debug 变体里注册一个空 Activity 供 Compose 测试规则宿主使用（release 包不受影响）
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    /**
+     * 截图那一套走的是 **JUnit 4**（`AndroidJUnit4` + `createComposeRule` 两个都是 4 的 Rule），
+     * 而本模块跑在 JUnit Platform 上，所以必须挂 vintage 引擎，否则测试会被"发现不到"而静默跳过 ——
+     * 静默跳过的测试看起来和全绿一模一样，是最坏的一种假阳性。
+     */
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.12.1")
+    testImplementation("androidx.test:core:1.5.0")
+    testImplementation("androidx.test.ext:junit:1.1.5")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("androidx.compose.ui:ui-test-manifest")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.2")
 }
 
 tasks.withType<Test> {

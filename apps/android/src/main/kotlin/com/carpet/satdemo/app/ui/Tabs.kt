@@ -133,7 +133,9 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.padding(end = Grid.x12)) {
+        // weight(1f) 不是好看，是**不压到开关**：没有它，长说明按自身宽度量，
+        // 直接盖在右侧 Switch 上（截图 harness 第一次拍出来就看见了这条）
+        Column(modifier = Modifier.weight(1f).padding(end = Grid.x12)) {
             Text(title, style = Type.Body)
             Text(hint, style = Type.Caption, color = Ink.TextLow)
         }

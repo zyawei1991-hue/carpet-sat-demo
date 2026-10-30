@@ -217,10 +217,13 @@ internal fun HoldToFire(
     onUp: () -> Unit,
     label: String = "长按 3 秒触发 SOS",
     compact: Boolean = false,
+    modifier: Modifier = Modifier,
+    /** 卡片里铺满一行；顶部状态条那种要的是"一枚能按的胶囊"，那里传 false */
+    fill: Boolean = true,
 ) {
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
+            .then(if (fill) Modifier.fillMaxWidth() else Modifier)
             .background(Ink.Alert, RoundedCornerShape(Grid.x12))
             .pointerInput(Unit) {
                 detectTapGestures(

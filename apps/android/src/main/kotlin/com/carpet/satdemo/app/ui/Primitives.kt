@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlin.math.cos
@@ -165,8 +166,10 @@ private fun RowLineHead(title: String, trailing: String?) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title.uppercase(), style = Type.Overline)
-        trailing?.let { Text(it, style = Type.Overline, color = Ink.TextLow) }
+        // **组标题必须比组里的行大**。上一版这里用 Overline（11sp），而 RowLine 的标签是 Body（15sp）——
+        // 标题比它管的每一行都小，分组这件事就只剩代码里知道，屏幕上读不出来。整页截图第一条实拍的层级 bug。
+        Text(title, style = Type.Title)
+        trailing?.let { Text(it, style = Type.Caption, color = Ink.TextLow) }
     }
 }
 
@@ -190,7 +193,8 @@ fun RowLine(
         Text(label, style = Type.Body.copy(color = Ink.TextMid), modifier = Modifier.padding(end = Grid.x12))
         Text(
             value ?: "--",
-            style = if (mono) Type.Mono else Type.Body,
+            // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
+            style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,
             color = when {
                 value == null -> Ink.TextLow
                 tone !== Tone.Neutral -> tone.color
@@ -207,13 +211,13 @@ fun HairLine(modifier: Modifier = Modifier) {
 }
 
 /**
- * 组标题。**层级靠"字距 + 留白"，不靠颜色**，所以这里给的是 [Type.Overline]。
- * 上一版的 [SectionLabel] 用 12sp 灰字，掉在卡片堆里完全看不见，分组因此不成立。
+ * 小节标题。**它必须大过自己那行说明**：上一版标题 11sp、说明 12.5sp，
+ * 屏幕上是说明在领读、标题在当注脚 —— 这条只有整页截图能看出来，读代码看不出来。
  */
 @Composable
 fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifier) {
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
-        Text(title.uppercase(), style = Type.Overline)
+        Text(title, style = Type.Body.copy(fontWeight = FontWeight.SemiBold, color = Ink.TextHigh))
         note?.let { Text(it, style = Type.Caption, color = Ink.TextLow) }
     }
 }
@@ -223,7 +227,7 @@ fun SectionHead(title: String, note: String? = null, modifier: Modifier = Modifi
  * 每枚 chip 只写"什么 + 状态"，颜色一律从 [Tone] 取，不引入第二种表达方式。
  */
 @Composable
-fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
+fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier, trailing: (@Composable () -> Unit)? = null) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
@@ -242,6 +246,9 @@ fun StatusRail(items: List<RailItem>, modifier: Modifier = Modifier) {
                 it0.value?.let { Text(it, style = Type.Caption, color = it0.tone.color) }
             }
         }
+        // 右边那格空着是浪费：状态条是首页唯一"不滚动就在"的位置，安全件该钉在这里
+        Spacer(modifier = Modifier.weight(1f))
+        trailing?.invoke()
     }
 }
 
@@ -442,7 +449,8 @@ fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boo
         Text(label, style = Type.Caption, modifier = Modifier.padding(end = Grid.x12))
         Text(
             value ?: "--",
-            style = if (mono) Type.Mono else Type.Body,
+            // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
+            style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,
             color = when {
                 value == null -> Ink.TextLow
                 tone !== Tone.Neutral -> tone.color
@@ -516,10 +524,14 @@ fun PassArc(
 ) {
     Canvas(modifier = modifier.fillMaxWidth().height(56.dp)) {
         val stroke = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-        val r = size.width / 2f - stroke.width
+        // **画成扁椭圆，不画正半圆。** 半径取宽度一半的正圆要 200dp 高才装得下，
+        // 而 Compose 的 Canvas 默认不裁切 —— 第一版就是这么把弧线画到框外，
+        // 直接穿过了上面的倒计时环（截图 harness 拍出来的第一条 bug）。
+        val rx = size.width / 2f - stroke.width
+        val ry = size.height - stroke.width
         val c = Offset(size.width / 2f, size.height - stroke.width / 2f)
-        val box = Size(r * 2f, r * 2f)
-        val origin = Offset(c.x - r, c.y - r)
+        val box = Size(rx * 2f, ry * 2f)
+        val origin = Offset(c.x - rx, c.y - ry)
         drawArc(
             color = Ink.Track,
             startAngle = 180f,
@@ -543,7 +555,7 @@ fun PassArc(
             drawCircle(
                 color = Ink.TextHigh,
                 radius = stroke.width,
-                center = Offset(c.x + r * cos(a).toFloat(), c.y + r * sin(a).toFloat()),
+                center = Offset(c.x + rx * cos(a).toFloat(), c.y + ry * sin(a).toFloat()),
             )
         }
     }
