@@ -190,6 +190,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
 private fun AssistantHero(app: AppRuntime) {
     val reduce = LocalReduceMotion.current
     val chat = app.chat.collectAsState().value
+    val thinking by app.aiThinking.collectAsState()
     val endpoint by app.aiEndpoint.collectAsState()
     val granted by app.aiGranted.collectAsState()
     var draft by rememberSaveable { mutableStateOf("") }
@@ -198,7 +199,10 @@ private fun AssistantHero(app: AppRuntime) {
     var key by rememberSaveable { mutableStateOf(endpoint.apiKey) }
     var model by rememberSaveable { mutableStateOf(endpoint.model) }
 
-    InkCard(level = Level.Raised, icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
+    // 这张卡不给图标：它的标题行右边有一枚 48dp 的齿轮，标题被那行撑到垂直居中，
+    // 左边再挂一枚 20dp 的小图标就只对齐到行的顶边 —— 截图里"主理人"比图标低半行，就是这半行的错位。
+    // 首屏这张本来就是主角，不需要图标再告诉用户它是谁
+    InkCard(level = Level.Raised, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
@@ -214,6 +218,11 @@ private fun AssistantHero(app: AppRuntime) {
         }
 
         chat.takeLast(3).forEach { line -> Bubble(app, line) }
+        // 发出去之后屏上必须立刻有东西：这条回答还在路上。
+        // 没有它，用户只能再点一次发送 —— 而这里明确不排队，多点的那次会被挡回来，两边都以为自己错了
+        AnimatedVisibility(visible = thinking, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
+            ThinkingBubble()
+        }
         if (chat.size > 3) Text("共 ${chat.size} 条，只显示最近 3 条", style = Type.Caption, color = Ink.TextLow)
         // 只有真接通了才说这句。它是一条能力，不是一句故障报告
         if (app.screenDialog && chat.isEmpty()) {
@@ -327,6 +336,29 @@ private fun FieldRow(label: String, value: String, onChange: (String) -> Unit) {
             unfocusedTextColor = Ink.TextHigh,
         ),
     )
+}
+
+/**
+ * 「这条还在路上」的那口气。
+ *
+ * 形状直接用回答气泡的形状，里面放两条灰条：位置、宽度、底色都和真回答一致，
+ * 回答落地时只是把条换成字，**整块不往下跳**。
+ * 不加闪烁、不加转圈的点 —— 它要说的是"等着，有结果"，不是"程序在动"。
+ */
+@Composable
+internal fun ThinkingBubble(modifier: Modifier = Modifier) {
+    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .background(Ink.Track, RoundedCornerShape(Round.Card))
+                .padding(horizontal = Grid.x12, vertical = Grid.Inner),
+            verticalArrangement = Arrangement.spacedBy(Grid.x4),
+        ) {
+            SkeletonBar(width = 132.dp, color = Ink.TextLow)
+            SkeletonBar(width = 76.dp, color = Ink.TextLow)
+        }
+    }
 }
 
 /** 一条对话。左右对齐就够，不做头像、不做气泡尾巴 —— 那两个都会把一屏能看的条数压掉一条 */

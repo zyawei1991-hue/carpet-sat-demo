@@ -1,6 +1,8 @@
 package com.carpet.satdemo.app.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -18,13 +20,20 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -136,7 +145,11 @@ fun LinkCard(s: CardScope) {
         Text(linkWord(st.phase), style = Type.Hero.copy(color = tone.color))
         Text(phaseLine(st.phase, st.clients), style = Type.Body)
         if (snap == null) {
-            Text("还没有收到第一条状态，稍等一下", style = Type.Caption)
+            // 三条灰条，不是"稍等一下"那一行字。标签先给全、值位留同高的条，
+            // 第一条状态落地时这张卡一行都不位移 —— 而且"还没到"从此和"取不到"长得不一样
+            ValueRow("主路", null, warming = true)
+            ValueRow("卫星终端", null, warming = true)
+            ValueRow("载噪比", null, warming = true)
         } else {
             ValueRow("主路", if (snap.link.primary.name == "cell") "蜂窝" else "卫星", if (snap.link.cellOk) Tone.Ok else Tone.Wait)
             ValueRow(
@@ -274,36 +287,70 @@ private fun ArmSegments(done: Int) {
 @Composable
 fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
     val arm by app.arm.collectAsState()
-    Box(
-        modifier = modifier
-            .size(56.dp)
-            .shadow(10.dp, CircleShape)
-            .background(Ink.Alert, CircleShape)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        app.pressDownSos()
-                        tryAwaitRelease()
-                        app.releaseSos()
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            // 按下去之后钮上就是剩下的秒数：教"松手能取消"这件事，不必另外写一行字
-            if (arm.active) "${arm.leftMs / 1000 + 1}" else "SOS",
-            style = Type.Body.copy(fontWeight = FontWeight.Bold),
+    val haptics = LocalHapticFeedback.current
+    // 三段各震一下：手指数得出"还剩几段"，比在震动的车里盯着数字看可靠。
+    // LaunchedEffect 认的是段号，一秒一跳的那种抖动一次都没有
+    LaunchedEffect(arm.segment) {
+        if (arm.segment > 0) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+    // 外面这一圈只在按住时存在：平时导航栏里就是一颗红钮，不预先占位、不常驻发光
+    Box(modifier = modifier.size(68.dp), contentAlignment = Alignment.Center) {
+        if (arm.active) SosArmRing(arm.fraction)
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .shadow(10.dp, CircleShape)
+                .background(Ink.Alert, CircleShape)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onPress = {
+                            app.pressDownSos()
+                            tryAwaitRelease()
+                            app.releaseSos()
+                        },
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                // 按下去之后钮上就是剩下的秒数：教"松手能取消"这件事，不必另外写一行字
+                if (arm.active) "${arm.leftMs / 1000 + 1}" else "SOS",
+                style = Type.Body.copy(fontWeight = FontWeight.Bold),
+                color = Color.White,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
+            )
+        }
+    }
+}
+
+/**
+ * 按住 SOS 时红钮外圈那根进度弧：白色、4dp、从十二点顺时针走满三秒。
+ *
+ * 白色而不是状态色 —— 这一圈只回答"还剩多少"，给它任何语义色都会和"红=出事"抢含义（§5.2 第 2 条）。
+ * 单独抽出来还有一层用：真机上"按住三秒"这个状态靠等待是拍不稳的，
+ * 抽成纯参数的图元，截图 harness 就能把 0.33 和 1.0 两档摆在一起量宽窄、量它会不会切进导航栏。
+ */
+@Composable
+internal fun SosArmRing(fraction: Float, modifier: Modifier = Modifier) {
+    val reduce = LocalReduceMotion.current
+    val swept by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec(reduce), label = "sosArm")
+    Canvas(modifier = modifier.size(68.dp)) {
+        val w = 4.dp.toPx()
+        drawArc(
             color = Color.White,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Clip,
+            startAngle = -90f,
+            sweepAngle = 360f * swept,
+            useCenter = false,
+            style = Stroke(width = w, cap = StrokeCap.Round),
+            topLeft = Offset(w / 2f, w / 2f),
+            size = Size(size.width - w, size.height - w),
         )
     }
 }
 
 /**
- * 过境窗口卡。
  *
  * 星历算不出来时那行人话必须上屏（E.9 / E.10 #7）：`NETWORK_ERROR` 的意思是
  * "没星历也没缓存"，该做的是连一次网；写成"没卫星信号"，用户会举着天线在空旷处白等。

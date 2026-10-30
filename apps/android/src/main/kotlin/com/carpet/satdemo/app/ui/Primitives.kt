@@ -61,6 +61,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.cos
@@ -196,7 +197,19 @@ fun InkCard(
         ) {
             if (icon != null || emphasis) {
                 Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
-                    icon?.let { IconBadge(it, if (tone === Tone.Neutral) Ink.TextMid else tone.color) }
+                    icon?.let {
+                        // **一张 20dp 的灰图标，不是一枚 36dp 的染色方块**。
+                        // 每张卡开头挂一枚色块，是生成式仪表盘最典型的那 tell（taste-skill
+                        // app-screens §13：icon in a tinted square on every card，23 张真页面里 0 张这么干）。
+                        // 图标只管"这一排说的是哪件事"，颜色还给状态和数据（§5.2 第 2 条）。
+                        // 顶部垫 4dp：让它和 18sp 的标题落在同一条带上，而不是压在标题第一行上面
+                        Icon(
+                            it,
+                            contentDescription = null,
+                            tint = Ink.TextMid,
+                            modifier = Modifier.size(20.dp).padding(top = Grid.x4),
+                        )
+                    }
                     if (emphasis) Dot(tone, modifier = Modifier.padding(start = Grid.x4))
                 }
             }
@@ -263,6 +276,7 @@ fun RowLine(
     value: String?,
     tone: Tone = Tone.Neutral,
     mono: Boolean = false,
+    warming: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
     Row(
@@ -274,7 +288,8 @@ fun RowLine(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, style = Type.Body.copy(color = Ink.TextMid), modifier = Modifier.padding(end = Grid.x12))
-        Text(
+        if (warming) SkeletonBar(width = 56.dp)
+        else Text(
             value ?: "--",
             // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
             style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,
@@ -291,6 +306,26 @@ fun RowLine(
 @Composable
 fun HairLine(modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxWidth().height(1.dp).background(Ink.Track))
+}
+
+/**
+ * 值还没到：占一条和真值同高的灰条。
+ *
+ * 它存在的理由是把**"还没到**"和**"取不到"**分成两件事。这两件事以前都画 `--`，
+ * 而用户分不清 —— 分不清就会去点刷新、然后以为 App 坏了。
+ * 纪律三条：**不闪（shimmer 是装饰，不是进度）、不动、和真值同高**，
+ * 这样第一条数据落地时整张卡一行都不会位移。
+ *
+ * [color] 必须比它站的那个底再亮一档。截图里栽过一次：气泡底本来就是 `Track`，
+ * 条也用 `Track`，拍出来是一颗完全空的气泡 —— 看着像坏了。
+ */
+@Composable
+fun SkeletonBar(modifier: Modifier = Modifier, width: Dp = 72.dp, color: Color = Ink.Track) {
+    Box(
+        modifier = modifier
+            .size(width, 13.dp)
+            .background(color, RoundedCornerShape(3.dp)),
+    )
 }
 
 /**
@@ -657,9 +692,16 @@ fun HeroStat(
     }
 }
 
-/** 一行"标签 — 值"。缺数据传 null，这里画 `--` 而不是 0 —— 0 是个看起来像事实的谎 */
+/** 一行"标签 — 值"。缺数据传 null，这里画 `--` 而不是 0 —— 0 是个看起来像事实的谎。
+ *  [warming] 是另一件事：源头已接、第一条还没回来，画灰条不画杠 */
 @Composable
-fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boolean = false) {
+fun ValueRow(
+    label: String,
+    value: String?,
+    tone: Tone = Tone.Neutral,
+    mono: Boolean = false,
+    warming: Boolean = false,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -668,7 +710,8 @@ fun ValueRow(label: String, value: String?, tone: Tone = Tone.Neutral, mono: Boo
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, style = Type.Caption.copy(lineHeight = 21.sp), modifier = Modifier.padding(end = Grid.x12))
-        Text(
+        if (warming) SkeletonBar(width = 56.dp)
+        else Text(
             value ?: "--",
             // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
             style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,

@@ -378,6 +378,9 @@ class AppRuntime(private val host: Application) {
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
     val chat: StateFlow<List<Turn>> = dialog.log.turns
 
+    /** 发出去的那句还在等回答。首屏那条占位气泡靠它，不然按了发送屏幕不动 */
+    val aiThinking: StateFlow<Boolean> get() = dialog.thinking
+
     /** 工程模式/演示要用：屏在不在、能不能说话 */
     val screenDialog: Boolean get() = runtime.screenCanTalk
 

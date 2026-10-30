@@ -47,8 +47,15 @@ fun VehicleStatusCard(s: CardScope) {
 @Composable
 fun VehicleFindCard(s: CardScope) {
     val fix = s.snap?.gnss?.takeIf { !(it.lat == 0.0 && it.lon == 0.0 && it.fixAgeS == null) }
-    InkCard(icon = MIcons.parking, mock = s.mock(Capability.VehicleBus)) {
-        CardTitle("寻车", trailing = "记一次车位", trailingAction = { s.app.say("还没接车辆总线，这一次车位没存下来") })
+    // 图标走 CardTitle 的内联那一只：标题行右边有个 48dp 的动作，标题被撑到垂直居中，
+    // 左边栏里那枚小图标就会比标题高半行（截图里"寻车"正是这个毛病）。内联的这只和标题同一条基线带
+    InkCard(mock = s.mock(Capability.VehicleBus)) {
+        CardTitle(
+            "寻车",
+            icon = MIcons.parking,
+            trailing = "记一次车位",
+            trailingAction = { s.app.say("还没接车辆总线，这一次车位没存下来") },
+        )
         // **没定位就不摆两行 `--`**：那两行说的和下面那句"还没有定位"是同一件事，
         // 说三遍不只啰嗦，还会让卡片看着像填不满的表（真机照片里"终端电量 --"是同一条 bug）
         ValueRow("车位编号", "B2-073")

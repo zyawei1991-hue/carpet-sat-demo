@@ -1,5 +1,8 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.material.ripple.LocalRippleTheme
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material.ripple.RippleTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -186,6 +189,22 @@ object Type {
     )
 }
 
+/**
+ * 按压反馈的颜色。
+ *
+ * Material 3 的默认 ripple 取 `colorScheme.primary`，而这套色板的主色是卫星青 ——
+ * 于是每一次点按都在溅一下强调色，全站几十处。强调色只该出现在**数据、状态、以及那一颗主按钮**上，
+ * 出现满屏就等于哪儿都没有重点（taste-skill app-screens §13）。
+ * 换成一档很淡的白：它的作用是"我按到了"，不是"这是什么品牌"。
+ */
+internal object InkRippleTheme : RippleTheme {
+    @Composable
+    override fun defaultColor(): Color = Color.White
+
+    @Composable
+    override fun rippleAlpha(): RippleAlpha = RippleAlpha(0.12f, 0.10f, 0.10f, 0.08f)
+}
+
 @Composable
 fun CarpetTheme(content: @Composable () -> Unit) {
     // 系统的"移除动画"在这里进 CompositionLocal，只有这一处读设置。
@@ -194,6 +213,9 @@ fun CarpetTheme(content: @Composable () -> Unit) {
     // 只借 Material 3 的深色装配（ripple、控件底色走 surface），
     // 语义色不让它动态取：主色板跟着手机壁纸变，"红"就不再只等于出事了（§5.2 第 2 条）
     CompositionLocalProvider(LocalReduceMotion provides reduceMotion) {
+        // ripple 的接管必须写在 MaterialTheme **里面**：它自己会再 provide 一枚
+        // MaterialRippleTheme（默认色就是 colorScheme.primary），写在外面直接被它盖掉。
+        // 这条由 FeedbackStatesRenderTest 钉住 —— 那种"看着改了、其实没生效"的改动没人会再看第二遍
         MaterialTheme(
             colorScheme = darkColorScheme(
                 primary = Ink.Sat,
@@ -208,7 +230,8 @@ fun CarpetTheme(content: @Composable () -> Unit) {
                 onSurfaceVariant = Ink.TextMid,
                 error = Ink.Alert,
             ),
-            content = content,
-        )
+        ) {
+            CompositionLocalProvider(LocalRippleTheme provides InkRippleTheme) { content() }
+        }
     }
 }

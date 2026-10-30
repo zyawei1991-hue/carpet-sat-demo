@@ -6,6 +6,8 @@ import com.carpet.satdemo.core.protocol.DialogPayload
 import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * 对话的**唯一一条接线**：谁说话 → 入账 → 该不该触发技能 → 答 → 回镜给圆屏。
@@ -35,8 +37,14 @@ class DialogBridge(
     /** 冷却钟跟着宿主的钟走：假时钟下"第二轮还会不会再提醒"是能测的，真钟下不能 */
     private val heartbeat: Heartbeat = Heartbeat(nowMs),
 ) {
-    private var busy = false
     private var turnSeq = 0
+
+    /**
+     * 这句还在等回答。界面拿它画那条"想"的占位气泡 ——
+     * 没有它，按下发送之后屏幕上一动不动，用户只能再点一次（而这里明确不排队）。
+     */
+    private val _thinking = MutableStateFlow(false)
+    val thinking: StateFlow<Boolean> = _thinking
 
     /** 一次问答。忙的时候回一句"我在想上一条"，不排队 —— 排队会让用户以为按了两次就发两遍 */
     suspend fun ask(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null) {
@@ -46,15 +54,15 @@ class DialogBridge(
         val asked = log.append(Turn(from = TurnFrom.Me, text = q, source = ReplySource.LocalRule, via = via, turnId = id))
             ?: return
         mirror(asked)
-        if (busy) {
+        if (_thinking.value) {
             say(gateway.recordProactive("我在想上一条，这句先不算。", skill = null), via, id)
             return
         }
-        busy = true
+        _thinking.value = true
         try {
             say(gateway.ask(q, facts()), via, id)
         } finally {
-            busy = false
+            _thinking.value = false
         }
     }
 
