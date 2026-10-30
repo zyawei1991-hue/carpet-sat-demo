@@ -1,0 +1,138 @@
+       SDK 
+
+                                         v1.0.9
+
+1. 
+
+ SDK  Android 
+ SDK 
+Android 
+
+              
+SDK           ephemerislibrary-release.aar
+SDK           v1.0.9
+              
+              Android
+
+2.            
+              11
+              26 
+ JVM Target   
+ Android SDK
+ 
+
+3. SDK 
+
+3.1 
+
+1.  ephemerislibrary-release.aar  Android  app/libs 
+2.  Android  AAR  SDK 
+
+3.2 
+
+SDK Manifest 
+android:usesCleartextTraffic="true"
+
+4. SDK 
+
+ StarManagerFactory  getStarManager()  StarManager 
+Context  Consumer<Long>  callback
+
+                                     
+context             Context          Android 
+callback            Consumer<Long>   SDK 
+
+callback                             
+                                     SDK 
+                                     
+ -1                                  
+ 0
+  0
+
+5. 
+
+5.1 
+
+ StarManager.calculate(RequestBean requestBean, ResultCallBack callBack) 
+
+5.1.1 RequestBean                    
+                    double           
+ lon                double           
+ lat                double           
+ alt                                  20°
+                                      80°
+Elevation           double           
+                                     
+hour                Int              
+5.1.2 ResultCallBack 
+ ResultCallBack  ResultBean
+
+                                                
+resultState          enum                       
+                                                
+result               List<CalculateResultBean>  
+                                                 resultState  SUCCESS
+                                                
+                                                null
+
+resultState                  
+                             
+                             
+ SUCCESS                     
+ NETWORK_ERROR               
+ TIME_OUT
+ CALCULATION_FAILED
+
+5.1.3 CalculateResultBean 
+
+                                                
+starName             String                     
+startTime            long                       
+endTime              long                       
+                                                 0°
+startAzimuth         double                     360°
+                                                
+endAzimuth           double                     
+maxElevation         double
+
+5.2 
+
+ StarManager.update() 
+
+
+5.3  SDK 
+
+ StarManager  StarManager.release() 
+
+6. 
+
+  SDK 
+ SDK 
+  SDK 
+
+7. 
+
+1.  AAR  app/libs
+2.  Manifest 
+3.  StarManager  callback
+4.  update() 
+5.  calculate()
+6.  ResultCallBack  resultState  SUCCESS 
+
+     
+7.  SDK  release()
+
+8. 
+
+ SDK 
+ 
+  update()
+ elevation  80° 20°
+
+      20°
+ calculate() 
+  20 
+   SDK  Android  Android 
+
+     Platform Signature SDK 
+

@@ -1,0 +1,585 @@
+        
+ SDK 
+
+                   V1.0
+                                                                                          SDK 
+
+                                                         
+1.  .....................................................................................................................................................................3
+2.  .................................................................................................................................................. 3
+3.  ........................................................................................................................................................... 3
+4.  ........................................................................................................................................................... 3
+
+      4.1. CustomError...................................................................................................................................... 3
+      4.2. TaskState ........................................................................................................................................... 4
+      4.3. SubjectTaskBean............................................................................................................................. 4
+      4.4. EntityICI ........................................................................................................................................... 4
+      4.5. EntityDII ........................................................................................................................................... 5
+      4.6. EntityMCI ........................................................................................................................................... 6
+      4.7. EntitySFI ........................................................................................................................................... 6
+5.  SDK ........................................................................................................................................................6
+6.  .................................................................................................................................................. 8
+      6.1. MCI  ............................................................................................................................8
+      6.2. SFQ  ............................................................................................................................8
+      6.3.  ...........................................................................................................................8
+      6.4.  ............................................................................................................................... 9
+      6.5. DII  ........................................................................................................ 9
+      6.6. ICI  IC  ..................................................................................................................... 9
+7.  ......................................................................................................................................................... 10
+      7.1.  SFQ  ..................................................................................................................................10
+      7.2.  COP ............................................................................................................................................ 10
+      7.3.  GMO ............................................................................................................................................ 10
+      7.4.  ............................................................................................................................. 10
+8.  .................................................................................................................................................... 11
+      8.1.  ........................................................................................................................................... 11
+      8.2. SFQ ................................................................................................................. 12
+      8.3. MCQ ................................................................................................................. 13
+      8.4.  ........................................................................................................................ 14
+      8.5.  SFQ  ........................................................................................................................ 15
+9.  ........................................................................................................................................... 15
+                                   SDK 
+
+1. 
+
+       SDK  APP 
+SDK 
+ SDK 
+
+             
+
+SDK          protocollibrary.aar
+
+SDK          v1.0.0
+
+             
+
+             Android
+
+2. 
+
+             
+             Rxjava
+JVM Target   11
+Android SDK  24+
+
+3. 
+
+1.  aar  app/libs  aar 
+2.  Rxjava 
+implementation 'io.reactivex.rxjava3:rxjava:3.1.12'
+
+4. 
+
+4.1.CustomError
+
+
+public enum CustomError {
+
+      // SDK 
+      INITIALIZE_ERROR,
+
+  //
+  INPUT_ERROR,
+
+  //
+  REMOVE,
+                                                                                          SDK 
+
+      // MCQ  ACK 
+      NO_ACK
+
+}
+
+4.2.TaskState
+
+
+public enum TaskState {
+
+      //
+      INIT,
+      //
+      START,
+      //
+      COMPLETE,
+      //
+      FAIL
+}
+
+4.3.SubjectTaskBean
+
+
+public class SubjectTaskBean {
+
+      //
+      public final TaskState state;
+      //
+      public final Object bundle;
+
+4.4.EntityICI
+
+ICI  Java 
+public class EntityICI {
+
+      //ID : ID
+      private final String id;
+
+      //:1- DCS-D
+      private int LinkMode;
+                                               SDK 
+
+      //, ICI  3
+      private int networkingType;
+
+      //:1-2-
+      private int serviceType;
+
+      //, ICI  6
+      private int communicationType;
+
+      //:0- 1-
+      private int satelliteResponseMode;
+
+      //, ICI  9
+      private int msgLength;
+
+4.5.EntityDII
+
+DII  Java 
+public class EntityDII {
+
+      //:1DCS-D
+      private final int DTU_Type;
+      //
+      private String Module_SoftwareVersion;
+      //
+      private String Module_HardwareVersion;
+                                     SDK 
+
+//
+private String deviceSerialNumber;
+
+      //
+      private String userVersion;
+
+4.6.EntityMCI
+
+public class EntityMCI {
+
+//utc 
+private final String UTCTime;
+
+//
+private final String cardId;
+
+/**
+ * 
+ *  16  16 
+ */
+private String hexStr;
+
+4.7.EntitySFI
+
+public class EntitySFI {
+
+//24
+private final int state;
+
+// id
+private final int id;
+
+5.  SDK
+
+1. DispatchManager 
+DispatchManager dispatchManager = new DispatchManager(new ModuleOperation() {
+
+                  /**
+                                                 SDK 
+
+* SDK 
+
+* @param isReady  SDK 
+
+*                               true               
+
+@CutomError.INITIALIZE_ERROR
+
+*/
+
+@Override
+
+public void initialization(boolean isReady) {}
+
+/**
+ *  SDK 
+ * @param pactWrap
+ */
+
+@Override
+public void passthrough(String pactWrap) {}
+
+/**
+ * SDK 
+ * @param data 
+ */
+
+@Override
+public void send(byte[] data) {}
+
+                  /**
+                   * 
+                   */
+
+                  @Override
+                  public void powerOn() {}
+                  /**
+
+                   * 
+                   */
+                  @Override
+                  public void powerDown() {}
+            });
+2. DispatchManager  receive(final byte[] data)
+                                                        SDK 
+
+3. DispatchManager  start()
+
+6. 
+
+ DispatchManager  getDataManager() ModuleDataManager
+
+6.1.MCI
+
+1.  MCI  MCI  start 
+
+
+
+Disposable  disposable    =  dataManager.setMCIMessageListening(new
+
+Consumer<EntityMCI>() {
+
+            @Override
+
+            public void accept(EntityMCI entityMCI) {
+
+                  }
+            });
+2. disposable.dispose();
+
+6.2.SFI
+
+1.  SFI  SFQ 
+
+ start 
+
+Disposable  disposable    =  dataManager.setSFIMessageListening(new
+
+Consumer<EntitySFI>() {
+
+            @Override
+
+            public void accept(EntitySFI entitySFI) {
+
+                  }
+            });
+2. disposable.dispose();
+
+6.3.PDI
+
+1. 
+Disposable disposable = dataManager.setSelectedSatelliteListening
+
+ (new Consumer<Pair<String, Float>>() {
+                  @Override
+                  public void accept(Pair<String, Float> stringFloatPair) {
+                                                               SDK 
+
+                        //
+                        String name = stringFloatPair.first;
+                        //
+                        float cnr = stringFloatPair.second;
+                  }
+            });
+2. disposable.dispose();
+
+6.4.
+
+1. 
+
+Disposable  disposable  =  dataManager.setEarthStationListening(new
+
+Consumer<Boolean>() {
+
+            @Override
+
+            public void accept(Boolean aBoolean) {
+
+                  }
+            });
+2. disposable.dispose();
+
+6.5.DII
+
+Disposable disposable = dataManager.setDIIListening(new Consumer<EntityDII>() {
+                  @Override
+                  public void accept(EntityDII entityDII) {
+                        if (entityDII != EntityDII.empty) {
+                              //
+                        }
+                  }
+
+            });
+2. disposable.dispose();
+
+6.6. IC ICI
+
+Disposable disposable = dataManager.setICIListening(new Consumer<EntityICI>() {
+                  @Override
+                  public void accept(EntityICI entityICI) {
+                        if (entityICI != EntityICI.empty) {
+                                   SDK 
+
+                              //
+                        }
+                  }
+            });
+2. disposable.dispose();
+
+7. 
+
+7.1. SFQ 
+
+dataManager.clearSFQ();
+
+7.2. COP
+
+//
+dataManager.setCOP(int b);
+
+7.3. GMO
+
+/**
+ *  GMO 
+ * @param target 
+ * @param openPattern 
+ * @param frequency 
+ */
+dataManager.sendGMO(String target, int openPattern, int frequency);
+
+7.4.
+
+/**
+ * SDK 
+
+ *  TPI 
+ * @param longitude -180 ~ 180
+ * @param latitude -90 ~ 90
+ */
+dataManager.updateLocation (double longitude, double latitude);
+                                                  SDK 
+
+8. 
+
+8.1.
+
+/**
+ * 
+ * @param context 
+ * @param src 
+ * @param consumer 
+ */
+SubjectTask<?> subjectTask = dataManager.updateSOC(Context, src, new
+Consumer<SubjectTaskBean>() {
+
+                  //
+                  @Override
+                  public void accept(SubjectTaskBean subjectTaskBean) {
+
+//state: TaskState.START 
+
+if (subjectTaskBean.state == TaskState.START) {
+
+     //progress:  0~99
+
+     int  progress                               =          (int)
+
+Objects.requireNonNull(subjectTaskBean.bundle);
+
+}
+
+//state: TaskState.FAIL 
+else if (subjectTaskBean.state == TaskState.FAIL) {
+
+     //SDK @CustomError
+     if (subjectTaskBean.bundle instanceof CustomError) {
+
+     }
+     //
+     else if (subjectTaskBean.bundle instanceof Integer) {
+
+     }
+                                                                           SDK 
+         }
+
+         //state: TaskState.COMPLETE 
+         else if (subjectTaskBean.state == TaskState.COMPLETE) {
+
+                 }
+           }
+     });
+
+8.2.SFQ
+
+/**
+
+*  SFQ 
+
+* @param cardId 
+
+* @param content 16 
+
+*                    byte  2  16  0
+
+* @param consumer 
+
+*/
+
+SubjectTask<?> subjectTask = dataManager.sendMsgSFQ(cardId, content, new
+Consumer<SubjectTaskBean>() {
+
+                  @Override
+                  public void accept(SubjectTaskBean subjectTaskBean) {
+
+         //state: TaskState.FAIL 
+         if (subjectTaskBean.state == TaskState.FAIL) {
+
+                    //SDK @CustomError
+                    if (subjectTaskBean.bundle instanceof CustomError) {
+
+                    }
+                    // SFI 
+                    else if (subjectTaskBean.bundle instanceof Integer) {
+
+               }
+         }
+                                                     SDK 
+
+        //state: TaskState.COMPLETE 
+
+        else if (subjectTaskBean.state == TaskState.COMPLETE) {
+
+           // ID setSFIMessageListening 
+
+
+
+           int   id                              =                (int)
+
+Objects.requireNonNull(subjectTaskBean.bundle);
+
+        }
+
+     }
+
+});
+
+8.3.MCQ
+
+SubjectTask<?> subjectTask = dataManager.sendMsgMCQ(cardId, content, new
+Consumer<SubjectTaskBean>() {
+
+                  @Override
+                  public void accept(SubjectTaskBean subjectTaskBean) {
+
+        //state: TaskState.FAIL 
+        if (subjectTaskBean.state == TaskState.FAIL) {
+
+           //SDK @CustomError
+           if (subjectTaskBean.bundle instanceof CustomError) {
+
+           }
+           // FBI 
+           else if (subjectTaskBean.bundle instanceof Integer) {
+
+              }
+        }
+
+        //state: TaskState.COMPLETE 
+        else if (subjectTaskBean.state == TaskState.COMPLETE) {
+
+           // ACK
+           if (subjectTaskBean.bundle == CustomError. NO_ACK) {
+                                                        SDK 
+
+}
+}
+
+            });
+ subjectTask.cancel(Object obj)
+
+8.4.
+
+
+
+/**
+ * 
+ * @param consumer 
+ */
+
+SubjectTask<?>  subjectTask    =  dataManager.queryOfflineMsg(new
+
+Consumer<SubjectTaskBean>() {
+
+@Override
+
+public void accept(SubjectTaskBean subjectTaskBean) {
+
+//state: TaskState.START 
+if (subjectTaskBean.state == TaskState.START) {
+
+      // setMCIMessageListening  MCI
+     int remaining = (int) Objects.requireNonNull(subjectTaskBean.bundle);
+}
+
+//state: TaskState.FAIL 
+else if (subjectTaskBean.state == TaskState.FAIL) {
+
+//SDK @CustomError
+if (subjectTaskBean.bundle instanceof CustomError) {
+
+}
+// CEICES 
+else if (subjectTaskBean.bundle instanceof Integer) {
+
+}
+                                                                                       SDK 
+         }
+
+         //state: TaskState.COMPLETE 
+         else if (subjectTaskBean.state == TaskState.COMPLETE) {
+         }
+
+      }
+});
+
+ subjectTask.cancel(Object obj)
+
+8.5. SFQ 
+
+SubjectTask<?> subjectTask = dataManager.queryMsgSFQ(new Consumer<Integer>() {
+      @Override
+      public void accept(Integer integer) {
+            if (integer < 0) {
+                  //
+            }else {
+                  // integer 
+            }
+      }
+
+});
+
+ subjectTask.cancel(Object obj)
+
+9. 
+
+1.
+2.
+
