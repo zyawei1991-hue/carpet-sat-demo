@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -60,6 +61,7 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
  */
 @Composable
 fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
+    val reduce = LocalReduceMotion.current
     val scene by app.scene.collectAsState()
     val scope = CardScope(app, status)
     var editing by rememberSaveable { mutableStateOf(false) }
@@ -79,7 +81,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
         DockGroup(app, status)
         SatelliteStrip(app, status, open = satOpen, onToggle = { satOpen = !satOpen })
         // 那两张卡默认收着。兜底条上那句"展开完整链路卡"必须真能点开，否则它是一句谎
-        AnimatedVisibility(visible = satOpen, enter = Motion.expandIn, exit = Motion.expandOut) {
+        AnimatedVisibility(visible = satOpen, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             Column(verticalArrangement = Arrangement.spacedBy(Grid.Card)) {
                 RenderCard("link", scope)
                 RenderCard("pass", scope)
@@ -99,7 +101,8 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { moreCards = !moreCards }
-                    .padding(vertical = Grid.x8),
+                    .defaultMinSize(minHeight = 48.dp)
+                    .padding(horizontal = Grid.x8, vertical = Grid.x4),
                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -115,12 +118,18 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                     color = Ink.Sat,
                 )
                 Box(modifier = Modifier.weight(1f))
-                Text(
-                    if (editing) "完成" else "排列这些卡",
-                    style = Type.Caption,
-                    color = Ink.TextLow,
-                    modifier = Modifier.clickable { editing = !editing },
-                )
+                Box(
+                    modifier = Modifier
+                        .clickable { editing = !editing }
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (editing) "完成" else "排列这些卡",
+                        style = Type.Caption,
+                        color = Ink.TextLow,
+                    )
+                }
             }
         }
         if (editing) CardManager(app, app.managedCards(scene))
@@ -179,6 +188,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
  */
 @Composable
 private fun AssistantHero(app: AppRuntime) {
+    val reduce = LocalReduceMotion.current
     val chat = app.chat.collectAsState().value
     val endpoint by app.aiEndpoint.collectAsState()
     val granted by app.aiGranted.collectAsState()
@@ -220,7 +230,7 @@ private fun AssistantHero(app: AppRuntime) {
                     Icon(MIcons.send, contentDescription = "发送", tint = Ink.Sat)
                 }
                 // 语音这条链路在圆屏那侧（板载双麦），手机只做入口：按下去必须说清还没接
-                IconButton(onClick = { app.runtime.log("语音输入还没接：麦克风在圆屏那一侧") }) {
+                IconButton(onClick = { app.say("语音输入还没接：麦克风在圆屏那一侧") }) {
                     Icon(MIcons.mic, contentDescription = "语音（未接）", tint = Ink.TextMid)
                 }
             },
@@ -235,16 +245,13 @@ private fun AssistantHero(app: AppRuntime) {
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
             listOf("链路", "过境", "额度", "圆屏配对", "车在哪").forEach { q ->
-                Box(
-                    modifier = Modifier
-                        .background(Ink.Track, RoundedCornerShape(Round.Chip))
-                        .clickable { app.askAi(q) }
-                        .padding(horizontal = Grid.x12, vertical = Grid.x8),
-                ) { Text(q, style = Type.Caption, color = Ink.TextHigh) }
+                // 走同一枚 [Chip]：这里原来是手写的一枚 33dp 高的方块，而它恰恰是首页最该被点中的东西。
+                // 复用原语顺带解决了两件事 —— 触摸区到 48dp，按压态和场景切换器那几枚保持一致
+                Chip(q, selected = false) { app.askAi(q) }
             }
         }
 
-        AnimatedVisibility(visible = configuring, enter = Motion.expandIn, exit = Motion.expandOut) {
+        AnimatedVisibility(visible = configuring, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
                 // 档位与端点只在展开后出现。它们是真要用的东西，但不该站在首屏
                 ValueRow("权限档", granted.label)
@@ -454,7 +461,12 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
                         allowed.forEach { id ->
                             // 台账里那台的链接状态才是"现在通不通"；只认白名单会把"填过号但从没来过"画成绿的
                             val link = screens.firstOrNull { it.title == id }?.link
-                            Box(modifier = Modifier.clickable { app.revokeScreen(id) }) {
+                            Box(
+                                modifier = Modifier
+                                    .clickable { app.revokeScreen(id) }
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
                                 Badge(
                                     id,
                                     when (link) {
@@ -523,6 +535,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
  */
 @Composable
 private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolean, onToggle: () -> Unit) {
+    val reduce = LocalReduceMotion.current
     val sat = st.snapshot?.sat
     val phase = sat?.phase?.let { phaseLabel(it) } ?: "—"
     val left = sat?.nextPassInS
@@ -563,12 +576,18 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
                     },
                     style = Type.Body,
                 )
-                Text(
-                    if (open) "收起卫星详情" else "展开卫星详情",
-                    style = Type.Caption,
-                    color = Ink.Sat,
-                    modifier = Modifier.clickable { onToggle() },
-                )
+                Box(
+                    modifier = Modifier
+                        .clickable { onToggle() }
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (open) "收起卫星详情" else "展开卫星详情",
+                        style = Type.Caption,
+                        color = Ink.Sat,
+                    )
+                }
             }
             // 这一格里不再放第二个图标（卡片左上角已经有卫星了），放的是"还要等多久"那个数：
             // 兜底条要能在扫一眼时回答一个问题，而这个问题是时间。
@@ -576,7 +595,7 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
             // **没数的时候这一格整个不画**：一个大号灰字"未取"挂在卡角上，
             // 看着像控件坏了，而它想说的只是"还不知道"
             if (big != null) {
-                AnimatedContent(targetState = big, transitionSpec = { Motion.slideForward(true) }, label = "strip") { t ->
+                AnimatedContent(targetState = big, transitionSpec = { Motion.slideForward(true, reduce) }, label = "strip") { t ->
                     Text(t, style = Type.Numeric.copy(color = tone.color))
                 }
             }

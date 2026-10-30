@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import com.carpet.satdemo.app.ui.CarpetRoot
 import com.carpet.satdemo.app.ui.CarpetTheme
 
@@ -28,6 +29,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // edge-to-edge：内容画到状态栏/手势条底下，避让交给 Scaffold 的 windowInsets。
+        // targetSdk 34 在 Android 14 上本来就被系统强制成这个模式，这里显式写出来是为了
+        // Android 11–13 也走同一条路径 —— 否则同一套界面在两代系统上是两种留白
+        enableEdgeToEdge()
         requestPermissions(PERMISSIONS, 1)
         state.startMonitors()
         setContent { CarpetTheme { CarpetRoot(state) } }

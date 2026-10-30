@@ -1,5 +1,6 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,13 +9,17 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -24,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.runtime.DemoRuntime
@@ -62,12 +68,15 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
  */
 @Composable
 fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifier, grouped: Boolean = false) {
+    // 一屏一个重心：流里**第一张**标了 hero 的卡升一档，其余一律 [Level.Plain]。
+    // 只有第一张 —— 注册表里两张卡同屏时谁当主角由顺序决定，而顺序是用户排的，不是页面钦定的
+    val hero = keys.firstOrNull { Cards.registry.isHero(it) && Cards.registry.resolve(it, scope) != null }
     if (!grouped) {
         Column(
             modifier = modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(Grid.Card),
         ) {
-            keys.forEach { key -> RenderCard(key, scope) }
+            keys.forEach { key -> RenderCard(key, scope, hero = key == hero) }
         }
         return
     }
@@ -82,7 +91,7 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
         order.forEach { g ->
             Column(verticalArrangement = Arrangement.spacedBy(Grid.Card)) {
                 if (g !== CardGroup.Inline) SectionHead(g.label, g.note)
-                live.filter { Cards.registry.group(it) === g }.forEach { RenderCard(it, scope) }
+                live.filter { Cards.registry.group(it) === g }.forEach { RenderCard(it, scope, hero = it == hero) }
             }
         }
     }
@@ -93,11 +102,12 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
  * 所以现在按下去只如实说没接 —— 一个看着能按、按了什么都没发生的按钮，
  * 比没有这个按钮更糟。
  *
- * **画成小字块，不画成三颗大按钮**：三颗等高按钮摆在页首，视觉上就是本页的"主行动"，
- * 可它们一个都没接。降级成文字块之后，它读起来是"这个场景会做的事"，而不是"快点我"。
+ * **用 Material 的 OutlinedButton，不用自己拼的方块**：自拼的 clickable 方块没有按压态、
+ * 没有焦点态、没有涟漪，用户按下去只有字变了颜色，那正是"质感差"的来处。描边（而非实底）
+ * 把它标成次要动作：三颗都还没接的东西不该长得像本页的主行动。
  *
  * **不横向滚**：三个词在任何一档视口都装得下，而横向滚动会让人以为后面还有第四个。
- * 高度给到 44dp —— 它是可点的，点得着比它长得瘦重要。
+ * 最小高度 48dp —— Material 的触摸目标下限，点得着比它长得瘦重要。
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
@@ -106,16 +116,16 @@ fun SceneActions(actions: List<String>, app: AppRuntime) {
         horizontalArrangement = Arrangement.spacedBy(Grid.x8),
     ) {
         actions.forEach { a ->
-            // 等宽 + 描边：三颗只填 Ink.Sunk 的方块贴在黑底上，读出来是"页面坏了一块"，不是"能按"
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(44.dp)
-                    .background(Ink.Raise, RoundedCornerShape(Round.Chip))
-                    .border(1.dp, Ink.Outline, RoundedCornerShape(Round.Chip))
-                    .clickable { app.runtime.log("「$a」还没接：需要车辆总线或账号通道") },
-                contentAlignment = Alignment.Center,
-            ) { Text(a, style = Type.Body, maxLines = 1) }
+            OutlinedButton(
+                onClick = { app.say("「$a」还没接：需要车辆总线或账号通道") },
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                shape = RoundedCornerShape(Round.Chip),
+                border = BorderStroke(1.dp, Ink.Outline),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink.TextHigh, containerColor = Ink.Sunk),
+                contentPadding = PaddingValues(horizontal = Grid.x8, vertical = Grid.x4),
+            ) {
+                Text(a, style = Type.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }
@@ -136,20 +146,30 @@ fun CardManager(app: AppRuntime, keys: List<String>) {
             ) {
                 Text(Cards.registry.title(key), style = Type.Body)
                 Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
-                    Text(
-                        "上移",
-                        style = Type.Caption,
-                        color = Ink.Sat,
-                        modifier = Modifier.clickable { app.moveCard(key, up = true) },
-                    )
-                    Text(
-                        if (hidden.contains(key)) "显示" else "隐藏",
-                        style = Type.Caption,
-                        color = Ink.Sat,
-                        modifier = Modifier.clickable { app.toggleCard(key, !hidden.contains(key)) },
-                    )
+                    MiniAction("上移") { app.moveCard(key, up = true) }
+                    MiniAction(if (hidden.contains(key)) "显示" else "隐藏") {
+                        app.toggleCard(key, !hidden.contains(key))
+                    }
                 }
             }
         }
+    }
+}
+
+/**
+ * 一个文字动作，但**手指区域给到 48dp**。之前这里是一枚 12.5sp 的字直接 clickable，
+ * 实际可点面积约 30dp —— Material 的下限是 48dp，够不着的控件比看不见的控件更容易被骂"难用"。
+ * clickable 写在 defaultMinSize 外面：这样撑开的空白也在触摸区里，而不是只有那几个字。
+ */
+@Composable
+private fun MiniAction(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .padding(horizontal = Grid.x4),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = Type.Caption, color = Ink.Sat, maxLines = 1)
     }
 }

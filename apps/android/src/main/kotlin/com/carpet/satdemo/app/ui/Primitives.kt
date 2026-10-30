@@ -1,19 +1,24 @@
 package com.carpet.satdemo.app.ui
 
+import android.provider.Settings
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,6 +30,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,7 +44,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,28 +69,86 @@ import kotlin.math.sin
 
 /**
  * Material 3 官方 motion 的本地化取值（参考 nowinandroid / Tivi 的用法，都是 Apache-2.0）。
- * 只留三档：**内容换页**用 slide+fade，**状态变化**用 spring，**进出场**用短 tween。
+ * 只留三档：**内容换页**用 slide+fade，**状态变化**用 tween，**进出场**用展开/收起。
  * 不自创第四种 —— 动效一多，用户会以为每个动画都对应一个功能。
+ *
+ * 每个规格都要调用方传 [reduce]（值来自 [LocalReduceMotion]）：`transitionSpec`、`enter`、`exit`
+ * 这些 lambda **不是** Composable，读不了 CompositionLocal，所以只能在外面取好再传进来。
+ * 系统"移除动画"打开时位移和尺寸动画收掉，淡入淡出和颜色变化留着 ——
+ * Material 的要求是**减动效，不是取消反馈**，那两样才是"我按到了"的证据，
+ * 全砍成瞬变会让界面读起来像死机。
  */
 object Motion {
     const val Fast = 160
     const val Normal = 260
     const val Slow = 420
 
-    /** 换 Tab / 换场景：横向推入。方向跟着"往哪边切"，反着推会让人怀疑自己按错了 */
-    fun slideForward(forward: Boolean): ContentTransform =
-        (slideInHorizontally(tween(Normal)) { if (forward) it / 6 else -it / 6 } + fadeIn(tween(Fast))) togetherWith
-            (slideOutHorizontally(tween(Normal)) { if (forward) -it / 6 else it / 6 } + fadeOut(tween(Fast)))
+    /** 减动效时保留的那一档：位移归零，淡入淡出不归零 */
+    const val FadeOnly = 120
 
-    val springSpec = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
-    val tweenSpec = tween<Float>(Normal)
+    /** M3 的 emphasized 缓动：起步果断、收尾稳住。默认的 FastOutSlowIn 在短距离上看着像匀速 */
+    private val Emphasized = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
-    /** 颜色不能复用 [tweenSpec]：动画规格带类型，拿 Float 的规格去插 Color 是编译期就拦住的错法 */
-    val colorSpec = tween<Color>(Normal)
+    /** 出场比入场快。拖长的反馈会被读成延迟 */
+    private val EmphasizedExit = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
+
+    /** 换场景：横向推入。方向跟着"往哪边切"，反着推会让人怀疑自己按错了 */
+    fun slideForward(forward: Boolean, reduce: Boolean): ContentTransform =
+        if (reduce) fadeOnly()
+        else (slideInHorizontally(tween(Normal, easing = Emphasized)) { if (forward) it / 6 else -it / 6 } +
+            fadeIn(tween(Fast))).togetherWith(
+            slideOutHorizontally(tween(Normal, easing = EmphasizedExit)) { if (forward) -it / 6 else it / 6 } +
+            fadeOut(tween(Fast)),
+        )
+
+    /** 换 Tab 那一档：轻微上推 + 淡入淡出 */
+    fun tabChange(reduce: Boolean): ContentTransform =
+        if (reduce) fadeOnly()
+        else (slideInVertically(tween(Normal, easing = Emphasized)) { it / 12 } + fadeIn(tween(FadeOnly)))
+            .togetherWith(slideOutVertically(tween(Normal, easing = EmphasizedExit)) { -it / 12 } + fadeOut(tween(FadeOnly)))
+
+    /** 数值/颜色这类"值本身在动"的规格。减动效时压到最短，不压成 0 —— 0 会让数字凭空换 */
+    fun tweenSpec(reduce: Boolean): FiniteAnimationSpec<Float> = tween(dur(Normal, reduce, min = 90), easing = Emphasized)
+    fun colorSpec(reduce: Boolean): FiniteAnimationSpec<Color> = tween(dur(Normal, reduce, min = 90))
 
     /** 展开/收起统一用这一对。以前各处手写出入动画，四个地方四种时长 */
-    val expandIn = fadeIn(tween(Fast)) + expandVertically(tween(Normal))
-    val expandOut = fadeOut(tween(Fast)) + shrinkVertically(tween(Normal))
+    fun expandIn(reduce: Boolean): EnterTransition =
+        fadeIn(tween(if (reduce) FadeOnly else Fast)) +
+            expandVertically(if (reduce) tween(0) else tween(Normal, easing = Emphasized))
+    fun expandOut(reduce: Boolean): ExitTransition =
+        fadeOut(tween(if (reduce) FadeOnly else Fast)) +
+            shrinkVertically(if (reduce) tween(0) else tween(Normal, easing = EmphasizedExit))
+
+    /** 时长都过这里。[min] 是"减动效也不许归零"的下限 */
+    fun dur(ms: Int, reduce: Boolean, min: Int = 0): Int = if (reduce) min else ms
+
+    private fun fadeOnly(): ContentTransform =
+        fadeIn(tween(FadeOnly)) togetherWith fadeOut(tween(FadeOnly))
+}
+
+/**
+ * 系统的"移除动画"。值由 [CarpetTheme] 用 [systemReduceMotion] 注进来，界面各处只读它，
+ * 自己不查设置。默认 false：查不到（比如单测里的假 Context）就当动画开着。
+ */
+val LocalReduceMotion = staticCompositionLocalOf { false }
+
+/**
+ * 读系统的动画开关。这里只能用 `*_animation_scale`：`AccessibilityManager.isReduceMotionEnabled()`
+ * 是 API 35 才有的，本工程 compileSdk 34，编译期就碰不到那个字段。
+ * 三个 scale 都读 —— 厂商 ROM 把动画关掉时改的并不统一，只认一个会在某些机器上漏掉。
+ */
+@Composable
+internal fun systemReduceMotion(): Boolean {
+    val ctx = LocalContext.current
+    return remember(ctx) {
+        listOf(
+            Settings.Global.TRANSITION_ANIMATION_SCALE,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            Settings.Global.WINDOW_ANIMATION_SCALE,
+        ).any { key ->
+            runCatching { Settings.Global.getFloat(ctx.contentResolver, key, 1f) }.getOrDefault(1f) == 0f
+        }
+    }
 }
 
 /**
@@ -99,15 +166,17 @@ object Motion {
 @Composable
 fun InkCard(
     modifier: Modifier = Modifier,
-    level: Level = Level.Plain,
+    level: Level? = null,
     tone: Tone = Tone.Neutral,
     mock: Boolean = false,
     emphasis: Boolean = false,
     icon: ImageVector? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val shape = if (level === Level.Raised) RoundedCornerShape(Round.Hero) else RoundedCornerShape(Round.Card)
-    val bg = when (level) {
+    // null = "这张卡不表态"，交给页面。卡片自己挑档，一屏就会同时出现好几张强调卡
+    val lvl = level ?: LocalCardLevel.current
+    val shape = if (lvl === Level.Raised) RoundedCornerShape(Round.Hero) else RoundedCornerShape(Round.Card)
+    val bg = when (lvl) {
         Level.Plain -> Ink.Card
         Level.Raised -> Ink.Raise
         Level.Group -> Ink.Sunk
@@ -115,9 +184,9 @@ fun InkCard(
     val box = modifier
         .fillMaxWidth()
         .background(bg, shape)
-    val edged = if (level === Level.Raised) box.border(1.dp, Ink.Outline, shape) else box
+    val edged = if (lvl === Level.Raised) box.border(1.dp, Ink.Outline, shape) else box
     Box(
-        modifier = edged.then(if (level === Level.Group) Modifier else Modifier.padding(Grid.Pad)),
+        modifier = edged.then(if (lvl === Level.Group) Modifier else Modifier.padding(Grid.Pad)),
     ) {
         // 图标列在最左，内容整体右移：**每张卡的标题从同一条竖线起排**
         Row(
@@ -147,6 +216,12 @@ fun InkCard(
 
 /** 卡片的三档层级。见 [InkCard] */
 enum class Level { Plain, Raised, Group }
+
+/**
+ * 页面替卡片挑的档。卡片不传 `level` 时读这个孔，所以"谁是本页的主问题"写在流里、
+ * 不写在卡片里 —— 同一张卡换个场景未必还是主角，卡片自己说不了。
+ */
+val LocalCardLevel = staticCompositionLocalOf { Level.Plain }
 
 /**
  * 分组背板：一个标题 + 若干行。**组内不再各是一张卡**，
@@ -193,7 +268,7 @@ fun RowLine(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick).defaultMinSize(minHeight = 48.dp) else Modifier)
             .padding(vertical = Grid.Inner),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
@@ -253,16 +328,22 @@ fun EmptyCard(
     }
 }
 
-/** 文字型次要动作。**不再画成一颗灰底大按钮**：一屏五颗按钮的时候，没有一颗是重点 */
+/**
+ * 文字型次要动作。**不再画成一颗灰底大按钮**：一屏五颗按钮的时候，没有一颗是重点。
+ * 但它的**手指区域仍然要到 48dp**（Material 的下限）—— "长得轻"和"点得着"是两件事，
+ * 之前为了轻把它做成了一行 25dp 高的字，实测要很准地戳中间才按得到。
+ */
 @Composable
 fun GhostAction(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Text(
-        text,
-        style = Type.Caption.copy(color = Ink.Sat, fontWeight = FontWeight.SemiBold),
+    Box(
         modifier = modifier
             .clickable(onClick = onClick)
-            .padding(horizontal = Grid.x8, vertical = Grid.x8),
-    )
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .padding(horizontal = Grid.x8),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = Type.Caption.copy(color = Ink.Sat, fontWeight = FontWeight.SemiBold))
+    }
 }
 
 /**
@@ -350,11 +431,21 @@ data class RailItem(val label: String, val value: String? = null, val tone: Tone
  */
 @Composable
 fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    val shape = RoundedCornerShape(Round.Chip)
     Box(
         modifier = modifier
-            .background(if (selected) Ink.Sat else Ink.Track, RoundedCornerShape(Round.Chip))
+            // 未选中改成"描边、不填底"：填了 Ink.Track 之后这一排比卡片本身还抢眼，
+            // 而 M3 的 assist/filter chip 未选中态就是一根描边。选中仍是实底，对比度那条不变
+            .then(
+                if (selected) Modifier.background(Ink.Sat, shape)
+                else Modifier.border(1.dp, Ink.Outline, shape),
+            )
             .clickable(onClick = onClick)
+            .defaultMinSize(minHeight = 48.dp)
             .padding(horizontal = Grid.x12, vertical = Grid.x8),
+        // 撑到 48dp 之后必须把字重新居中：Box 默认 TopStart，不写这一行字就贴着上沿，
+        // 下面空出一截，看着像控件没画完
+        contentAlignment = Alignment.Center,
     ) {
         Text(
             label,
@@ -379,12 +470,14 @@ fun CollapsableNote(
     expandedByDefault: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    val reduce = LocalReduceMotion.current
     var open by rememberSaveable(label) { mutableStateOf(expandedByDefault) }
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { open = !open },
+                .clickable { open = !open }
+                .defaultMinSize(minHeight = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -396,7 +489,7 @@ fun CollapsableNote(
             )
             Text(label, style = Type.Caption.copy(color = Ink.Sat))
         }
-        AnimatedVisibility(visible = open, enter = Motion.expandIn, exit = Motion.expandOut) {
+        AnimatedVisibility(visible = open, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             Text(
                 text,
                 style = Type.Caption,
@@ -427,7 +520,8 @@ fun IconBadge(icon: ImageVector, tint: Color, modifier: Modifier = Modifier, siz
  */
 @Composable
 fun Dot(tone: Tone, modifier: Modifier = Modifier) {
-    val c by animateColorAsState(tone.color, tween(Motion.Normal), label = "dot")
+    val reduce = LocalReduceMotion.current
+    val c by animateColorAsState(tone.color, Motion.colorSpec(reduce), label = "dot")
     if (tone === Tone.Neutral) {
         Box(
             modifier = modifier
@@ -508,16 +602,17 @@ fun CardTitle(
         }
         trailing?.let { t ->
             // 同一个槽位里，"状态"和"能按的动作"必须长得不一样：
-            // 之前"记一次车位"和"熄火停车"都是灰字，用户只能靠试才知道哪个能按
+            // 之前"记一次车位"和"熄火停车"都是灰字，用户只能靠试才知道哪个能按。
+            // 动作那一只 clickable 写在 padding 外面，撑出来的空白也算触摸区（48dp 下限）
             if (trailingAction == null) Text(t, style = Type.Caption, color = Ink.TextLow)
-            else Text(
-                t,
-                style = Type.Caption,
-                color = Ink.Sat,
+            else Box(
                 modifier = Modifier
-                    .padding(vertical = Grid.x4)
-                    .clickable(onClick = trailingAction),
-            )
+                    .clickable(onClick = trailingAction)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(t, style = Type.Caption, color = Ink.Sat, modifier = Modifier.padding(horizontal = Grid.x4))
+            }
         }
     }
 }
@@ -539,6 +634,7 @@ fun HeroStat(
     display: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    val reduce = LocalReduceMotion.current
     val color = if (tone === Tone.Neutral) Ink.TextHigh else tone.color
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -551,7 +647,7 @@ fun HeroStat(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(Grid.x4),
             ) {
-                AnimatedContent(targetState = value, transitionSpec = { Motion.slideForward(true) }, label = "hero") { t ->
+                AnimatedContent(targetState = value, transitionSpec = { Motion.slideForward(true, reduce) }, label = "hero") { t ->
                     Text(t, style = (if (display) Type.Display else Type.Hero).copy(color = color))
                 }
                 unit?.let { Text(it, style = Type.Body, color = Ink.TextMid) }
@@ -606,9 +702,10 @@ fun CountdownRing(
     modifier: Modifier = Modifier,
     sub: String? = null,
 ) {
+    val reduce = LocalReduceMotion.current
     // 1Hz 的跳变直接画会一格一格地抖，动一下眼睛才读得出"在倒计时"而不是"数字变了"
-    val f by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec, label = "ring")
-    val c by animateColorAsState(tone.color, Motion.colorSpec, label = "ringColor")
+    val f by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec(reduce), label = "ring")
+    val c by animateColorAsState(tone.color, Motion.colorSpec(reduce), label = "ringColor")
     Box(modifier = modifier.size(104.dp), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.matchParentSize()) {
             val track = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round)
@@ -716,8 +813,9 @@ fun AimDial(azimuthDeg: Double, tone: Tone = Tone.Sat, modifier: Modifier = Modi
  */
 @Composable
 fun ProgressBar(fraction: Float, tone: Tone = Tone.Wait, modifier: Modifier = Modifier) {
-    val f by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec, label = "bar")
-    val c by animateColorAsState(tone.color, Motion.colorSpec, label = "barColor")
+    val reduce = LocalReduceMotion.current
+    val f by animateFloatAsState(fraction.coerceIn(0f, 1f), Motion.tweenSpec(reduce), label = "bar")
+    val c by animateColorAsState(tone.color, Motion.colorSpec(reduce), label = "barColor")
     Box(
         modifier = modifier
             .fillMaxWidth()

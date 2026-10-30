@@ -306,6 +306,24 @@ class AppRuntime(private val host: Application) {
         runtime.cancelSos { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
     }
 
+    /**
+     * 一次性反馈。以前这类话直接进 `runtime.log`，而那条日志**只在工程模式页显示** ——
+     * 也就是说用户按下"远程熄火""语音输入"之后，正常界面上什么都没发生。
+     * 按 Material 的分工，瞬时反馈归 Snackbar，日志归控制台，两边各留一份。
+     */
+    private val _snack = MutableStateFlow<String?>(null)
+    val snack: StateFlow<String?> = _snack
+
+    /** 说一句话给用户听，同时把它记进工程日志 */
+    fun say(line: String) {
+        _snack.value = line
+        runtime.log(line)
+    }
+
+    fun snackShown() {
+        _snack.value = null
+    }
+
     /** 设备台账（§8 R1 第一件事）。切 Tab、切场景都不会让它空一格 */
     val devices: StateFlow<List<Device>> get() = runtime.devicesSnapshot
 
@@ -478,7 +496,7 @@ class AppRuntime(private val host: Application) {
         val id = screenId.trim()
         if (id.isEmpty()) return false
         val ok = runtime.allowScreen(id)
-        runtime.log(if (ok) "已把 $id 放进白名单" else "白名单里已经有 $id")
+        say(if (ok) "已把 $id 放进白名单" else "白名单里已经有 $id")
         if (ok && !_flags.value.acceptScreens) setFlag(_flags.value.copy(acceptScreens = true))
         return ok
     }

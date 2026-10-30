@@ -163,6 +163,8 @@ data class CardDescriptor(
     val title: String,
     val group: CardGroup,
     val needs: Set<Capability>,
+    /** 这一张是本页的主问题：升一档底 + 一根描边。**一屏只会有一个**，见 [CardStream] */
+    val hero: Boolean = false,
     val body: @Composable (CardScope) -> Unit,
 )
 
@@ -178,6 +180,8 @@ class CardRegistry(descriptors: List<CardDescriptor>) {
     fun title(key: String): String = byKey[key]?.title ?: key
 
     fun group(key: String): CardGroup = byKey[key]?.group ?: CardGroup.Inline
+
+    fun isHero(key: String): Boolean = byKey[key]?.hero == true
 
     val all: List<CardDescriptor> get() = byKey.values.toList()
 }

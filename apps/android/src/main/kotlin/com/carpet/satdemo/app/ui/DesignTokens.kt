@@ -3,6 +3,7 @@ package com.carpet.satdemo.app.ui
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -187,22 +188,27 @@ object Type {
 
 @Composable
 fun CarpetTheme(content: @Composable () -> Unit) {
+    // 系统的"移除动画"在这里进 CompositionLocal，只有这一处读设置。
+    // Material 的规定：减动效是把位移和尺寸收掉，淡入和变色留着 —— 那是"我按到了"的证据
+    val reduceMotion = systemReduceMotion()
     // 只借 Material 3 的深色装配（ripple、控件底色走 surface），
     // 语义色不让它动态取：主色板跟着手机壁纸变，"红"就不再只等于出事了（§5.2 第 2 条）
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Ink.Sat,
-            onPrimary = Color(0xFF061018),
-            secondary = Ink.Sat,
-            background = Ink.Deep,
-            surface = Ink.Card,
-            surfaceVariant = Ink.Raise,
-            outline = Ink.Outline,
-            onBackground = Ink.TextHigh,
-            onSurface = Ink.TextHigh,
-            onSurfaceVariant = Ink.TextMid,
-            error = Ink.Alert,
-        ),
-        content = content,
-    )
+    CompositionLocalProvider(LocalReduceMotion provides reduceMotion) {
+        MaterialTheme(
+            colorScheme = darkColorScheme(
+                primary = Ink.Sat,
+                onPrimary = Color(0xFF061018),
+                secondary = Ink.Sat,
+                background = Ink.Deep,
+                surface = Ink.Card,
+                surfaceVariant = Ink.Raise,
+                outline = Ink.Outline,
+                onBackground = Ink.TextHigh,
+                onSurface = Ink.TextHigh,
+                onSurfaceVariant = Ink.TextMid,
+                error = Ink.Alert,
+            ),
+            content = content,
+        )
+    }
 }

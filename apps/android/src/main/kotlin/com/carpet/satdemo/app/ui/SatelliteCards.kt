@@ -325,6 +325,7 @@ fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
  */
 @Composable
 fun PassWindowCard(s: CardScope) {
+    val reduce = LocalReduceMotion.current
     val sat = s.snap?.sat
     val left = sat?.countdown()
     val dur = (sat?.nextPassDurS ?: 0).toLong()
@@ -359,7 +360,7 @@ fun PassWindowCard(s: CardScope) {
             ) {
                 AnimatedContent(
                     targetState = if (inWindow) "现在" else clock(left),
-                    transitionSpec = { Motion.slideForward(true) },
+                    transitionSpec = { Motion.slideForward(true, reduce) },
                     label = "pass",
                 ) { t ->
                     Text(t, style = Type.Numeric.copy(color = c))

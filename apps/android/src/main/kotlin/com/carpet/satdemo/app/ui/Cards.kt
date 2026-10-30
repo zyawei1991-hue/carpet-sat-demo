@@ -1,6 +1,7 @@
 package com.carpet.satdemo.app.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 
 /**
  * 卡片属于页面上的哪一段。**由卡片自己声明，不由页面声明** ——
@@ -41,7 +42,7 @@ object Cards {
             CardDescriptor("dock", "圆屏", CardGroup.Inline, setOf(Capability.Dock)) { DockCard(it) },
 
             // 用车养车
-            CardDescriptor("vehicle.status", "整车状态", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleStatusCard(it) },
+            CardDescriptor("vehicle.status", "整车状态", CardGroup.Vehicle, setOf(Capability.VehicleBus), hero = true) { VehicleStatusCard(it) },
             CardDescriptor("vehicle.find", "寻车", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleFindCard(it) },
             CardDescriptor("vehicle.service", "养车工单", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleServiceCard(it) },
             CardDescriptor("vehicle.energy", "能耗", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleEnergyCard(it) },
@@ -52,7 +53,7 @@ object Cards {
             CardDescriptor("kids.ai", "AI 育儿", CardGroup.Family, setOf(Capability.AiAgent)) { KidsAiCard(it) },
 
             // 健康
-            CardDescriptor("health.vitals", "体征", CardGroup.Family, setOf(Capability.HealthBand)) { HealthVitalsCard(it) },
+            CardDescriptor("health.vitals", "体征", CardGroup.Family, setOf(Capability.HealthBand), hero = true) { HealthVitalsCard(it) },
             CardDescriptor("health.checkin", "打卡", CardGroup.Family, setOf(Capability.HealthBand)) { HealthCheckinCard(it) },
             CardDescriptor("health.agent", "健康主理人", CardGroup.Family, setOf(Capability.AiAgent)) { HealthAgentCard(it) },
 
@@ -71,7 +72,10 @@ object Cards {
 
 /** 卡片是不是该出现，只看这一句 */
 @Composable
-fun RenderCard(key: String, scope: CardScope) {
+fun RenderCard(key: String, scope: CardScope, hero: Boolean = false) {
     val d = Cards.registry.resolve(key, scope) ?: return
-    d.body(scope)
+    if (!hero) d.body(scope)
+    // 强调档不在卡片自己手里：一屏只有一张能被标成 hero，由 [CardStream] 决定是谁，再从这个孔注进去。
+    // 写在卡片里会变成"每张卡都声明自己最重要"，那正是上一版一摞同权重方块的成因
+    else CompositionLocalProvider(LocalCardLevel provides Level.Raised) { d.body(scope) }
 }

@@ -145,6 +145,28 @@ class VehicleScreenRenderTest {
         shootPage("vehicle-360-live", live())
     }
 
+    /**
+     * **字号 1.3 那一档**。Material 的规定是 sp 跟随系统字号，而固定版式的坑恰恰在这：
+     * 字一大，行就换、卡就顶宽、右值就被挤没。只看 1.0 的截图等于只看了一台没有老年模式的手机 ——
+     * 这台 Demo 讲的故事里"家人"是主角，字号这一档必须拍到。
+     *
+     * 字号**不能用 @Config 的限定符给**：Robolectric 4.12 的 Qualifiers 解析器不认 `fontaud130`
+     * （试过，直接在 Qualifiers.java:35 抛 IllegalArgumentException），只能改 Configuration。
+     */
+    @Test
+    @Config(qualifiers = "w384dp-h836dp-xhdpi")
+    fun renderMate60FirstScreenLargeFont() {
+        setFontScale(1.3f)
+        shootPage("vehicle-384-fold-font130", live())
+    }
+
+    private fun setFontScale(scale: Float) {
+        val cfg = compose.activity.resources.configuration
+        cfg.fontScale = scale
+        @Suppress("DEPRECATION")
+        compose.activity.resources.updateConfiguration(cfg, null)
+    }
+
     private fun shootPage(name: String, payload: StatePayload) {
         val app = AppRuntime(ApplicationProvider.getApplicationContext())
         app.pairScreen("desk-01")
@@ -157,6 +179,8 @@ class VehicleScreenRenderTest {
         )
         compose.setContent { CarpetTheme { VehicleTab(app, status) } }
         compose.waitForIdle()
+        // 字号限定符要真的生效，否则这张图和 1.0 那张一模一样，而看上去是"测过了"
+        println("[font] scale=${compose.activity.resources.configuration.fontScale} name=$name")
         shoot(name)
         app.release()
     }
