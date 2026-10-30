@@ -1,0 +1,7 @@
+version: "0.1.0"
+description: Screen-Link 展示端客户端（手机 App 是服务端，契约 v2）
+
+dependencies:
+  # 小智固件已经依赖它（走 wss:// 连它自己的服务器），所以这里只是声明版本下限。
+  # 如果构建时报"重复组件"，把这一段整段删掉 —— 顶层已经解析出来了，直接复用即可。
+  espressif/esp_websocket_client: "^1.5.0"

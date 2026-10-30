@@ -1,0 +1,25 @@
+menu "Screen-Link 展示端"
+
+    config SCREEN_LINK_URL
+        string "手机 App 的接入点"
+        default "ws://192.168.43.1:8443"
+        help
+            手机开热点时它自己是 192.168.43.1；连同一个路由器时改成路由器
+            分给手机的地址。端口固定 8443，且它是明文 ws —— 不要写 wss。
+
+    config SCREEN_LINK_ID
+        string "screen_id（必须和 App 白名单里那条一样）"
+        default "WS175B-A3F7"
+        help
+            不在白名单，App 会直接 close(1000, "unknown screen")。
+            演示现场一定要能改：烧错了今天就没有展示端。
+
+    config SCREEN_LINK_FW
+        string "固件版本串（原样显示在手机台账那一行）"
+        default "0.1.0-dev"
+
+    config SCREEN_LINK_DOCK_TYPE
+        string "底座类型"
+        default "desk_stand"
+
+endmenu

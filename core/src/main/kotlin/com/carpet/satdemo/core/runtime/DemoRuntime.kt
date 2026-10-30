@@ -171,13 +171,16 @@ class DemoRuntime(
         // 屏连不上是一件事，手机连状态都看不到是另一件更糟的事。记下原因、1Hz 照跑，
         // 首页那行字改口说"接入点起不来" —— 不许继续报"服务运行中"
         val bindFail = runCatching { server.start() }.exceptionOrNull()
+        val lan = if (bindFail == null) lanAddress() else null
         _status.value = _status.value.copy(
             running = true,
-            localIp = if (bindFail == null) firstLanAddress() else null,
+            localIp = lan?.host,
             serverError = bindFail?.let { it.message ?: it.javaClass.simpleName },
         )
         if (bindFail == null) {
-            log("展示端接入点 ws://${_status.value.localIp}:${ScreenLinkServer.PORT}")
+            // 接口名要一起进日志：手机同时开着 Wi-Fi 和热点时，"报哪个地址"就是现场最难查的那件事
+            log("展示端接入点 ws://${lan?.host ?: "没找到"}:${ScreenLinkServer.PORT}" +
+                (lan?.let { "（取自 ${it.iface}）" } ?: " —— 手机没连 Wi-Fi 也没开热点，屏找不到这条路"))
         } else {
             log("展示端接入点起不来：${_status.value.serverError} —— 1Hz 照跑，但屏连不上")
         }
@@ -539,11 +542,43 @@ class DemoRuntime(
         /** 演示用的一场升级分几段、每段多久。真机上这个数由厂商的 updateSOC 进度决定 */
         private const val UPGRADE_STEP_MS = 400L
 
-        fun firstLanAddress(): String? = NetworkInterface.getNetworkInterfaces().asSequence()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.asSequence() }
-            .filterIsInstance<Inet4Address>()
-            .firstOrNull { !it.isLoopbackAddress }
-            ?.hostAddress
+        /**
+         * 手机自己是谁。接入点报错了等于把屏往死路上支使，所以这一格单独可测，
+         * 见 [pickLanAddress]。
+         */
+        fun lanAddress(): LanAddress? = runCatching {
+            NetworkInterface.getNetworkInterfaces().asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { nif ->
+                    nif.inetAddresses.asSequence().filterIsInstance<Inet4Address>()
+                        .mapNotNull { a -> a.hostAddress?.let { LanAddress(nif.name, it.substringBefore('%')) } }
+                }
+                .toList()
+        }.getOrNull().let { pickLanAddress(it ?: emptyList()) }
     }
+}
+
+/** 一个候选接入点：网卡名 + IPv4。名字要一起报给用户，见 start() 那行日志 */
+data class LanAddress(val iface: String, val host: String) {
+    /** 蜂窝/链路本地/回环那些地址，对面永远走不到，报出去就是假接入点 */
+    val usable: Boolean get() =
+        !host.startsWith("127.") && !host.startsWith("169.254.") && host != "0.0.0.0"
+}
+
+private val LAN_WLAN = listOf("wlan", "swlan", "ap", "br0", "eth")
+private val LAN_CELLULAR = listOf("rmnet", "netmgr", "ccmni", "radio", "ipa", "tun", "ipsec", "dummy", "lo")
+
+/**
+ * 一堆网卡里挑那条屏走得通的。
+ *
+ * 顺序不能反过来：手机**边连 Wi-Fi 边开热点**是演示现场的常态，这时候两个地址都"能用"，
+ * 但屏只会连到其中一个上。所以先要 Wi-Fi/热点那一路，再退到"不是蜂窝就行"。
+ * 蜂窝地址（rmnet_data0 那种 10.x / 192.0.0.x）挑中了最坏 —— 它看着像个正常 IPv4，
+ * 屏照着填，永远连不上，而 App 上那行字还写着"接入点正常"。
+ */
+fun pickLanAddress(candidates: List<LanAddress>): LanAddress? {
+    val usable = candidates.filter { it.usable }
+    fun matches(a: LanAddress, keys: List<String>) = keys.any { a.iface.contains(it, ignoreCase = true) }
+    return usable.firstOrNull { matches(it, LAN_WLAN) && !matches(it, LAN_CELLULAR) }
+        ?: usable.firstOrNull { !matches(it, LAN_CELLULAR) }
 }
