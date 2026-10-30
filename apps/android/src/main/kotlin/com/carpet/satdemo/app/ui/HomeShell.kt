@@ -53,8 +53,9 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
  * 首页（V1.10 按算出来的层级重排）。
  *
  * 上一版这里有两个 34sp 的大数块（圆屏、对话）和六张同一档的卡 —— **两个重心等于没有重心**。
- * 现在一屏只留一个 [Level.Raised]（对话），圆屏降成一组行 [InkGroup]，卫星仍是那条兜底栏，
- * 工程长说明一律收进 [CollapsableNote]，不再摊在正文里。
+ * 现在一屏仍只有一张 [Level.Raised]（对话）。圆屏那张是平卡，但它里面是一块 [ScreenMirror]：
+ * **强调档只有一张，画面不必让给文字** —— 那枚圆画的就是这一秒推给屏的那一帧，
+ * 卫星仍是那条兜底栏，工程长说明一律收进 [CollapsableNote]，不再摊在正文里。
  *
  * 三件事没动，因为它们不是排版问题：**SOS 长按入口不许藏**、**每条回答逐条标来源**、
  * **卫星那两张卡展开后仍是同一张 [RenderCard]**（手机和圆屏不许各解释一遍同一个状态）。
@@ -446,8 +447,9 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
     var open by rememberSaveable { mutableStateOf(false) }
     val online = st.clients > 0
 
+    // 这张卡不给图标（和首屏那张主理人同一个理由）：镜像是一枚圆，它要在卡里**居中**，
+    // 而图标列会把整个内容列右移 32dp —— 圆就歪在页面上，比不画这个圆更难看
     InkCard(
-        icon = MIcons.dock,
         tone = when {
             st.serverError != null -> Tone.Alert
             online -> Tone.Ok
@@ -455,17 +457,27 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
         },
     ) {
         CardTitle("圆屏", trailing = if (online) "${st.clients} 台在线" else "未连接")
-        Text(
-            when {
-                st.serverError != null -> "服务起不来：${st.serverError}"
-                online -> screens.filter { it.link is DeviceLink.Online }
-                    .joinToString("、") { it.title }
-                    .ifBlank { "连上了" }
-                else -> "还没连上。手机和圆屏连同一个 Wi-Fi，把屏上那串编号加进来就行"
-            },
-            style = Type.Body,
-            color = if (st.serverError != null) Ink.Alert else Ink.TextMid,
+        // 这块圆不是装饰：它就是手机这一秒推给屏的那一帧。
+        // 上一版这里只有"1 台在线"四个字 —— 连上了也不知道连上了什么、屏上正在显示什么
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            ScreenMirror(snap = st.snapshot, online = online && st.serverError == null)
+        }
+        MirrorCaption(
+            online = online,
+            serverError = st.serverError,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
         )
+        // 连上了不再补一句"连上了"：上面那行镜像说明已经说了同一件事，第三句是噪音。
+        // 这一行只留两种活：没连上时给做法，连上时叫出是哪一台（叫不出名字就整行不写）
+        val onlineNames = screens.filter { it.link is DeviceLink.Online }
+            .joinToString("、") { it.title }
+        if (st.serverError == null && (onlineNames.isNotBlank() || !online)) {
+            Text(
+                if (online) onlineNames else "手机和圆屏连同一个 Wi-Fi，把屏上那串编号加进来就行",
+                style = Type.Body,
+                color = Ink.TextMid,
+            )
+        }
         if (open) {
             HairLine()
             RowLine(
