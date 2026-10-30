@@ -120,7 +120,7 @@ network_timeout_ms / auto_reconnect / disable_auto_reconnect / event_handler / u
 ### menuconfig
 
 ```
-Example App Usage  →  Screen-Link 展示端
+Screen-Link 展示端          （它在 menuconfig 根菜单上，不在 Example App Usage 底下）
   SCREEN_LINK_URL        ws://<手机或电脑的局域网IP>:8443
   SCREEN_LINK_ID         WS175B-A3F7        （必须和服务端白名单一字不差）
   SCREEN_LINK_FW         0.1.0-dev
