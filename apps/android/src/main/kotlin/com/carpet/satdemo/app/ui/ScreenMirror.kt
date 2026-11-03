@@ -3,12 +3,15 @@ package com.carpet.satdemo.app.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -44,6 +47,11 @@ import com.carpet.satdemo.core.protocol.StatePayload
  *    要统一得连着固件和 §5.2 那张色表一起改，不能在这一格里私加一支琥珀绕过 [Tone]。
  *  - **屏上那整句失败文案不进圆**（星历那句）。圆里只放词和数，句子归下面的卡 ——
  *    128dp 宽的弦上放长话只会折成三行，而这块镜像的用途是"抬一眼"，不是读说明。
+ *
+ * **没有屏接入时这一帧是"演"的，界面必须自己承认**（V1.10.9）：上一版只把外环打灰，
+ * 可圆里照旧亮着一屏彩色数字、倒计时还在 1Hz 往下跳 —— 那读起来就是"这块屏亮着"，
+ * 而它其实是手机凭空算出来的。所以未接入时：屏底从真黑退到 [Ink.Sunk]（没点亮的面板），
+ * 内环、卫星名、数字全部退成结构灰。语义色只留给"真的有屏在看这一帧"的时候用。
  */
 @Composable
 fun ScreenMirror(
@@ -60,11 +68,7 @@ fun ScreenMirror(
 
     // 外圈 = 主链路。没屏接入、或者还没算出状态时打灰：灰在这套原语里只有一个意思 —— 没有这一帧的观众
     val linkColor by animateColorAsState(
-        when {
-            snap == null || !online -> Ink.Track
-            snap.link.primary === LinkPrimary.sat -> Ink.Sat
-            else -> Ink.Ok
-        },
+        mirrorLinkColor(snap, online),
         Motion.colorSpec(reduce),
         label = "mirrorLink",
     )
@@ -83,7 +87,7 @@ fun ScreenMirror(
         label = "mirrorFill",
     )
     val phaseColor by animateColorAsState(
-        if (phase === SatPhase.tx_fail || phase === SatPhase.tx_no_ack) Ink.Alert else Ink.Wait,
+        mirrorPhaseColor(phase, online),
         Motion.colorSpec(reduce),
         label = "mirrorPhase",
     )
@@ -92,9 +96,10 @@ fun ScreenMirror(
         Canvas(modifier = Modifier.matchParentSize()) {
             val hub = Offset(size.width / 2f, size.height / 2f)
             val r0 = size.minDimension / 2f
-            // 屏本体：一枚真黑。OLED 熄了就是黑的，而它坐在 #212834 的卡底上 ——
-            // 不用画边框，这一格已经读得出"那是一块屏"。外面那圈是壳，不表态
-            drawCircle(Oled, radius = r0 - 1.6.dp.toPx(), center = hub)
+            // 屏本体。接入时是一枚真黑（OLED 熄了就是黑的，它坐在 #212834 的卡底上，
+            // 不用画边框就读得出"那是一块屏"）；**没屏接入时退到 [Ink.Sunk]** ——
+            // 画一块纯黑的"亮着的屏"是这一格里最容易读假的一处
+            drawCircle(if (online) Oled else Ink.Sunk, radius = r0 - 1.6.dp.toPx(), center = hub)
             drawCircle(
                 color = Ink.Outline,
                 radius = r0 - 0.8.dp.toPx(),
@@ -177,18 +182,35 @@ fun ScreenMirror(
                 SkeletonBar(width = 104.dp, height = 11.dp)
             }
         } else {
-            MirrorText(snap, moduleOff, left, diameter)
+            MirrorText(snap, moduleOff, left, diameter, online)
         }
     }
+}
+
+/** 外环该是什么颜色。抽出来是因为圆底下那行图例要用同一支色，两处不许各挑一套 */
+internal fun mirrorLinkColor(snap: StatePayload?, online: Boolean): Color = when {
+    snap == null || !online -> Ink.Track
+    snap.link.primary === LinkPrimary.sat -> Ink.Sat
+    else -> Ink.Ok
+}
+
+/** 内环该是什么颜色。没屏接入时语义色（琥珀/红）一律不给，只留结构上更亮的那档灰 */
+internal fun mirrorPhaseColor(phase: SatPhase, online: Boolean): Color = when {
+    !online -> Ink.Outline
+    phase === SatPhase.tx_fail || phase === SatPhase.tx_no_ack -> Ink.Alert
+    else -> Ink.Wait
 }
 
 /**
  * 圆里那一摞字。**宽 = 直径的 0.60**：最宽那行（坐标）落在离圆心最远的高度上，
  * 那个高度的弦长就这么多，再宽一点字尾就被相位环切掉。
  * 每行 maxLines=1：这一格宁可裁，也不能折行把圆撑破。
+ *
+ * [live] 为假时整摞字退成灰：彩色只属于"真的有屏在看这一帧"，否则这屏数字就是我自己编的，
+ * 不该借用卫星蓝和开窗绿。
  */
 @Composable
-private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size: Dp) {
+private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size: Dp, live: Boolean) {
     val sat = snap.sat
     val cnr = sat.cnr
     Column(
@@ -198,14 +220,23 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
     ) {
         Text(
             if (moduleOff) "GT1005" else (sat.satName ?: "—"),
-            style = Type.Overline.copy(color = if (moduleOff) Ink.Alert else Ink.Sat),
+            style = Type.Overline.copy(
+                color = when {
+                    !live -> Ink.TextLow
+                    moduleOff -> Ink.Alert
+                    else -> Ink.Sat
+                },
+            ),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip,
         )
         Text(
             if (moduleOff) "终端离线" else phaseLabel(sat.phase),
-            style = Type.Body.copy(fontWeight = FontWeight.SemiBold),
+            style = Type.Body.copy(
+                fontWeight = FontWeight.SemiBold,
+                color = if (live) Ink.TextHigh else Ink.TextMid,
+            ),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip,
@@ -219,6 +250,7 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
             },
             style = Type.Numeric.copy(
                 color = when {
+                    !live -> Ink.TextMid
                     moduleOff -> Ink.Alert
                     left != null && left <= 0 -> Ink.Ok
                     else -> Ink.TextHigh
@@ -234,7 +266,7 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
                 cnr != null -> "CNR %.1f dB".format(cnr)
                 else -> "未锁定"
             },
-            style = Type.Caption,
+            style = Type.Caption.copy(color = if (live) Ink.TextHigh else Ink.TextMid),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Clip,
@@ -243,7 +275,7 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
         // 11sp 是这一摞里唯一在字号 1.3 下仍装得下的写法 —— 再大一号就会被圆裁掉尾巴
         Text(
             "%.4f, %.4f".format(snap.gnss.lat, snap.gnss.lon),
-            style = Type.Mono.copy(fontSize = 11.sp, color = Ink.TextLow),
+            style = Type.Mono.copy(fontSize = 11.sp, color = if (live) Ink.TextLow else Ink.TextLow.copy(alpha = 0.7f)),
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
@@ -251,28 +283,58 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
     }
 }
 
-/** 圆底下那一行。它只回答一件事：这一帧现在有没有人在看。几台是卡标题右边那格的活，这里不重复 */
+/**
+ * 圆底下那两行。
+ *
+ * 第一行是**图例**：外环 = 链路、内环 = 过境相位，这是展示端固件的几何，可手机上此前一个字没说，
+ * 两圈快满的弧第一次看只会读成"两个都在跑"。颜色直接复用 [mirrorLinkColor] / [mirrorPhaseColor] ——
+ * 图例和环必须是同一支色，否则图例就成了装饰。
+ * 第二行只回答一件事：这一帧现在有没有人在看。几台是卡标题右边那格的活，这里不重复。
+ */
 @Composable
 fun MirrorCaption(
+    snap: StatePayload?,
     online: Boolean,
     serverError: String?,
     modifier: Modifier = Modifier,
 ) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LegendDot(mirrorLinkColor(snap, online), "链路")
+            LegendDot(mirrorPhaseColor(snap?.sat?.phase ?: SatPhase.idle, online), "过境")
+        }
+        Row(
+            modifier = Modifier.padding(top = Grid.x4),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Dot(if (serverError != null) Tone.Alert else if (online) Tone.Ok else Tone.Neutral)
+            Text(
+                when {
+                    serverError != null -> "接入点起不来，这一帧还没地方推"
+                    online -> "屏上此刻就是这一帧"
+                    // 不再写"还没有屏接入"：卡标题右边那格已经写着"未连接"，下面那行又给做法，
+                    // 同一屏三次陈述同一个负状态，第三句就是噪音。这句只负责承认数据来源
+                    else -> "这一帧是手机凭空算的 · 示意数据"
+                },
+                style = Type.Caption,
+                color = if (serverError != null) Ink.Alert else Ink.TextMid,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LegendDot(color: Color, label: String) {
     Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        horizontalArrangement = Arrangement.spacedBy(Grid.x4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Dot(if (serverError != null) Tone.Alert else if (online) Tone.Ok else Tone.Neutral)
-        Text(
-            when {
-                serverError != null -> "接入点起不来，这一帧还没地方推"
-                online -> "屏上此刻就是这一帧"
-                else -> "还没有屏接入 · 这是手机算出来、准备推过去的那一帧"
-            },
-            style = Type.Caption,
-            color = if (serverError != null) Ink.Alert else Ink.TextMid,
-        )
+        Box(modifier = Modifier.size(6.dp).background(color, CircleShape))
+        Text(label, style = Type.Overline, color = Ink.TextLow)
     }
 }
 

@@ -2,13 +2,12 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
@@ -39,6 +38,7 @@ import com.carpet.satdemo.core.runtime.DemoRuntime
  * 因为连接握在 [AppRuntime] 上，这一屏只是换一批卡片。
  */
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     val current by app.scene.collectAsState()
@@ -47,9 +47,13 @@ fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
         // 那一行折叠让首屏多出一条只有我们自己在乎的链接，而滚动条本来就装得下五个。
         // **上面不再重复写一遍场景名** —— 选中那枚是实底蓝，它自己就是标题，
         // 标题行再念一次就是同一屏两个重心（截图里"车载守护"出现过两次）
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        // **五个场景全部排得出来，不再横向切掉最后一个**。上一版这里是一条横向可滚的带，
+        // 截图里第五枚只剩一个"数"字 —— 没有箭头也没有渐隐，第一次看会以为是渲染坏了。
+        // 改成折行：窄屏上它变成两排，每一枚都完整可读，也不用猜"这条还能往右划吗"
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
             Scene.entries.toList().forEach { sc -> Chip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
         }

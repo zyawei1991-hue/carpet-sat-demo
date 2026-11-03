@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -119,17 +121,22 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                     color = Ink.Sat,
                 )
                 Box(modifier = Modifier.weight(1f))
-                Box(
-                    modifier = Modifier
-                        .clickable { editing = !editing }
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (editing) "完成" else "排列这些卡",
-                        style = Type.Caption,
-                        color = Ink.TextLow,
-                    )
+                // **排列只在卡片流展开后才给**。上一版这一行左"再看 4 张卡"右"排列这些卡"，
+                // 两个动作性质不同（一个是看，一个是改）却同权重同行，而收起态里那四张卡根本不在屏上 ——
+                // 排一个看不见的列表，本身就是个奇怪的产品
+                if (moreCards) {
+                    Box(
+                        modifier = Modifier
+                            .clickable { editing = !editing }
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            if (editing) "完成" else "排列这些卡",
+                            style = Type.Caption,
+                            color = Ink.TextLow,
+                        )
+                    }
                 }
             }
         }
@@ -165,7 +172,15 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
             RailItem("圆屏", if (st.clients > 0) "${st.clients} 台" else "未连", dockTone),
             RailItem(
                 "卫星",
-                if (sat?.moduleOk == false) "离线" else left?.let { if (it <= 0) "开窗" else "${it}s" } ?: "未取",
+                when {
+                    sat?.moduleOk == false -> "离线"
+                    left == null -> "未取"
+                    left <= 0 -> "开窗"
+                    // **倒计时不在这里出现**。上一版同一个 `561s` 一屏写三遍：这条栏一次、
+                    // 兜底卡正文一次、兜底卡右下角那个 24sp 大数再一次。
+                    // 这条栏的本分是"这台今天能不能用"，那是状态不是读数 —— 数字留给兜底卡那一处
+                    else -> null
+                },
                 satTone,
             ),
             RailItem("守护", if (app.guardPinned) "在跑" else "未开", if (app.guardPinned) Tone.Ok else Tone.Neutral),
@@ -187,6 +202,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
  * 却没有一句是车主想知道的。现在卡里只剩三样：**问、答、输入**。
  * 空态交给输入框的占位文，档位和端点收进右上角那枚齿轮。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AssistantHero(app: AppRuntime) {
     val reduce = LocalReduceMotion.current
@@ -246,13 +262,12 @@ private fun AssistantHero(app: AppRuntime) {
             },
         )
 
-        // **横向可滚，不许折行**：Row 不会换行，装不下的那颗只能把字竖着拆开
-        // （截图里"车/在/哪"排成三行，是这一版最难看的一处）
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
+        // **折行，不横滚**：字号 1.3 时这条带在 384dp 上装不下五枚，横滚的话最后一枚只剩一个"车"字，
+        // 而快捷问句是这一屏最该被看见的东西 —— 看不见就等于没有。和场景切换器同一个处理
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
             listOf("链路", "过境", "额度", "圆屏配对", "车在哪").forEach { q ->
                 // 走同一枚 [Chip]：这里原来是手写的一枚 33dp 高的方块，而它恰恰是首页最该被点中的东西。
@@ -463,6 +478,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
             ScreenMirror(snap = st.snapshot, online = online && st.serverError == null)
         }
         MirrorCaption(
+            snap = st.snapshot,
             online = online,
             serverError = st.serverError,
             modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -558,16 +574,17 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
                 "手机这边放开接入、把圆屏编号加进白名单，再到圆屏上填上面那个接入点地址。",
             )
         }
+        // **同一个动作在两种状态下同一个权重**：上一版未连接时它是一整条蓝色大按钮，
+        // 连上之后退化成左下角一行小蓝字"配对新的圆屏"。加第二块屏仍然是这张卡唯一的主动作，
+        // 不该因为"已经有一台了"就把它藏到角落 —— 用户想找的时候反而找不到
         if (open) {
             GhostAction("收起") { open = false }
-        } else if (online) {
-            GhostAction("配对新的圆屏") { open = true }
         } else {
             Button(
                 onClick = { open = true },
                 colors = ButtonDefaults.buttonColors(containerColor = Ink.Sat, contentColor = Ink.Deep),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("配对圆屏") }
+            ) { Text(if (online) "再加一块屏" else "配对圆屏") }
         }
     }
 }
@@ -591,7 +608,7 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
         else -> Tone.Sat
     }
     val big = when {
-        moduleOff -> "离线"
+        moduleOff || sat == null -> null
         left == null -> null
         left <= 0 -> "开窗"
         else -> "${left}s"
@@ -612,11 +629,13 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
                 Text(
+                    // **这句里不再抄一遍那个数**。上一版"距下次过顶 561s"和右下角那个 24sp 的
+                    // "561s" 同屏各写一次，加上顶部状态栏就是三次 —— 数只留一处，这句退成它的标签
                     when {
                         moduleOff -> "卫星终端没在线，要发的内容先攒在手机这边"
                         left == null -> "还没取到星历。取到之后这里就是过顶倒计时"
                         left <= 0 -> "窗口开着，现在就能发"
-                        else -> "距下次过顶 ${left}s"
+                        else -> "距下次过顶"
                     },
                     style = Type.Body,
                 )
