@@ -1,6 +1,7 @@
 package com.carpet.satdemo.core.protocol
 
 import java.nio.file.Paths
+import org.junit.jupiter.api.Assumptions
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -165,7 +166,10 @@ class SchemaDriftTest {
         // 画出来是一个没人认识的词或者一句不相干的话（#31 那条实拍就是这么来的）。
         // 光有 Kotlin↔schema 的比对拦不住这一环，所以这里直接把那份 C 读回来比
         val root = schema()
-        val src = firmwareSource()
+        val legacy = firmwareSource()
+        Assumptions.assumeTrue(legacy != null,
+            "老固件树 firmware/screen/app/ 不在仓库里，这台机器比不了（Muse 那一路见「屏要发的指令」那条）")
+        val src: String = legacy ?: return
         val ui = at(root, listOf("state", "ui"))!!["properties"]!!.jsonObject
         val link = at(root, listOf("state", "link"))!!["properties"]!!.jsonObject
         val sat = at(root, listOf("state", "sat"))!!["properties"]!!.jsonObject
@@ -212,6 +216,21 @@ class SchemaDriftTest {
         for (gesture in listOf("CMD_CARD_NEXT", "CMD_CARD_AUTO", "CMD_POKE")) {
             assertTrue("send_cmd($gesture" in src, "固件分支表里有 $gesture 但没有一处真的发出去：屏上那个动作是死的")
         }
+    }
+
+    @Test
+    fun `Muse 补丁里屏要发的指令必须既在契约里又过得了组件那道闸`() {
+        // 上一条靠老 app_main.c，那棵树不在仓库里，换机器就比不动。这一条读的是**仓库里就有的**
+        // `muse-carpet.patch`：换底座之后屏真会发的指令写在其代码块里（CMD_NAMES 只放交互那三条，
+        // 组件的 ALLOWED 还含 sos_press 等六条）。两边都是仓库内的文件，谁 clone 下来都拦得住
+        val cmd = enumValues(at(schema(), listOf("command"))!!["properties"]!!.jsonObject, "cmd")
+        val patch = musePatch()
+        val screenSends = cStringTable(patch, "CMD_NAMES").toSet()
+        assertTrue(screenSends.isNotEmpty(), "补丁里没读到 CMD_NAMES，那这一条等于没比")
+        assertTrue(screenSends.all { it in cmd }, "屏要发的指令不在 schema 里：${screenSends - cmd}")
+        val gated = cStringTable(componentSource(), "ALLOWED").toSet()
+        assertTrue(screenSends.all { it in gated }, "组件那道闸挡掉了屏要发的指令：${screenSends - gated}")
+        assertTrue("card_set" !in cmd, "契约里不该出现让屏直接定卡的取值")
     }
 
     @Test
@@ -276,26 +295,45 @@ class SchemaDriftTest {
         return Json.parseToJsonElement(file.toFile().readText()).jsonObject
     }
 
-    private fun firmwareSource(): String = cSource("app", "main", "app_main.c")
+    /**
+     * 老固件那棵树 **不在仓库里**（`firmware/screen/app/` 从没提交过，只在写它的那台机器上）。
+     * 所以这台机器、CI、新机上都读不到 —— 读不到就明着跳过，别让它把整条构建染红：
+     * 红在没人能修的地方，下一个人的反应是 `-x` 掉它，那才是真丢了守卫。
+     * Muse 底座那一路可比的部分走仓库里的 `muse-carpet.patch`，见「屏要发的指令」那条。
+     */
+    private fun firmwareSource(): String? = cSourceOrNull("app", "main", "app_main.c")
+
+    /** 仓库里唯一一份 Muse 侧 C 源码：那份 patch 的正文字面量。加号前缀剥掉再比 */
+    private fun musePatch(): String {
+        val tail = listOf("firmware", "screen", "muse", "muse-carpet.patch").joinToString("/")
+        val file = listOf(Paths.get("..", tail), Paths.get(tail)).firstOrNull { it.toFile().exists() }
+            ?: error("找不到 $tail —— Muse 那一路的分支表没人比了")
+        return file.toFile().readLines().asSequence()
+            .filter { it.startsWith("+") && !it.startsWith("+++") }
+            .map { it.substring(1) }
+            .joinToString("\n")
+    }
 
     /** 组件那份也读回来比：`screen_link_send_command` 里有一道合法值闸，它和 schema 分叉比表分叉更糟 ——
      *  屏发一条合法但被闸挡下的指令，现象是"按了没反应"，而串口里连一条契约错都没有 */
     private fun componentSource(): String =
         cSource("components", "screen_link", "screen_link.c")
 
-    private fun cSource(vararg parts: String): String {
+    private fun cSource(vararg parts: String): String =
+        cSourceOrNull(*parts) ?: throw IllegalStateException(
+            "找不到 firmware/screen/${parts.joinToString("/")}，那份手抄的分支表没人比")
+
+    private fun cSourceOrNull(vararg parts: String): String? {
         val tail = (listOf("firmware", "screen") + parts.toList()).joinToString("/")
-        val file = listOf(Paths.get("..", tail), Paths.get(tail))
-            .firstOrNull { it.toFile().exists() }
-            ?: throw IllegalStateException("找不到 $tail，那份手抄的分支表没人比")
-        return file.toFile().readText()
+        return listOf(Paths.get("..", tail), Paths.get(tail))
+            .firstOrNull { it.toFile().exists() }?.toFile()?.readText()
     }
 
     /** 抠出 `static const char *const NAME[...] = { … };` 里那串字面量，按出现顺序返回 */
     private fun cStringTable(src: String, name: String): List<String> {
         val decl = Regex("static const char \\*const $name\\[[^\\]]*]\\s*=\\s*\\{(.*?)};", RegexOption.DOT_MATCHES_ALL)
             .find(src)
-            ?: error("app_main.c 里找不到 $name 这张表")
+            ?: error("分支表里没读到 $name 这张表")
         return Regex("\"([^\"]*)\"").findAll(decl.groupValues[1]).map { it.groupValues[1] }.toList()
     }
 }

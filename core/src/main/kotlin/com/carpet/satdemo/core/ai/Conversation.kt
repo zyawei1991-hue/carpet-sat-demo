@@ -32,8 +32,8 @@ data class Turn(
     /** 一轮问答共用同一个 id（上行和下行各一条 Turn，所以去重键是 id + from） */
     val turnId: String,
 ) {
-    /** 是不是"我们生成的话"。小智云那一路不是，界面上必须分开标 */
-    val ours: Boolean get() = source != ReplySource.XiaozhiCloud
+    /** 是不是"我们生成的话"。屏那侧的云答的不是，界面上必须分开标 */
+    val ours: Boolean get() = !source.foreignCloud
 }
 
 /**
@@ -76,7 +76,7 @@ class ConversationLog(
 
     /**
      * 把契约上的一帧对话变成记录。**进来的路上就过一次文案闸**：
-     * [DialogSource.xiaozhi_cloud] 那一路的话不是我们生成的，但它即将出现在屏幕上、
+     * [DialogSource.foreignCloud] 那两路的话不是我们生成的，但它们即将出现在屏幕上、
      * 并永久留在车主的记录里 —— 这两件事任何一件都值得拦一道。
      */
     fun record(d: DialogPayload): Turn? {
@@ -114,6 +114,7 @@ fun DialogSource.toReply(): ReplySource = when (this) {
     DialogSource.local_fallback -> ReplySource.LocalFallback
     DialogSource.denied -> ReplySource.Denied
     DialogSource.xiaozhi_cloud -> ReplySource.XiaozhiCloud
+    DialogSource.muse_cloud -> ReplySource.MuseCloud
     else -> ReplySource.LocalRule
 }
 
@@ -122,5 +123,6 @@ fun ReplySource.toDialog(): DialogSource = when (this) {
     ReplySource.LocalFallback -> DialogSource.local_fallback
     ReplySource.Denied -> DialogSource.denied
     ReplySource.XiaozhiCloud -> DialogSource.xiaozhi_cloud
+    ReplySource.MuseCloud -> DialogSource.muse_cloud
     ReplySource.LocalRule -> DialogSource.local_rule
 }

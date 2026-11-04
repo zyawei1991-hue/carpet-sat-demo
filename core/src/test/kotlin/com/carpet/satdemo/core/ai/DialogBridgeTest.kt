@@ -119,6 +119,22 @@ class DialogBridgeTest {
     }
 
     @Test
+    fun `屏侧云两档走同一套规矩 Muse 那一路不许漏`() = runBlocking {
+        // 圆屏换到 Muse 底座以后，屏本机那条 ASR→云→TTS 成了主要来路。
+        // 这一条钉的是"两档云共用一个谓词"：将来再加一档时若只在 xiaozhi 那支加分支，
+        // Muse 的话就会既进技能又回镜，等于让别人的模型替我们决定发不发卫星报文
+        for (src in listOf(DialogSource.xiaozhi_cloud, DialogSource.muse_cloud)) {
+            val h = Harness()
+            h.bridge.onScreenFrame(h.frame(up("车到哪了", "s-$src", src)))
+            val line = h.bridge.log.turns.value.single()
+            assertFalse(line.ours, "$src 该算别人说的")
+            assertEquals(src.toReply(), line.source, "$src 的来源档被洗掉了")
+            assertTrue(h.pushed.isEmpty(), "$src 不回镜")
+            assertTrue(h.gateway.history.isEmpty(), "$src 触发了技能：${h.gateway.history}")
+        }
+    }
+
+    @Test
     fun `方向为 down 的帧只补记录 不会自己问自己答`() = runBlocking {
         val h = Harness()
         // 真固件重连后可能把自己那一轮回显上来。这一句必须只补记录，

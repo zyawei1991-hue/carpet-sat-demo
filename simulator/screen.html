@@ -271,6 +271,7 @@ function wrapCjk(str,max){
 function dialogTag(d){
   const who=d.origin==='phone'?'手机':'圆屏';
   if(d.dir==='up') return '问 · '+who;
+  if(d.source==='muse_cloud') return '答 · 屏侧模型 · 未过网关';
   if(d.source==='xiaozhi_cloud') return '答 · 小智云 · 未过网关';
   if(d.source==='local_fallback') return '答 · 未接模型';
   if(d.source==='denied') return '答 · 权限拦截';
@@ -279,6 +280,7 @@ function dialogTag(d){
 
 function dialogColor(d){
   if(d.dir==='up') return '#7f8a9b';
+  if(d.source==='muse_cloud') return '#ffb020';
   if(d.source==='xiaozhi_cloud') return '#ffb020';
   if(d.source==='denied') return '#ff4545';
   return '#e8edf4';

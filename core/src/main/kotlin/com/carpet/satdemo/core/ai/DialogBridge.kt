@@ -69,8 +69,8 @@ class DialogBridge(
     /**
      * 圆屏说上来的一帧。三条规矩：
      * ① 入账先过文案闸（[ask] 走 [ConversationLog.append]，每一句都要过）；
-     * ② **`xiaozhi_cloud` 那一路不触发任何技能** —— 小智官方云替我们答的话不是从我们的事实表里来的，
-     *    拿它当问题再喂一遍网关，等于让别人的模型替我们决定要不要发卫星报文；
+     * ② **[DialogSource.foreignCloud] 那两路不触发任何技能** —— 小智云/Muse 替我们答的话不是从我们的
+     *    事实表里来的，拿它当问题再喂一遍网关，等于让别人的模型替我们决定要不要发卫星报文；
      * ③ 答完 [mirror] 回屏。
      *
      * 去重不在这段里另起一套：重发/重连的同一轮走到 [ask] 里 `append` 会返回 null，
@@ -83,9 +83,9 @@ class DialogBridge(
             log.record(d)            // 屏把自己那一轮回显回来（真固件重连后可能这么发），只补记录不触发
             return
         }
-        if (d.source == DialogSource.xiaozhi_cloud) {
+        if (d.source.foreignCloud) {
             log.record(d)
-            note("小智云代答一句话：只入账，不触发技能，也不回镜（那句话屏上已经显示过了）")
+            note("屏侧云代答一句话：只入账，不触发技能，也不回镜（那句话屏上已经显示过了）")
             return
         }
         launch { ask(d.text, DialogOrigin.screen, d.turnId) }

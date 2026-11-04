@@ -103,10 +103,10 @@ class ConversationLogTest {
     fun `两个方向的枚举来回换算不许把小智云洗成我们的规则`() {
         // source 一路要跨两个世界（契约上是 DialogSource，网关里是 ReplySource）。
         // 只要有一步图省事写成 else -> LocalRule，界面上那个「未过网关」的标就永远不亮
-        for (s in listOf(DialogSource.model, DialogSource.local_fallback, DialogSource.denied, DialogSource.xiaozhi_cloud)) {
+        for (s in listOf(DialogSource.model, DialogSource.local_fallback, DialogSource.denied, DialogSource.xiaozhi_cloud, DialogSource.muse_cloud)) {
             assertEquals(s, s.toReply().toDialog(), "$s 来回换算后变了")
         }
-        for (r in listOf(ReplySource.Model, ReplySource.LocalFallback, ReplySource.Denied, ReplySource.XiaozhiCloud)) {
+        for (r in listOf(ReplySource.Model, ReplySource.LocalFallback, ReplySource.Denied, ReplySource.XiaozhiCloud, ReplySource.MuseCloud)) {
             assertEquals(r, r.toDialog().toReply(), "$r 来回换算后变了")
         }
     }

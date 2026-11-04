@@ -435,8 +435,9 @@ private fun Bubble(app: AppRuntime, line: Turn) {
  * 观众就会把规则模板当成接了大模型** —— 这比承认没接要贵得多。
  */
 private fun sourceLabel(line: Turn): String = when {
-    // 小智官方云那一路：话不是我们的网关生成的，界面上必须单独一句话说明，
+    // 屏那侧的云答的话：不是我们的网关生成的，界面上必须单独一句话说明，
     // 而不是混进"远端模型"里 —— 那会让人以为这句话也过了我们的红线
+    line.source == ReplySource.MuseCloud -> "屏侧模型 · 未过网关"
     line.source == ReplySource.XiaozhiCloud -> "小智云 · 未过网关"
     line.proactive -> "主动提醒"
     line.source == ReplySource.Model -> "远端模型"

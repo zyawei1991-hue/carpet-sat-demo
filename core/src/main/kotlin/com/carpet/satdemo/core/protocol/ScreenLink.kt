@@ -118,11 +118,19 @@ enum class DialogOrigin { screen, phone }
 
 /**
  * 一句话是从哪儿来的。**这条决定界面上打不打「未接真源」那个标，不许省**。
- * [xiaozhi_cloud] 是小智官方云全包那条路线的产物：话不是我们的网关生成的，
+ * [xiaozhi_cloud] 是小智官方云全包那条路线的产物，[muse_cloud] 是换了 Muse 底座之后
+ * 屏本机那条 ASR→云→TTS 的链 —— 两档同一种话：**不是我们的网关生成的**。
  * 落到记录和屏幕之前仍要过同一道文案闸（见 [com.carpet.satdemo.core.ai.AiGateway.guard]）。
  */
 @Serializable
-enum class DialogSource { asr, local_rule, model, local_fallback, denied, xiaozhi_cloud }
+enum class DialogSource { asr, local_rule, model, local_fallback, denied, xiaozhi_cloud, muse_cloud;
+
+    /**
+     * 屏那侧的模型替我们说完的。三条规矩挂在它身上：只入账、不触发技能、不回镜。
+     * 写成谓词而不是在两处各列一遍名字，是为了下一档云进来时不会只改一处。
+     */
+    val foreignCloud: Boolean get() = this == xiaozhi_cloud || this == muse_cloud
+}
 
 @Serializable
 data class DialogPayload(

@@ -104,7 +104,16 @@ enum class ReplySource {
      * 界面上必须单独标出来，让观众知道这句"不是我说的"。
      */
     XiaozhiCloud,
+
+    /**
+     * 圆屏换到 Muse 底座之后，屏本机那条"会听会说"的链答的话。
+     * 和 [XiaozhiCloud] 是同一类东西、同一套规矩 —— 区别只在谁替我们说的，界面上分开标。
+     */
+    MuseCloud,
     ;
+
+    /** 话不是我们的网关生成的。技能一律不许由它触发，见 [DialogSource.foreignCloud] */
+    val foreignCloud: Boolean get() = this == XiaozhiCloud || this == MuseCloud
 
     val live: Boolean get() = this == Model
 }
