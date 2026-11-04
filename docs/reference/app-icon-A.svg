@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  方案 A「圆屏里的宠物」母稿。改图形从这里改，再同步到
+  android-res/drawable/ic_launcher_foreground.xml —— 两边的数字完全一样，
+  连那层 0.90 的安全区缩放也已经算进母稿，这样这份 SVG 看到的就是
+  手机上会看到的东西。区别只有两处：这里自带圆角方块底，
+  Android 那边把底拆成了单独的 background 层（遮罩由系统给）。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0E1116"/>
+  <g transform="translate(256 256) scale(0.9) translate(-256 -256)">
+    <path d="M118.3,191.8 A152,152 0 0 1 393.7,191.8" fill="none" stroke="#388BFD" stroke-width="11" stroke-linecap="round"/>
+    <circle cx="393.7" cy="191.8" r="13" fill="#388BFD"/>
+    <circle cx="256" cy="256" r="118" fill="none" stroke="#FFF3E0" stroke-width="13"/>
+    <path d="M222,202 L236,168 L252,198 Z" fill="#FFF3E0"/>
+    <path d="M290,202 L276,168 L260,198 Z" fill="#FFF3E0"/>
+    <circle cx="256" cy="226" r="34" fill="#FFF3E0"/>
+    <path d="M212,306 C212,264 226,250 256,250 C286,250 300,264 300,306 Z" fill="#FFF3E0"/>
+    <path d="M298,298 C324,296 332,274 322,256" fill="none" stroke="#FFF3E0" stroke-width="12" stroke-linecap="round"/>
+  </g>
+</svg>

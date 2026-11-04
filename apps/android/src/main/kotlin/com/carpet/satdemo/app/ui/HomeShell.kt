@@ -371,31 +371,32 @@ internal fun InkField(
     onSubmit: () -> Unit,
     trailing: @Composable () -> Unit,
 ) {
+    // 发送（和首页那枚麦克风）画在实心底**里面**。以前它们站在盒子外面的卡片底色上，
+    // 一个控件读成两块 —— Mate 60 实拍里"箭头孤零零飘在右边"就是这个
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Ink.Sunk, RoundedCornerShape(Round.Chip)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .background(Ink.Sunk, RoundedCornerShape(Round.Chip)),
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = true,
-                textStyle = Type.Body.copy(color = Ink.TextHigh),
-                cursorBrush = SolidColor(Ink.Sat),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onSubmit() }),
-                decorationBox = { inner ->
-                    Box(modifier = Modifier.padding(horizontal = Grid.x12, vertical = Grid.x12)) {
-                        if (value.isEmpty()) Text(placeholder, style = Type.Caption, color = Ink.TextLow)
-                        inner()
-                    }
-                },
-            )
-        }
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            textStyle = Type.Body.copy(color = Ink.TextHigh),
+            cursorBrush = SolidColor(Ink.Sat),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { onSubmit() }),
+            decorationBox = { inner ->
+                Box(modifier = Modifier.padding(horizontal = Grid.x12, vertical = Grid.x8)) {
+                    // 占位文和敲进去的字同一档字号。原来是 Caption 配 Body，
+                    // 第一个字敲下去整行会跳一下大小
+                    if (value.isEmpty()) Text(placeholder, style = Type.Body, color = Ink.TextLow)
+                    inner()
+                }
+            },
+        )
         trailing()
     }
 }

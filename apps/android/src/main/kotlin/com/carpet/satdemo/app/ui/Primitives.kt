@@ -41,6 +41,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -553,17 +554,20 @@ fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClic
     val shape = RoundedCornerShape(Round.Chip)
     Box(
         modifier = modifier
+            .clickable(onClick = onClick)
+            // 触摸区 48dp 是硬要求，但**视觉框不必跟着撑到 48dp**：
+            // 之前 defaultMinSize(minHeight=48) 把描边画到 48dp，于是"车在哪""下次过境"这种
+            // 五个字的问句读起来是三个空箱子 —— Mate 60 那张实拍里就地发问条就是这么崩的。
+            // M3 的 filter chip 本来就是小视觉框 + 大触摸区，minimumInteractiveComponentSize
+            // 只做测量下限、内容居中，描边回到字本身的高度
+            .minimumInteractiveComponentSize()
             // 未选中改成"描边、不填底"：填了 Ink.Track 之后这一排比卡片本身还抢眼，
             // 而 M3 的 assist/filter chip 未选中态就是一根描边。选中仍是实底，对比度那条不变
             .then(
                 if (selected) Modifier.background(Ink.Sat, shape)
                 else Modifier.border(1.dp, Ink.Outline, shape),
             )
-            .clickable(onClick = onClick)
-            .defaultMinSize(minHeight = 48.dp)
             .padding(horizontal = Grid.x12, vertical = Grid.x8),
-        // 撑到 48dp 之后必须把字重新居中：Box 默认 TopStart，不写这一行字就贴着上沿，
-        // 下面空出一截，看着像控件没画完
         contentAlignment = Alignment.Center,
     ) {
         Text(

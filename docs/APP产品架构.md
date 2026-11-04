@@ -1,4 +1,34 @@
-# 车宠 · 手机 App 产品架构 V1.12.0
+# 车宠 · 手机 App 产品架构 V1.12.1
+
+> **V1.12.1 变更（图标落地 + 就地发问条那三处排版）**：
+>
+> **① 启动图标换了，用的是你发的那一份**。先认错：上一轮我说"这个 logo 在够得着的地方都找不到"，
+> **那句是错的** —— 它一直在群里，是一条 file 消息（`carpet-appicon-A-2026-11-04.zip`），
+> 我用消息资源下载取到就在了。按包里的 README 四步落地：
+> `res/drawable/ic_launcher_{background,foreground}.xml`（108dp 矢量，前景 viewport 512、整组绕 (256,256) 缩 0.90）、
+> `res/mipmap-anydpi-v26/ic_launcher.xml` + `ic_launcher_round.xml`（自适应图标，背景/前景/单色三层），
+> 删掉旧的 `res/drawable/ic_launcher.xml`，manifest 改 `android:icon="@mipmap/ic_launcher"`
+> 加 `android:roundIcon="@mipmap/ic_launcher_round"`。
+> `minSdk = 26`，所以**不需要** hdpi/xhdpi 那一堆位图兜底；`aapt2 dump badging` 现在报
+> `icon='res/mipmap-anydpi-v26/ic_launcher.xml'`。母稿归档在 `docs/reference/app-icon-A.svg`。
+> 签名 SHA-1 没变，直接覆盖安装就行。
+>
+> **② 一条需要你拍板的不一致**：这个图标的宠物是**尖耳 + 一条卷尾**，而 `docs/AVATAR.md` 定的「小轨」是
+> **两根短圆耳 + 头顶一根天线、没有尾巴**。两个都是"圆环里一只宠物 + 一道过境弧"，剪影却对不上。
+> 桌面图标和屏上那张脸是同一个角色的两个尺寸，**建议把图标也收成「小轨」**（改 `ic_launcher_foreground.xml`
+> 里那三段子路径就够，别的都不动）；要是你觉得图标归图标、屏归屏，那我把这条撤回，在文档里写死"两个形象，各用各的"。
+>
+> **③ 对话框（就地发问条）的三处排版**，这是你说"我说的是对话框的排版问题，你看截图"那一处：
+> - **快捷问句那几枚 chip 画成了 48dp 的空框**。原因是 `defaultMinSize(minHeight = 48.dp)` 把**视觉盒子**一起撑高了，
+>   描边就框在字外面空出一截。改成 `minimumInteractiveComponentSize()`：**触摸区还是 48dp，描边回到字本身的高度**。
+> - **发送键和麦克风飘在输入框外面**，看着像两个不相干的控件。现在它们画进那块 `Ink.Sunk` 实底里，
+>   `BasicTextField` 用 `weight(1f)` 占满剩余宽度 —— 一整个控件，不是一行零件。
+> - **占位符比输入的字小一号**（`Caption` 12.5 对 `Body` 15），空着的时候像一行说明文字而不是一个能点的地方。
+>   统一成 `Body`。
+>
+> 判据是截图：`shell-vehicle-384-font130.png` / `shell-family-384-font130.png` / `shell-home-384-font130.png`
+> 三张里，发问条都读成一枚完整的输入控件，chip 是正常粗细的一圈描边。
+> 336 项测试全过（1 项跳过），`:app:assembleDebug` 通过 —— 这一步顺带证明了新增的 mipmap/drawable 资源真的能解析。
 
 > **V1.12.0 变更（这一版加的是形象：手机上第一次真的把屏那张脸画出来）**：起因是你那句
 > 「圆屏既然基于 Muse 那个开源项目扩展，App 是不是也能借鉴它的素材，保持两边设计风格一致」，

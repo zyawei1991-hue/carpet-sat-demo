@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标的前景层。几何和 svg/app-icon-A.svg 一一对应，没有重算坐标：
+  画布仍是 108dp，但 viewport 保持 512 —— 这样 SVG 里的数字能原样搬进来，
+  以后改图形只改一处，两边不会对不上。
+
+  外面那层 group 的 0.90 不是审美微调，是自适应图标的安全区：
+  108dp 画布里只有中间 72dp 会露出来，launcher 各家遮罩不一样，还有的是先放大再遮。
+  原稿最外侧的卫星点到中心约 34.8dp，压在那条线上；乘 0.90 后收进 31.3dp，
+  圆/方/水滴任何一种遮罩都不会把那颗点切掉。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:scaleX="0.9"
+        android:scaleY="0.9">
+        <!-- 卫星过境弧：圆心正好落在 (256,256)，205°→335° 掠过头顶的那一段 -->
+        <path
+            android:strokeColor="#FF388BFD"
+            android:strokeWidth="11"
+            android:strokeLineCap="round"
+            android:fillColor="#00000000"
+            android:pathData="M118.3,191.8 A152,152 0 0 1 393.7,191.8" />
+        <!-- 弧上的卫星 -->
+        <path
+            android:fillColor="#FF388BFD"
+            android:pathData="M393.7,191.8m-13,0a13,13 0 1 0 26,0a13,13 0 1 0 -26,0" />
+        <!-- 那块 1.75" 圆 AMOLED -->
+        <path
+            android:strokeColor="#FFFFF3E0"
+            android:strokeWidth="13"
+            android:fillColor="#00000000"
+            android:pathData="M256,256m-118,0a118,118 0 1 0 236,0a118,118 0 1 0 -236,0" />
+        <!-- 两只耳朵 -->
+        <path android:fillColor="#FFFFF3E0" android:pathData="M222,202 L236,168 L252,198 Z" />
+        <path android:fillColor="#FFFFF3E0" android:pathData="M290,202 L276,168 L260,198 Z" />
+        <!-- 头 -->
+        <path android:fillColor="#FFFFF3E0" android:pathData="M256,226m-34,0a34,34 0 1 0 68,0a34,34 0 1 0 -68,0" />
+        <!-- 身子（铃铛形） -->
+        <path
+            android:fillColor="#FFFFF3E0"
+            android:pathData="M212,306 C212,264 226,250 256,250 C286,250 300,264 300,306 Z" />
+        <!-- 尾巴 -->
+        <path
+            android:strokeColor="#FFFFF3E0"
+            android:strokeWidth="12"
+            android:strokeLineCap="round"
+            android:fillColor="#00000000"
+            android:pathData="M298,298 C324,296 332,274 322,256" />
+    </group>
+</vector>

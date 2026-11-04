@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  启动图标本体。minSdk 26，所以不需要 mipmap-*dpi 的 PNG 兜底：
+  能装上这个 App 的设备全都认自适应图标。
+
+  monochrome 直接复用前景层：系统渲染主题图标时只看 alpha 通道再染色，
+  所以单独再画一份白色版是多余的。深色底 + 暖白描形在单色模式下仍然是
+  "圆环里一只宠物、头顶一道过境弧"，读得出来。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
