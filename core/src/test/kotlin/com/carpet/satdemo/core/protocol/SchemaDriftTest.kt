@@ -92,6 +92,36 @@ class SchemaDriftTest {
     }
 
     @Test
+    fun `页表三份必须同字：ScreenPage、ui 的回声、dialog 的跳页`() {
+        // 这是**同一张表的三个抄本**，不是三个概念：屏报上来的页名、手机回声出去的页名、
+        // 答句要求跳去的页名，必须是同一串字符串。它们各自演化一次，现场就多一种
+        // "屏上已经在亲子页，手机那一格写着不认识" 的分叉 —— 而两侧都不会报错
+        val ui = at(schema(), listOf("state", "ui"))!!["properties"]!!.jsonObject
+        val dialog = at(schema(), listOf("dialog"))!!["properties"]!!.jsonObject
+        val want = ScreenPage.entries.map { it.name }.toSet()
+        assertEquals(want, enumValues(ui, "page"), "ui.page 和 ScreenPage 不一致")
+        assertEquals(want, enumValues(dialog, "action"), "dialog.action 和 ScreenPage 不一致")
+        // 跳页只能是页，不能是一条技能名或一个动作：这条一旦松，
+        // "云端代答的一句话替车主按下了呼救"就从"构造不出来"变成"要看模型今天怎么写"
+        assertTrue("sos_press" !in want && "sos" !in want, "action 的取值表里混进了呼救，它只该是页")
+    }
+
+    @Test
+    fun `page_report 在契约里，set_demo_mode 不许当场景通道`() {
+        // 两条一起写，是因为它们是一件事的两面：另一台机器提议复用 set_demo_mode 来报"屏进了哪个场景"，
+        // 而那个名字在手机上已经是 Tab4 那个「演示模式」开关（把等待和窗口压到几分钟）。
+        // 一个名字在两侧各说一件事，正是这套测试一直在防的分叉，所以这里给它立一条**有名字的**替代通道
+        val cmd = enumValues(at(schema(), listOf("command"))!!["properties"]!!.jsonObject, "cmd")
+        assertTrue("page_report" in cmd, "屏报页的通道不在契约里，那固件发的就是野指令")
+        // 手机侧必须有页名可解：CommandType 里没有它，Kotlin 解整帧时会直接失败并关掉这条连接
+        assertTrue(CommandType.entries.any { it.name == "page_report" }, "CommandType 没有 page_report")
+        // 而页名的合法取值是 ScreenPage，不是"任意字符串"。schema 里 args 是个自由 object，
+        // 所以这一条只能靠手机端的校验兜住：不认识的页名一律拒收
+        val page = at(schema(), listOf("state", "ui"))!!["properties"]!!.jsonObject
+        assertEquals(ScreenPage.entries.map { it.name }.toSet(), enumValues(page, "page"))
+    }
+
+    @Test
     fun `schema 说的 t 枚举和契约版本必须和 Kotlin 一致`() {
         // 固件照 schema 手写 if-else 分派，所以"代码里加了个类型但 schema 没写"= 那条类型永远解不出来。
         // dialog 就是这么差点漏掉的：Kotlin 有 MsgType.dialog、schema 没有，
@@ -199,8 +229,9 @@ class SchemaDriftTest {
 
         // 上行指令是**四张**表而不是一张：schema 的 enum、Kotlin 的 CommandType、
         // 屏上真会发的那几条（COMMAND_NAMES），再加组件里那道合法值闸（ALLOWED）。
-        // 屏发的必须是 schema 的子集（track_pull / set_demo_mode / set_fence / reboot_ui
-        // 是手机侧和工程侧用的，屏不发），但子集里任何一条过不了组件那道闸就压根发不出去 ——
+        // 屏发的必须是 schema 的子集（track_pull / set_fence / reboot_ui 是手机侧和工程侧用的，屏不发；
+        // set_demo_mode 是 Tab4 那个「演示模式」开关，**不是场景通道**，报场景走 page_report），
+        // 但子集里任何一条过不了组件那道闸就压根发不出去 ——
         // 那种漏法的现场现象是"按了没反应"，而串口里一条契约错都没有，是最难查的那一类
         val cmd = enumValues(at(root, listOf("command"))!!["properties"]!!.jsonObject, "cmd")
         assertEquals(CommandType.values().map { it.name }.toSet(), cmd, "CommandType 和 schema 的 cmd 对不上")

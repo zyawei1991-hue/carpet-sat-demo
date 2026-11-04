@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.SatPhase
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.StatePayload
 
 /**
@@ -296,6 +297,7 @@ fun MirrorCaption(
     snap: StatePayload?,
     online: Boolean,
     serverError: String?,
+    page: ScreenPage? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -324,7 +326,29 @@ fun MirrorCaption(
                 color = if (serverError != null) Ink.Alert else Ink.TextMid,
             )
         }
+        // **哪一页归屏自己定**，所以这一行是屏报上来的原话，不是手机算出来的（见 protocol/screen-link.md
+        // 「页面归屏、内容归手机」）。连着屏却没报页 = 老固件，那时候要写的是"它没报"，
+        // 而不是拿上一屏的页或者圆里那张卡反推一个位置 —— 这块镜像唯一的价值就是不替屏说话
+        if (online && serverError == null) {
+            Text(
+                page?.let { "屏上现在 · ${screenPageLabel(it)}" } ?: "屏没报它在哪一页",
+                style = Type.Caption,
+                color = if (page == null) Ink.TextLow else Ink.TextMid,
+                modifier = Modifier.padding(top = Grid.x4),
+            )
+        }
     }
+}
+
+/** 页名给人读的那一个词。屏报的是英文 id，车主不需要认识 id */
+fun screenPageLabel(page: ScreenPage): String = when (page) {
+    ScreenPage.face -> "那张脸"
+    ScreenPage.picker -> "选场景"
+    ScreenPage.vehicle -> "车载"
+    ScreenPage.kids -> "亲子"
+    ScreenPage.avatar -> "数字分身"
+    ScreenPage.clock -> "时钟"
+    ScreenPage.gallery -> "图片"
 }
 
 @Composable

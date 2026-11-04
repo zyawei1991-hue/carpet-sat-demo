@@ -88,12 +88,35 @@ enum class EventKind {
 @Serializable
 enum class CommandType {
     sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui,
-    card_next, card_auto, poke,
+    card_next, card_auto, poke, page_report,
 }
 
 /**
- * 圆屏此刻全屏画哪一张。**这个选择是产品决定，所以它由手机下发，固件不许自己挑**
+ * 圆屏页面树上**会上报给手机**的那几层。
+ *
+ * 分权是这么切的：**哪一页由屏自己定**（触摸驱动，不经手机往返），
+ * **这一页里说什么内容由手机定**（还是 [UiState.card] 那一帧）。
+ * 这张表存在的唯一理由是手机得知道屏实际在哪儿 —— 首页那块镜像要是写着「屏在状态盘」
+ * 而玻璃上正在放孩子的录音，观众先怀疑的是屏坏了，而我们一直在防的就是这种分叉。
+ *
+ * [face]/[picker] 是 L0/L1（Muse 那张脸、场景选择），其余五页是 L2 场景页。
+ * **L3 功能页不上报**：屏里第三层是屏自己的排页，手机上没有对应的说法，
+ * 每深一层多报一层，换来的是每一次滑动能让两侧各说一遍话。
+ *
+ * 刻意没有 `health`：屏上画不出那一页。枚举里先给一个对面渲染不出来的值，
+ * 换来的只有演示现场一次切不过去（和 [UiCard] 里不放 `image` 同一条理由）。
+ */
+@Serializable
+enum class ScreenPage { face, picker, vehicle, kids, avatar, clock, gallery }
+
+/**
+ * 圆屏**当前那一页里**此刻该说哪件事。**这一层仍由手机定，固件不许自己挑内容**
  * —— 同一个 ui 缺失时它退回 [status]，那一档也是这里的一员，不是代码里的隐式默认。
+ *
+ * 它从「整块屏全屏画哪一张」降级成了「这一页里画哪一条」：页由屏定（见 [ScreenPage]），
+ * 话仍由手机定。SOS 现在还是走这一档（策略把 sat 卡钉在最优先），
+ * 而商定的那层**全屏抢占**（`SOS 确认 / 平台回执 / 越界` 三类 `event` 盖住任何一页）还没接线 ——
+ * 手机端 `EventKind` 里那几条早就有了，缺的是屏那侧的 `on_event` 落地。
  *
  * 这里刻意没有 `image`：契约传不动一张照片（见 protocol/screen-link.md 待办那条）。
  */
@@ -141,6 +164,17 @@ data class DialogPayload(
     val source: DialogSource = DialogSource.local_rule,
     val skill: String? = null,
     val origin: DialogOrigin = DialogOrigin.screen,
+    /**
+     * 答这句话的同时把屏**挪到那一页**。只允许出现在 `dir=down` 的帧上，
+     * 而且只做一件事：换页。它不是一个技能口，也不是 SOS 口 ——
+     * 屏收到它就切页，除此之外不执行任何东西，所以"云端代答的一句话替车主按下了呼救"
+     * 这类事在这条契约里构造不出来。
+     *
+     * 为什么要挂在对话帧上而不是新开一种帧：跳页永远发生在"刚答了一句"那一刻，
+     * 分开两帧就得再发明一次 turn_id 关联，而对话面已经容忍丢帧 ——
+     * **丢了这一条，屏停在原页、手机记录仍在**，这正是我们想要的降级。
+     */
+    val action: ScreenPage? = null,
 )
 
 @Serializable
@@ -284,6 +318,14 @@ data class UiState(
      * 也不要在固件里猜时区：车里那个网络一断，SNTP 就拿不到，猜出来的表比没有表更误导人。
      */
     @SerialName("tz_min") val tzMin: Int? = null,
+    /**
+     * **回声，不是指令**：手机把屏自己报上来的那一页原样写回去（见 [ScreenPage]、`page_report`）。
+     * 屏不许按这个字段切页 —— 切了就成了手机遥控屏，而我们刚把定页权交出去。
+     * 它存在的用处有两个：彩排台和首页镜像能照着同一份读数说话；
+     * 屏能看出「手机以为我在 A 页而我已经在 B 页」，那是不一致，不是错误。
+     * null = 这一轮屏还没报过页（老固件不会报，重连后也还没补报）。
+     */
+    val page: ScreenPage? = null,
 )
 
 @Serializable

@@ -482,6 +482,7 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
             snap = st.snapshot,
             online = online,
             serverError = st.serverError,
+            page = st.screenPage,
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
         // 连上了不再补一句"连上了"：上面那行镜像说明已经说了同一件事，第三句是噪音。

@@ -7,6 +7,9 @@ import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.protocol.CommandType
 import com.carpet.satdemo.core.protocol.DialogDir
 import com.carpet.satdemo.core.protocol.DialogPayload
+import com.carpet.satdemo.core.protocol.DialogSource
+import com.carpet.satdemo.core.protocol.ScreenMessage
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.UiCard
 import com.carpet.satdemo.core.protocol.UiEmotion
 import com.carpet.satdemo.core.protocol.UiState
@@ -64,6 +67,12 @@ class ScreenCommandTest {
 
         fun cmd(c: CommandType, dir: Int? = null): Boolean =
             runtime.handleScreenCommand(c, dir?.let { JsonObject(mapOf("dir" to JsonPrimitive(it))) })
+
+        /** 屏报页。null = 这一帧压根没带 args.page */
+        fun page(name: String?): Boolean = runtime.handleScreenCommand(
+            CommandType.page_report,
+            JsonObject(if (name == null) emptyMap() else mapOf("page" to JsonPrimitive(name))),
+        )
     }
 
     @Test
@@ -140,6 +149,66 @@ class ScreenCommandTest {
             assertFalse(h.cmd(c), "$c 这一档还没实现，得让调用方看得见地记一行，而不是当成功")
         }
         assertFalse(h.runtime.handleScreenCommand(null), "帧里没有 command 体 = 没接住，不许当成功")
+    }
+
+    /**
+     * **屏报页，手机只回声、不驳回**（2026-11-04 两台机器商定的那条分权）。
+     *
+     * 这条测的是"通知"和"申请"的区别：申请要有一个批准/拒绝的分支，通知只要求收到。
+     * 所以断言是双向的 —— 值进到了 `state.ui.page`（不然首页那块镜像只能猜），
+     * 也**没有**东西被 reject（不然同一块玻璃就有了两个主人）
+     */
+    @Test
+    fun `屏报上来的页原样回声到这一帧`() {
+        val h = Harness()
+        assertTrue(h.page("kids"), "page_report 该被接住 —— 它是通报，不是申请")
+        assertEquals(ScreenPage.kids, h.runtime.status.value.screenPage, "Status 里没有这一页，App 读不到")
+        assertEquals(ScreenPage.kids, h.ui().page, "这一帧没带回声，手机上那块镜像还在替屏编位置")
+
+        // 同一页重复报不该每秒刷一行日志，但值必须还在
+        assertTrue(h.page("kids"))
+        assertEquals(ScreenPage.kids, h.ui().page)
+
+        assertTrue(h.page("vehicle"))
+        assertEquals(ScreenPage.vehicle, h.ui().page, "换了页而回声没跟上，就是两侧各说一件事")
+    }
+
+    @Test
+    fun `屏报了一个手机上不认识的页名要看得见地拒掉`() {
+        val h = Harness()
+        h.page("kids")
+        // "settings" 不是随便挑的：Muse 底座自己那套 tile 里就有这个名字。
+        // 底座加一页而契约没跟，就是这个形状 —— 屏自己切过去了，手机那边静默读到 null，
+        // 于是镜像继续写着上一页。那种错必须有一条日志，而不是靠人对上两屏的画
+        assertFalse(h.page("settings"), "契约外的页名不许当成功")
+        assertFalse(h.page(null), "没带 args.page 也不算报过")
+        assertEquals(ScreenPage.kids, h.ui().page, "拒收之后要留着上一个真报上来的页，不许清成 null")
+    }
+
+    /**
+     * `dialog.action` 只许挂在答句上。
+     *
+     * 挂上行的话，等于屏自己说一句、自己决定把自己挪去哪一页 ——
+     * 那条路一旦通，「屏只能请求」这条边界就不是被放宽了，是被绕过了。
+     */
+    @Test
+    fun `跳页只能由答句发起`() {
+        val out = ArrayList<ScreenMessage>()
+        val h = Harness()
+        h.runtime.onSend = { msgs -> out += msgs }
+
+        h.runtime.pushDialog(
+            DialogPayload(
+                turnId = "nav-1", dir = DialogDir.up, text = "今天孩子怎么样",
+                source = DialogSource.muse_cloud, action = ScreenPage.kids,
+            )
+        )
+        assertEquals(null, out.last().dialog?.action, "上行的 action 没被剥掉：屏在给自己下命令")
+
+        h.runtime.pushDialog(
+            DialogPayload(turnId = "nav-2", dir = DialogDir.down, text = "去屏上那页看", action = ScreenPage.kids)
+        )
+        assertEquals(ScreenPage.kids, out.last().dialog?.action, "答句带着的跳页被吃掉了，语音拉不起场景")
     }
 
     /**

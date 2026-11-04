@@ -127,12 +127,12 @@
         "demo_mode": { "type": "boolean", "description": "演示模式：展示端隐藏调试信息，放大关键视觉元素" },
         "ui": {
           "type": "object",
-          "description": "t=state 时**可选**。「这块屏此刻该画什么」由手机定，固件不猜 —— 和 eph_fail 同一个口径：产品判断在 App 侧就定稿，屏只负责画。**它是加性字段，所以不升契约版本**：固件的 cJSON 只读它认识的键，多一个键不花它一分钱；升级版本是为了防'一种它不认识的 t 把分派 if-else 撞穿'（v2 加 dialog 就是这个原因），可选字段没这个问题。但**整个 ui 缺失时必须退回画状态总览，不许黑屏、不许弹错** —— 老 App、v1 会话、还有手机刚起还没算出该展示哪张卡的那几秒，都是这个形状",
+          "description": "t=state 时**可选**。「这一页里该说什么」由手机定，固件不猜 —— 和 eph_fail 同一个口径：产品判断在 App 侧就定稿，屏只负责画。**哪一页归屏自己定**（见 page，那是屏报上来的回声），这一档从 v0.3 起改了口径，见 protocol/screen-link.md「页面归屏、内容归手机」。**它是加性字段，所以不升契约版本**：固件的 cJSON 只读它认识的键，多一个键不花它一分钱；升级版本是为了防'一种它不认识的 t 把分派 if-else 撞穿'（v2 加 dialog 就是这个原因），可选字段没这个问题。但**整个 ui 缺失时必须退回画状态总览，不许黑屏、不许弹错** —— 老 App、v1 会话、还有手机刚起还没算出该展示哪张卡的那几秒，都是这个形状",
           "required": ["card"],
           "properties": {
             "card": {
               "enum": ["status", "sat", "dialog", "emotion", "clock"],
-              "description": "全屏画这一张。status=链路/卫星/围栏总览（也是 ui 缺失时的兜底那张）；dialog=对话（要 v2 会话才可能有内容，屏侧自己判断该档，低于 2 就画'这条要手机开 v2'而不是空白）；clock=钟面，时间取**整帧的 ts**、时区取 ui.tz_min；sat=过境卡，取 state.sat 那一路字段。**故意没有 image**：图片要的字节数远超契约那条 4KB TEXT 通道，通道没建之前先给个屏画不出来的枚举值，只会换来一张空白卡"
+              "description": "**当前那一页里**画哪一条（哪一页由屏自己定，见 page）。status=链路/卫星/围栏总览（也是 ui 缺失时的兜底那张）；dialog=对话（要 v2 会话才可能有内容，屏侧自己判断该档，低于 2 就画'这条要手机开 v2'而不是空白）；clock=钟面，时间取**整帧的 ts**、时区取 ui.tz_min；sat=过境卡，取 state.sat 那一路字段。**故意没有 image**：图片要的字节数远超契约那条 4KB TEXT 通道，通道没建之前先给个屏画不出来的枚举值，只会换来一张空白卡"
             },
             "emotion": {
               "enum": ["neutral", "happy", "excited", "sad", "worried", "sleepy", "thinking", null],
@@ -143,6 +143,10 @@
               "minimum": -840,
               "maximum": 840,
               "description": "手机时区相对 UTC 的偏移分钟数（东八区 480）。clock 卡靠它把 ts 那串 Unix 毫秒拆成时分秒 —— 固件**不要去猜时区**：这台设备没有电池-backed RTC，SNTP 在车里那个网上一开放就可能拿不到，猜出来的表比没有表更糟。null 或缺失 = 按 UTC 画并在角上标一个小小的 UTC，让人一眼看出这不是本地时间"
+            },
+            "page": {
+              "enum": ["face", "picker", "vehicle", "kids", "avatar", "clock", "gallery", null],
+              "description": "**回声，不是指令**。屏自己按 `command{cmd:page_report, args.page}` 报上来的那一页，手机原样写回来，好让 App 首页那块镜像和屏讲的是同一件事。固件**不许按这个字段切页** —— 切了就把刚交出去的定页权又要回来了，而两侧各自切页的结果是同一块玻璃上两个主人。null / 缺失 = 这一轮屏还没报过页（老固件不会报，重连后也还没补报），屏该继续待在自己实际那一页，手机上那一格显示「屏未上报」而不是上一页"
             }
           }
         }
@@ -177,8 +181,8 @@
       "required": ["cmd"],
       "properties": {
         "cmd": {
-          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui", "card_next", "card_auto", "poke"],
-          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹；card_next=左右滑请求切一张，args.dir 取 +1/-1，App 在 status/sat/dialog/emotion/clock 五张里算出下一张（SOS armed/pending/sent 时拒绝并回一条事件说明原因）；card_auto=把定卡权交回 App 的优先序，这是手动钉住之后唯一的出口；poke=单击，App 换一张脸并可答一句，是「互动表情」这条链的起点。**这里刻意没有 card_set**：屏不许指定画哪张。"
+          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui", "card_next", "card_auto", "poke", "page_report"],
+          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹（**轨迹数据还没给展示端读，这条现在没人处理**）；card_next=左右滑请求切一条，args.dir 取 +1/-1，App 在 status/sat/dialog/emotion/clock 五张里算出下一张（SOS armed/pending/sent 时拒绝并回一条事件说明原因）；card_auto=把「这一页里说什么」的决定权交回 App 的优先序，这是手动钉住之后唯一的出口；poke=单击，App 换一张脸并可答一句，是「互动表情」这条链的起点；**page_report=屏通报它自己已经切到了哪一页，args.page 取 state.ui.page 那七个页名之一。它是通知、不是申请：手机不许驳回、不许改判，只把它写进 state.ui.page 回声出去，并报给 App 首页那块镜像**。认不出来的页名手机只记一行日志，屏上不会有任何变化。**set_demo_mode 不是场景通道** —— 它这个字面意思是 Tab4 那个「演示模式」开关（把等待和窗口压到几分钟），拿它报场景会让一个名字在两侧各说一件事；报场景走 page_report。**这里刻意没有 card_set，也没有 page_set**：屏不许指定画哪条内容，手机也不许指定屏去哪一页"
         },
         "args": { "type": "object" }
       }
@@ -211,7 +215,11 @@
           "description": "这句话从哪儿来的，决定界面上打什么标。local_fallback=该走模型但端点没配；denied=权限没开被网关拦下；xiaozhi_cloud=小智官方云全包那一路，**话不是我们的网关生成的**，屏上要单独标「小智云 · 未过网关」，也不许因为它触发任何技能；muse_cloud=圆屏换到 Muse 底座之后屏本机那条 ASR→云→TTS 的链，和 xiaozhi_cloud 同一类同一套规矩（只入账、不触发技能、不回镜），标「屏侧模型 · 未过网关」"
         },
         "skill": { "type": ["string", "null"], "description": "命中的技能 id，没有为 null。给工程模式排查用" },
-        "origin": { "enum": ["screen", "phone"], "default": "screen", "description": "这一轮是谁先起的。车主想知道「刚才是不是有人在车那边跟屏说话」，所以这个字段必须一路带到手机上那条记录里" }
+        "origin": { "enum": ["screen", "phone"], "default": "screen", "description": "这一轮是谁先起的。车主想知道「刚才是不是有人在车那边跟屏说话」，所以这个字段必须一路带到手机上那条记录里" },
+        "action": {
+          "enum": ["face", "picker", "vehicle", "kids", "avatar", "clock", "gallery", null],
+          "description": "答这句话的同时把屏**挪到那一页**。只允许挂在 dir=down 上（dir=up 带了也会被手机剥掉再发）；它只做换页这一件事 —— 不是技能口、不是 SOS 口，所以「云端代答的一句话替车主按下了呼救」这类事在这条契约里构造不出来。为什么挂在这帧上而不新开一种帧：跳页永远发生在刚答了一句那一刻，分两帧就得再发明一次 turn_id 关联。对话面不重发，所以**丢了这一条 = 屏停在原页、手机记录仍在**，这正是想要的降级。null / 缺失 = 这句答话不需要换页。**生产者目前还没有**：跳页要靠命中的技能给出一页，而技能表里现在七条全是卫星/车辆那一路，亲子那一条要等 :core/ai 加进表里 —— 屏侧可以先按这张表把接的那一半建好"
+        }
       }
     }
   },

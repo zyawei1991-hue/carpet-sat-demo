@@ -29,6 +29,7 @@ import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.ScreenCodec
 import com.carpet.satdemo.core.protocol.ScreenMessage
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.StatePayload
 import com.carpet.satdemo.core.protocol.UiCard
@@ -122,6 +123,13 @@ class DemoRuntime(
         val localIp: String? = null,
         /** 展示端接入点没起来的原因。非空 = 1Hz 在跑但屏连不上，首页必须说实话 */
         val serverError: String? = null,
+        /**
+         * 屏自己报上来的那一页（`page_report`）。null 有两种，都是实话：
+         * 这一轮还没报过（老固件不会报，新屏重连后也还没补报），和屏已经断了。
+         * **不许拿上一屏的页来填这一格** —— 手机上写着「屏在亲子页」而玻璃上没人，
+         * 是这块镜像能给出的最贵的一句假话
+         */
+        val screenPage: ScreenPage? = null,
         val log: List<String> = emptyList(),
     )
 
@@ -183,6 +191,10 @@ class DemoRuntime(
         // 断开不能只减计数：台账上那台屏要立刻变成"离线，最后一次见到是几点"，
         // 否则现场会让人以为还连着
         server.onDisconnect = { id ->
+            // 页也跟着清。屏不在了还写着「屏在亲子页」，是那块镜像自己编的话 ——
+            // 重连之后屏会补报一条 page_report，那一格才会重新有字
+            screenPage = null
+            _status.value = _status.value.copy(screenPage = null)
             if (id == null) {
                 log("展示端断开（没报过 screen_id）")
             } else {
@@ -459,7 +471,15 @@ class DemoRuntime(
             dialogMood = AnswerMood.of(d.text)
             log("答句表情 → ${dialogMood?.name}")
         }
-        push(listOf(ScreenMessage(t = MsgType.dialog, seq = 0, ts = clockMs(), dialog = d)))
+        // action 只许挂在答句上。上行那句是屏自己说出来的话，让它带着"把我自己挪到哪一页"
+        // 就等于把定页权从"屏自己按"改成了"屏按自己听到的话按"，多绕一层还可能自我循环
+        val out = if (d.dir == DialogDir.up && d.action != null) {
+            log("屏上行的对话带了 action，已剥掉：跳页只能由答句发起")
+            d.copy(action = null)
+        } else {
+            d
+        }
+        push(listOf(ScreenMessage(t = MsgType.dialog, seq = 0, ts = clockMs(), dialog = out)))
     }
 
     /** 这台屏能不能说话（契约 v2）。首页那句提示读这个，不靠猜 */
@@ -521,6 +541,8 @@ class DemoRuntime(
     private var lastNotableMs: Long? = null
     /** 最近一帧快照。屏的请求要按当下状态决定接不接（SOS 进行中不让你把倒计时切走），靠这个读 */
     private var lastSnap: StatePayload? = null
+    /** 屏报上来的那一页。只有屏能定（导航归屏），手机只读不写，切页要靠对话下行去求 */
+    private var screenPage: ScreenPage? = null
 
     /** 最近一次策略决定，给彩排台日志和调试页回显。屏真正画的那一份在推出去的 `state.ui` 里 */
     val lastUiDecision: CardPolicy.Decision? get() = lastDecision
@@ -560,11 +582,36 @@ class DemoRuntime(
             log("屏被戳了一下 · 换一张会动的脸")
             true
         }
+        CommandType.page_report -> reportScreenPage(args?.stringOf("page"))
         else -> false
+    }
+
+    /**
+     * 屏报上来它自己在哪一页。**这不是申请，手机不许驳回也不许改判** ——
+     * 定页权已经交出去了，这一条只是让手机上那块镜像别再替屏编一个位置。
+     *
+     * 认不出来的页名回 false：屏发了一条手机上没有的页，两种可能都足以要命
+     * （固件加了一页而契约没跟，或者 args 拼错了），而这两种在屏上都看不出任何异常。
+     * 让它进日志，比让它静默变成「手机以为屏还在上一页」好
+     */
+    private fun reportScreenPage(raw: String?): Boolean {
+        val page = raw?.let { name -> ScreenPage.entries.firstOrNull { it.name == name } }
+        if (page == null) {
+            log("屏报的页不在契约里：${raw ?: "没带 page"}")
+            return false
+        }
+        if (page == screenPage) return true
+        screenPage = page
+        _status.value = _status.value.copy(screenPage = page)
+        log("屏现在在 $page 页")
+        return true
     }
 
     /** args 里取一个整数。屏发歪了（缺键、null、不是数字）一律当没发，由调用方拿缺省 */
     private fun JsonObject.intOf(key: String): Int? = this[key]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+
+    /** args 里取一个字符串。同上：缺键或不是标量就当没发，交给调用方判 */
+    private fun JsonObject.stringOf(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
 
     /** 切卡请求。SOS 正在走的时候顶回去：那种时候屏上唯一该说的话是倒计时 */
     private fun stepCard(dir: Int): Boolean {
@@ -597,7 +644,7 @@ class DemoRuntime(
         // 只有对话卡才吃答句那张脸：这句话说完 30 秒之后屏上换的是别的事，
         // 让一句话的表情挂到下一张卡上，观众看到的是一句好消息配一张担心的脸
         val mood = uiEmotionOverride ?: if (d.card == UiCard.dialog) dialogMood ?: d.emotion else d.emotion
-        val ui = UiState(d.card, mood, screenTzMin)
+        val ui = UiState(d.card, mood, screenTzMin, screenPage)
         engine.onUiChanged(ui)
         if (d.card != lastDecision?.card || d.why != lastDecision?.why) {
             log("屏画 ${d.card} · ${ui.emotion?.name}｜${d.why}")

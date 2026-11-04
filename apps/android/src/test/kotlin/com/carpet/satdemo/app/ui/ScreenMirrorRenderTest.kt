@@ -18,6 +18,7 @@ import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.LinkState
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.SatState
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.StatePayload
@@ -85,7 +86,7 @@ class ScreenMirrorRenderTest {
         sat = live().sat.copy(moduleOk = false, phase = SatPhase.tx_fail, cnr = null, nextPassInS = null),
     )
 
-    private fun shootHome(name: String, payload: StatePayload?, clients: Int) {
+    private fun shootHome(name: String, payload: StatePayload?, clients: Int, page: ScreenPage? = null) {
         val app = AppRuntime(ApplicationProvider.getApplicationContext())
         app.pairScreen("desk-01")
         val status = DemoRuntime.Status(
@@ -94,6 +95,7 @@ class ScreenMirrorRenderTest {
             snapshot = payload,
             clients = clients,
             localIp = "192.168.1.9",
+            screenPage = page,
         )
         compose.setContent { CarpetTheme { HomeShell(app, status) } }
         compose.waitForIdle()
@@ -131,6 +133,25 @@ class ScreenMirrorRenderTest {
     @Config(qualifiers = "w384dp-h1600dp-xhdpi")
     fun renderFirstFrame() {
         shootHome("mirror-384-warming", null, 0)
+    }
+
+    /**
+     * 屏报了页。**这一张要拍的是"手机上那一格说的是屏的原话"**（见 DECISIONS D10）：
+     * 屏在亲子页，圆里推上去的却还是状态总览 —— 这两个本来就该长得不一样，
+     * 因为它们说的是两件事（哪一页归屏、这一页里说什么归手机）。
+     * 拍出来如果两行挤成一行、或者那句被裁掉了，就是版式问题，不是契约问题
+     */
+    @Test
+    @Config(qualifiers = "w384dp-h1600dp-xhdpi")
+    fun renderPageReported() {
+        shootHome("mirror-384-page-kids", live(), 1, ScreenPage.kids)
+    }
+
+    /** 连着屏但这台不会报页（老固件）：那一格必须写"屏没报"，不许拿圆里那张卡反推一个位置 */
+    @Test
+    @Config(qualifiers = "w384dp-h1600dp-xhdpi")
+    fun renderPageUnknown() {
+        shootHome("mirror-384-page-unknown", live(), 1, null)
     }
 
     /** 字号 1.3：圆里那几行是固定宽度 + maxLines=1，字一大只会被裁。裁成什么样必须看见 */

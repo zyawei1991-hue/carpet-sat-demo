@@ -67,6 +67,10 @@
     <button id="asksend">发送</button>
     <button id="askprobe" title="故意说一句红线里的话，看手机端拦不拦">越界探针</button>
   </div>
+  <h2>页面（哪一页归屏定，手机只回声）</h2>
+  <div class="ask">
+    <select id="pagepick" title="冒充“有人在玻璃上滑到了这一页”：只发通报，不问手机要不要"></select>
+  </div>
   <h2>原始状态流</h2>
   <div id="kv"></div>
   <div class="log" id="log"></div>
@@ -446,6 +450,7 @@ function handleFrame(chunk){
       if(m.event.kind==='sos_cancelled') note('  ↑ 已撤销', '#3ddc84');
     } else if(m.t==='dialog'){
       pushLine(m.dialog);
+      if(m.dialog.dir==='down') applyAction(m.dialog.action);
     } else if(m.t==='ack'){
       const a=m.ack||{};
       note('回执 for_seq='+(a.for_seq!=null?a.for_seq:a.forSeq)+(a.error?' 拒：'+a.error:''));
@@ -466,6 +471,34 @@ function sendCmd(cmd,args){
     command:{cmd,args:args||{}}}));
   note('指令 '+cmd);
 }
+
+/**
+ * 页面树。**这块冒充件没有真的 L0–L3**（它只画手机推上来的那一帧 card），
+ * 所以这一档用它面板上那个下拉框冒充"有人在玻璃上滑到了一页"：
+ * 值变了就发一条 page_report，**不问手机批不批** —— 定页权在屏，手机只回声。
+ * 真固件那边对应的是 tile 切换处同一个调用点。
+ */
+const PAGES=['face','picker','vehicle','kids','avatar','clock','gallery'];
+let page='face';
+
+function reportPage(){ sendCmd('page_report',{page}); }
+
+// 答句带着 action 才换页，别的帧一律不换。丢了这一条也只是停在原页，对话面不重发
+function applyAction(name){
+  if(!name || !PAGES.includes(name)){ if(name) note('答句要跳的页不在契约里：'+name,'#ff4545'); return; }
+  if(name===page) return;
+  page=name;
+  const sel=document.getElementById('pagepick'); if(sel) sel.value=name;
+  reportPage();
+}
+
+(function wirePagePicker(){
+  const sel=document.getElementById('pagepick');
+  if(!sel) return;
+  sel.innerHTML=PAGES.map(p=>`<option value="${p}">${p}</option>`).join('');
+  sel.value=page;
+  sel.onchange=()=>{ page=sel.value; reportPage(); };
+})();
 
 /**
  * 屏上"说一句话"。这块冒充件没有真的麦克风链路（附录 A.3 那条要等固件：板载双麦 + ES7210 + VAD），
@@ -606,6 +639,9 @@ function connect(){
     document.getElementById('hint').textContent='已连接 · 状态 1Hz 推送 · 契约 v2 可对话';
     ws.send(JSON.stringify({v:2,t:'hello',seq:outSeq++,
       hello:{screen_id:'WS175B-A3F7',fw:'sim-0.3.0',dock_type:'desk_stand',wifi_rssi:-52,battery_mv:4080,protocols:[1,2]}}));
+    // 每次建链都补报一次当前页。手机那侧的记录跨重连还在，而"屏现在在哪"不是历史记录能回答的 ——
+    // 少了这一条，重连之后手机上那一格会一直空着，直到下一次真的翻页才复明
+    reportPage();
   };
   ws.onmessage=(ev)=>handleFrame(ev.data);
   ws.onclose=()=>{

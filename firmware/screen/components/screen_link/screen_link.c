@@ -247,10 +247,12 @@ esp_err_t screen_link_send_command(const char *cmd, cJSON *args)
      * 所以这一关在装配帧之前，非法值当场退回，绝不上线。
      * card_next / card_auto / poke 是 #39 加的三条**请求**：屏不指定画哪张卡，
      * 也不指定画哪张脸，只把"用户在这块玻璃上做了什么"告诉手机，由手机算出结果再下发。
+     * page_report 是那一刀切开的反面：**它不是请求，是通报**。哪一页归屏自己定（触摸驱动，
+     * 不等手机往返），报上来只是让手机上那块镜像别再替屏编位置。手机端不许驳回这条。
      * core 的 SchemaDriftTest 会把这张表和 schema 的 enum 逐条比 */
     static const char *const ALLOWED[] = {
         "sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui",
-        "card_next", "card_auto", "poke",
+        "card_next", "card_auto", "poke", "page_report",
     };
     bool ok = false;
     for (int i = 0; i < (int)(sizeof(ALLOWED) / sizeof(ALLOWED[0])); i++) {
