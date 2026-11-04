@@ -36,6 +36,12 @@ class DialogBridge(
     val log: ConversationLog = ConversationLog(guard = { gateway.guard(it) }, log = note),
     /** 冷却钟跟着宿主的钟走：假时钟下"第二轮还会不会再提醒"是能测的，真钟下不能 */
     private val heartbeat: Heartbeat = Heartbeat(nowMs),
+    /**
+     * 圆屏起的那一轮归手机哪一页。宿主从 `Status.screenPage` 换算（[screenSceneOf]）——
+     * 那个字段是屏自己报上来的，**不是手机猜的**，所以换算得出来的页也是屏的话。
+     * 默认 null：屏还没报页的时候，那句话只出现在总时间线里。
+     */
+    private val screenScene: () -> TurnScene? = { null },
 ) {
     private var turnSeq = 0
 
@@ -46,25 +52,44 @@ class DialogBridge(
     private val _thinking = MutableStateFlow(false)
     val thinking: StateFlow<Boolean> = _thinking
 
-    /** 一次问答。忙的时候回一句"我在想上一条"，不排队 —— 排队会让用户以为按了两次就发两遍 */
-    suspend fun ask(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null) {
+    /**
+     * 一次问答。忙的时候回一句"我在想上一条"，不排队 —— 排队会让用户以为按了两次就发两遍。
+     *
+     * [scene] 只在手机起头时用（哪一页的输入框发出去的）；**屏起的那轮由 [screenScene] 定**，
+     * 因为页是屏自己选的，手机传进来的那一串不算。
+     */
+    suspend fun ask(
+        question: String,
+        via: DialogOrigin = DialogOrigin.phone,
+        turnId: String? = null,
+        scene: TurnScene? = null,
+    ) {
         val q = question.trim()
         if (q.isEmpty()) return
         val id = turnId ?: newTurnId()
-        val asked = log.append(Turn(from = TurnFrom.Me, text = q, source = ReplySource.LocalRule, via = via, turnId = id))
-            ?: return
+        val to = if (via == DialogOrigin.screen) screenScene() else scene
+        val asked = log.append(
+            Turn(from = TurnFrom.Me, text = q, source = ReplySource.LocalRule, via = via, turnId = id, scene = to),
+        ) ?: return
         mirror(asked)
         if (_thinking.value) {
-            say(gateway.recordProactive("我在想上一条，这句先不算。", skill = null), via, id)
+            say(gateway.recordProactive("我在想上一条，这句先不算。", skill = null), via, id, to)
             return
         }
         _thinking.value = true
         try {
-            say(gateway.ask(q, facts()), via, id)
+            say(gateway.ask(q, context(id)), via, id, to)
         } finally {
             _thinking.value = false
         }
     }
+
+    /**
+     * 交给网关的事实表 = 宿主那份 + **这份记录里屏说过的那几句**。
+     * 后半截由桥盖而不是宿主填：记录住在桥里，让宿主筛等于让两个宿主各筛一遍。
+     */
+    private fun context(excludeTurnId: String? = null): SkillContext =
+        facts().copy(screenTalk = log.screenTalk(excluding = excludeTurnId))
 
     /**
      * 圆屏说上来的一帧。三条规矩：
@@ -80,27 +105,33 @@ class DialogBridge(
         if (msg.t != MsgType.dialog) return
         val d = msg.dialog ?: return
         if (d.dir == DialogDir.down) {
-            log.record(d)            // 屏把自己那一轮回显回来（真固件重连后可能这么发），只补记录不触发
+            // 屏把自己那一轮回显回来（真固件重连后可能这么发），只补记录不触发
+            log.record(d, screenScene())
             return
         }
         if (d.source.foreignCloud) {
-            log.record(d)
+            log.record(d, screenScene())
             note("屏侧云代答一句话：只入账，不触发技能，也不回镜（那句话屏上已经显示过了）")
             return
         }
         launch { ask(d.text, DialogOrigin.screen, d.turnId) }
     }
 
-    /** 主动播报。宿主按自己的节奏调（App 是 10 秒一轮） */
+    /** 主动播报。宿主按自己的节奏调（App 是 10 秒一轮）。**不归任何一页**：它不是谁在那一页问出来的 */
     fun scanProactive() {
         heartbeat.scan(facts()).forEach { tip ->
             // id 必须带时间戳：主动提醒有冷却但会再来一轮，复用同一个 turn_id 会被去重当成重复丢掉
-            say(gateway.recordProactive(tip.text, skill = tip.skill), DialogOrigin.phone, "t-hb-${tip.skill}-${newTurnId()}")
+            say(
+                gateway.recordProactive(tip.text, skill = tip.skill),
+                DialogOrigin.phone,
+                "t-hb-${tip.skill}-${newTurnId()}",
+                null,
+            )
         }
     }
 
     /** 网关的回执落成记录 + 上屏。主动播报也走这儿，两条路只有一份代码 */
-    private fun say(reply: AiReply, via: DialogOrigin, turnId: String) {
+    private fun say(reply: AiReply, via: DialogOrigin, turnId: String, scene: TurnScene?) {
         val stored = log.append(
             Turn(
                 from = TurnFrom.Ai,
@@ -110,6 +141,7 @@ class DialogBridge(
                 proactive = reply.proactive,
                 via = via,
                 turnId = turnId,
+                scene = scene,
             ),
         ) ?: return
         mirror(stored)

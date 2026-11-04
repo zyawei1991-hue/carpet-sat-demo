@@ -8,9 +8,11 @@ import com.carpet.satdemo.core.ai.OpenAiCompatProvider
 import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.ai.ReplySource
 import com.carpet.satdemo.core.ai.SkillContext
+import com.carpet.satdemo.core.ai.screenSceneOf
 import com.carpet.satdemo.core.ai.skillContext
 import com.carpet.satdemo.core.ai.Turn
 import com.carpet.satdemo.core.ai.TurnFrom
+import com.carpet.satdemo.core.ai.TurnScene
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -373,6 +375,9 @@ class AppRuntime(private val host: Application) {
         push = { d -> runtime.pushDialog(d) },
         launch = { body -> scope.launch { body() } },
         note = { line -> runtime.log(line) },
+        // 屏起的那一轮归哪一页，读屏自己报上来的那个字段。屏没报过页就不归页 ——
+        // 那种句子只在首页的总时间线里出现，比"猜一个亲子"诚实
+        screenScene = { screenSceneOf(runtime.status.value.screenPage) },
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
@@ -389,9 +394,13 @@ class AppRuntime(private val host: Application) {
     /**
      * 手机上问一句。[turnId] 由调用方给：圆屏起的那一轮必须沿用它那个 id，
      * 否则手机把问和答记成两轮，屏上那条追问也钉不回原来的对话。
+     *
+     * [scene] 是**从哪一页发的问**：车辆页发的问和它的答都只出现在车辆页那串里
+     * （首页那条总时间线照常全显）。谁问的记给谁，不是"最近在看哪个 Tab"——
+     * 回答回来时用户可能已经切走了，那一条也不该跑到别的页里去。
      */
-    fun askAi(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null) {
-        scope.launch { dialog.ask(question, via, turnId) }
+    fun askAi(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null, scene: TurnScene? = null) {
+        scope.launch { dialog.ask(question, via, turnId, scene) }
     }
 
     /**

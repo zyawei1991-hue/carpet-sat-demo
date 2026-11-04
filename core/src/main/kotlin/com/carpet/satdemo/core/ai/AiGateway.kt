@@ -125,6 +125,9 @@ class AiGateway(
             append(" 围栏=").append(if (c.fenceActive == true) (if (c.fenceInside == true) "在内" else "越界") else "未开")
             append(" 在线圆屏=").append(c.screensOnline?.toString() ?: "未知").append("台")
             append(" 手机电量=").append(c.phoneBattery?.toString() ?: "未知").append("%")
+            // 屏上那几句原话必须一起给模型：不给的话"娃在屏上说了啥"到了真模型那一侧只能编，
+            // 而编出来的那句会以"远端模型"的名义永久留在车主的对话记录里
+            if (c.screenTalk.isNotEmpty()) append(" 屏上说过=").append(c.screenTalk.joinToString(" | "))
         }
     }
 }

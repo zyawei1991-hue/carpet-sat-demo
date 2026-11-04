@@ -4,6 +4,7 @@ import com.carpet.satdemo.core.protocol.DialogDir
 import com.carpet.satdemo.core.protocol.DialogOrigin
 import com.carpet.satdemo.core.protocol.DialogPayload
 import com.carpet.satdemo.core.protocol.DialogSource
+import com.carpet.satdemo.core.protocol.ScreenPage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -17,9 +18,34 @@ import kotlinx.coroutines.flow.StateFlow
  *    这句话反过来也成立：圆屏上说的话只有圆屏自己记得，等于没有记录。
  *
  * 所以规则是：谁说话都往这里追加一条 [Turn]，`via` 记住是从哪块屏进来的，
- * 出站时同一份记录再镜像回圆屏。两边看到的是同一个 list，不是"各存一份再对齐"。
+ * `scene` 记住它归手机哪一页（[TurnScene]），出站时同一份记录再镜像回圆屏。
+ * 两边看到的是同一个 list，不是"各存一份再对齐"；手机上那一页看到的是**同一个 list 的视图**。
  */
 enum class TurnFrom { Me, Ai }
+
+/**
+ * 一句话归手机上的哪一页。
+ *
+ * 只有两个取值，因为手机上有独立对话的页面就这两个（车辆、家人）：
+ * 首页那条是**总时间线**，什么都不归、什么都显示；「我的」页不问话。
+ * null = 归不进任何一页 —— 比如屏报它在「时钟」页时说的话，那种句子只属于总时间线。
+ *
+ * 这一刀是"不同场景的功能页面还是应该区分开"和"所有对话整合成一份"的接缝：
+ * 记录**永远只有一份**（[ConversationLog]），页面上按 scene 各取各的视图，
+ * 不是每页存一份再想办法对齐 —— 存两份就一定会有对不上的那一天。
+ */
+enum class TurnScene { vehicle, family }
+
+/**
+ * 屏报上来的那一页换算成手机的一页。**只有两条映射得上**，其余一律 null：
+ * 亲子/车载那两页在两边指的是同一件事，时钟、图片、选场景那种页上的话没有对应的手机页面，
+ * 猜一个反而会让车主在错误的页里看见别人的对话。
+ */
+fun screenSceneOf(page: ScreenPage?): TurnScene? = when (page) {
+    ScreenPage.vehicle -> TurnScene.vehicle
+    ScreenPage.kids -> TurnScene.family
+    else -> null
+}
 
 data class Turn(
     val from: TurnFrom,
@@ -31,6 +57,11 @@ data class Turn(
     val via: DialogOrigin = DialogOrigin.phone,
     /** 一轮问答共用同一个 id（上行和下行各一条 Turn，所以去重键是 id + from） */
     val turnId: String,
+    /**
+     * 这一轮归手机的哪一页。手机起的问题由发起那一屏带进来；
+     * 圆屏起的从 [screenSceneOf] 换算，**屏没报过页就是 null**（只在总时间线里出现）。
+     */
+    val scene: TurnScene? = null,
 ) {
     /** 是不是"我们生成的话"。屏那侧的云答的不是，界面上必须分开标 */
     val ours: Boolean get() = !source.foreignCloud
@@ -78,8 +109,11 @@ class ConversationLog(
      * 把契约上的一帧对话变成记录。**进来的路上就过一次文案闸**：
      * [DialogSource.foreignCloud] 那两路的话不是我们生成的，但它们即将出现在屏幕上、
      * 并永久留在车主的记录里 —— 这两件事任何一件都值得拦一道。
+     *
+     * [scene] 不在契约里：页归屏、内容归手机，屏说的是它自己那套页名（[ScreenPage]），
+     * 换算成手机的一页是宿主的事，所以由调用方给。
      */
-    fun record(d: DialogPayload): Turn? {
+    fun record(d: DialogPayload, scene: TurnScene? = null): Turn? {
         val from = if (d.dir == DialogDir.up) TurnFrom.Me else TurnFrom.Ai
         return append(
             Turn(
@@ -89,6 +123,7 @@ class ConversationLog(
                 skill = d.skill,
                 via = d.origin,
                 turnId = d.turnId,
+                scene = scene,
             ),
         )
     }
@@ -97,6 +132,21 @@ class ConversationLog(
         _turns.value = emptyList()
         seen.clear()
     }
+
+    /**
+     * 「娃在屏上说了啥」要的那几句：**只数屏说上来的**（`via=screen` 且是问句那一条），
+     * 手机上打的字不算 —— 车主问的是车那边有没有人跟屏说话。
+     *
+     * [excluding] 把正在答的这一轮排掉：那一轮如果本来就是屏起头的，不加这一句
+     * 回答会把用户刚问的那句原样念回去（「屏上最近有 3 句：「屏上说了啥」…」）。
+     *
+     * 筛法住在这儿而不是两个宿主各写一遍：手机筛出一条、彩排台筛出另一条的话，
+     * 同一块屏在两种场合会回答出两句不一样的话，那种分歧在现场没法当场解释。
+     */
+    fun screenTalk(limit: Int = 3, excluding: String? = null): List<String> = _turns.value
+        .filter { it.via == DialogOrigin.screen && it.from == TurnFrom.Me && it.turnId != excluding }
+        .takeLast(limit)
+        .map { it.text }
 
     /** 镜像给圆屏：只发"该让屏显示的那几条"，主动提醒也算，屏上不该看不到自己为什么开口 */
     fun toDialog(t: Turn, dir: DialogDir): DialogPayload = DialogPayload(

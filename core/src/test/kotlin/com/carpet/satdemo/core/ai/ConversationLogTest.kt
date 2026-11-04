@@ -82,6 +82,21 @@ class ConversationLogTest {
     }
 
     @Test
+    fun `屏上那几句只数屏起头的问句并且最多三句`() {
+        // 「娃在屏上说了啥」这一问的全部依据就是这个筛法：手机上打的字不算，
+        // 屏上那句**答句**也不算（那是我们说的），只剩车主在车那边问出来的原话
+        val log = ConversationLog()
+        log.append(Turn(TurnFrom.Me, "手机上打的字", ReplySource.LocalRule, turnId = "a", via = DialogOrigin.phone))
+        log.append(Turn(TurnFrom.Ai, "屏上显示过的答句", ReplySource.LocalRule, turnId = "b", via = DialogOrigin.screen))
+        for (i in 1..4) log.append(Turn(TurnFrom.Me, "屏上第 $i 句", ReplySource.LocalRule, turnId = "s-$i", via = DialogOrigin.screen))
+        assertEquals(listOf("屏上第 2 句", "屏上第 3 句", "屏上第 4 句"), log.screenTalk())
+        assertEquals(listOf("屏上第 4 句"), log.screenTalk(limit = 1))
+        // 正在答的这一轮要排掉，否则回答把自己的问话念成了"别人在屏上说的话"。
+        // 排掉之后补齐的是**更早的那一句**，不是只剩两句 —— 三句是上限不是定数
+        assertEquals(listOf("屏上第 1 句", "屏上第 2 句", "屏上第 3 句"), log.screenTalk(excluding = "s-4"))
+    }
+
+    @Test
     fun `镜像回圆屏时方向和来源各归各位`() {
         val log = ConversationLog()
         val asked = assertNotNull(log.record(up("还剩几条额度", id = "t-3")))

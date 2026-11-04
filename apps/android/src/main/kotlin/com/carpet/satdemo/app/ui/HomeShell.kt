@@ -45,9 +45,12 @@ import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ai.ReplySource
 import com.carpet.satdemo.core.ai.Turn
 import com.carpet.satdemo.core.ai.TurnFrom
+import com.carpet.satdemo.core.ai.TurnScene
+import com.carpet.satdemo.core.ai.screenSceneOf
 import com.carpet.satdemo.core.devices.DeviceKind
 import com.carpet.satdemo.core.devices.DeviceLink
 import com.carpet.satdemo.core.protocol.DialogOrigin
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.core.screen.ScreenLinkServer
 
@@ -295,12 +298,73 @@ private fun AssistantHero(app: AppRuntime) {
 }
 
 /**
+ * 车辆页、家人页顶上那一根**就地发问条**：一个输入框、三枚这一页自己的快捷问句、这一页最近两条对话。
+ *
+ * 为什么不复用首页那张 [AssistantHero]：那张是首屏主角（三行对话 + 五枚快捷问 + 一枚齿轮），
+ * 四个 Tab 里各摆一张一样的大卡就是每页都在抢主角 —— 上一轮说的"乱"有一半在这儿。
+ * 这一根只做"能问"这一件事，并且**只列这一页的那串对话**：
+ * 记录全产品只有一份（[com.carpet.satdemo.core.ai.ConversationLog]），这里按 [scene] 取的是视图。
+ *
+ * [page] 是屏自己报上来的那一页（`page_report`）。换算得上就说一句，换算不上什么都不说 ——
+ * 这句是"这条线此刻通了"的凭据，不是一段功能介绍。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun SceneAsk(
+    app: AppRuntime,
+    scene: TurnScene,
+    page: ScreenPage?,
+    placeholder: String,
+    prompts: List<String>,
+) {
+    val chat by app.chat.collectAsState()
+    val thinking by app.aiThinking.collectAsState()
+    val reduce = LocalReduceMotion.current
+    var draft by rememberSaveable { mutableStateOf("") }
+    val mine = chat.filter { it.scene == scene }
+    // thinking 那颗灯是全局的（只说明"有一条还在路上"）。这一页要不要跟着亮，
+    // 看的是**这一页最后一句是不是还没答上**——不然在首页问一句，四个 Tab 一起闪
+    val waiting = thinking && mine.lastOrNull()?.from == TurnFrom.Me
+    val ask = { q: String -> if (q.isNotBlank()) { app.askAi(q, scene = scene); draft = "" } }
+
+    InkCard(level = Level.Group) {
+        // **和首页那张同一个上下序**：先看见这一页已经说过的话，再看见输入框，最后一排快捷问句。
+        // 之前把输入框摆在最上面，四个 Tab 之间"对话在上、输入在下"这一条就断了 —— 那是"乱"的一种
+        mine.takeLast(2).forEach { Bubble(app, it) }
+        AnimatedVisibility(visible = waiting, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
+            ThinkingBubble()
+        }
+        if (screenSceneOf(page) == scene) {
+            Text("圆屏此刻就在这一页 · 它说的话落在这串里", style = Type.Caption, color = Ink.Ok)
+        }
+        InkField(
+            value = draft,
+            onValueChange = { draft = it },
+            placeholder = placeholder,
+            onSubmit = { ask(draft) },
+            trailing = {
+                IconButton(onClick = { ask(draft) }) {
+                    Icon(MIcons.send, contentDescription = "发送", tint = Ink.Sat)
+                }
+            },
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalArrangement = Arrangement.spacedBy(Grid.x8),
+        ) {
+            prompts.forEach { q -> Chip(q, selected = false) { ask(q) } }
+        }
+    }
+}
+
+/**
  * 输入框。**用实心底，不用描边框**：Material 的 OutlinedTextField 会在卡里再画一个框，
  * 而卡片本身已经是一个框 —— 框套框是"乱"的直接来源之一。
  * 占位文就是这一屏的操作说明，所以不再另写一行"还没有对话，问一句"。
  */
 @Composable
-private fun InkField(
+internal fun InkField(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
@@ -379,7 +443,7 @@ internal fun ThinkingBubble(modifier: Modifier = Modifier) {
 
 /** 一条对话。左右对齐就够，不做头像、不做气泡尾巴 —— 那两个都会把一屏能看的条数压掉一条 */
 @Composable
-private fun Bubble(app: AppRuntime, line: Turn) {
+internal fun Bubble(app: AppRuntime, line: Turn) {
     val mine = line.from == TurnFrom.Me
     Row(
         modifier = Modifier.fillMaxWidth(),

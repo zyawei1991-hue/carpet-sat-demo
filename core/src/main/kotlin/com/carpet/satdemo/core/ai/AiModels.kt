@@ -61,6 +61,12 @@ data class SkillContext(
     val fenceInside: Boolean? = null,
     val screensOnline: Int? = null,
     val aiEndpointConfigured: Boolean = false,
+    /**
+     * 圆屏最近听到的那几句原话。**不是状态机里的数，所以不由宿主填**：
+     * 记录住在 [DialogBridge] 那一侧，进网关之前由桥自己盖上去（[ConversationLog.screenTalk]）。
+     * 空 list 是"屏上还没说过话"，这是一句能说的实话；不是 null 那种"没有这个源"。
+     */
+    val screenTalk: List<String> = emptyList(),
 )
 
 /** Skill 的取数结果。[fields] 是给模型的结构化上下文，也是日志与单测要比对的东西 */

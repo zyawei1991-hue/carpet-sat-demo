@@ -6,8 +6,10 @@ import com.carpet.satdemo.core.protocol.DialogPayload
 import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
+import com.carpet.satdemo.core.protocol.ScreenPage
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -21,7 +23,11 @@ private val CTX = SkillContext(scene = "车", phase = "locked", secondsToNextPas
  */
 class DialogBridgeTest {
 
-    private class Harness(initialGranted: PermissionTier = PermissionTier.ReadLocal) {
+    private class Harness(
+        initialGranted: PermissionTier = PermissionTier.ReadLocal,
+        /** 屏报上来的那一页换算出来的手机页。默认 null = 屏还没报过页 */
+        screenScene: () -> TurnScene? = { null },
+    ) {
         val pushed = mutableListOf<DialogPayload>()
         val notes = mutableListOf<String>()
         var clock = 1_795_200_000_000L
@@ -38,6 +44,7 @@ class DialogBridgeTest {
             note = { notes += it },
             // 每取一次时间往前走 1ms：同一轮里问和答不能撞 turn_id，第二轮的 id 也不能撞上旧轮
             nowMs = { clock++ },
+            screenScene = screenScene,
         )
         fun texts() = bridge.log.turns.value.map { it.text }
         fun frame(d: DialogPayload) = ScreenMessage(t = MsgType.dialog, seq = 1, ts = clock, dialog = d)
@@ -186,5 +193,64 @@ class DialogBridgeTest {
         assertEquals(ids.size, ids.toSet().size, "第二轮的 id 撞了旧轮，那些提醒会被当成重复丢掉")
         assertTrue(h.pushed.isNotEmpty())
         assertTrue(h.pushed.all { it.dir == DialogDir.down })
+    }
+
+    @Test
+    fun `手机上从哪一页问的就归哪一页 问和答一起归`() = runBlocking {
+        val h = Harness()
+        h.bridge.ask("车在哪", DialogOrigin.phone, scene = TurnScene.vehicle)
+        val lines = h.bridge.log.turns.value
+        assertEquals(listOf(TurnScene.vehicle, TurnScene.vehicle), lines.map { it.scene })
+        // 另一页看不见这一轮：场景页各看各的那串，首页那条总时间线才全显
+        assertEquals(0, lines.filter { it.scene == TurnScene.family }.size)
+    }
+
+    @Test
+    fun `屏起的那一轮按屏自己报的页归 屏没报页就不归任何一页`() = runBlocking {
+        var page: ScreenPage? = null
+        val h = Harness(screenScene = { screenSceneOf(page) })
+        // 屏还没报页：那句话只属于首页那条总时间线，不许手机替它猜一个"亲子"
+        h.bridge.onScreenFrame(h.frame(up("今晚几点天黑", "s-20")))
+        assertEquals(listOf<TurnScene?>(null, null), h.bridge.log.turns.value.map { it.scene })
+
+        page = ScreenPage.kids
+        h.bridge.onScreenFrame(h.frame(up("给我讲个故事", "s-21")))
+        // 归页的是**问的那一刻**屏报上来的那一页，答句跟着走：半途屏切了页不该把这句挪走
+        val round = h.bridge.log.turns.value.takeLast(2)
+        assertEquals(listOf(TurnScene.family, TurnScene.family), round.map { it.scene })
+
+        page = ScreenPage.clock
+        h.bridge.onScreenFrame(h.frame(up("几点了", "s-22")))
+        assertEquals(null, h.bridge.log.turns.value.takeLast(2).first().scene, "时钟页在手机上没有对应的那一页")
+    }
+
+    @Test
+    fun `屏上说的话归进家人页以后能当场问回来`() = runBlocking {
+        // 这一条是 scene 那一刀的全部理由：车主在家人页问"娃在屏上说了啥"，
+        // 答案只能来自那份真实记录，而不是界面现编的一句安慰
+        var page: ScreenPage? = ScreenPage.kids
+        val h = Harness(screenScene = { screenSceneOf(page) })
+        h.bridge.onScreenFrame(h.frame(up("今晚几点天黑", "s-23")))
+        page = null            // 车主在手机上问，屏报没报页都不影响这一问归哪页
+        h.bridge.ask("娃在屏上说了啥", DialogOrigin.phone, scene = TurnScene.family)
+
+        val answer = h.bridge.log.turns.value.last()
+        assertEquals(TurnScene.family, answer.scene)
+        assertEquals("kids.recap", answer.skill)
+        assertContains(answer.text, "今晚几点天黑")
+    }
+
+    @Test
+    fun `屏自己问的那一句不会被当成屏上说的话念回去`() = runBlocking {
+        // 事实表里那几句是**答之前**从记录里取的，正在答的这一轮已经入账了。
+        // 不排掉的话回答是"屏上最近有 2 句：「娃在屏上说了啥」…"—— 把自己的问话当成了别人的话
+        val h = Harness(screenScene = { TurnScene.family })
+        h.bridge.onScreenFrame(h.frame(up("今天放学下雨了", "s-24")))
+        h.bridge.onScreenFrame(h.frame(up("娃在屏上说了啥", "s-25")))
+        val answer = h.bridge.log.turns.value.last()
+        assertEquals("kids.recap", answer.skill)
+        assertContains(answer.text, "今天放学下雨了")
+        assertFalse(answer.text.contains("娃在屏上说了啥"), answer.text)
+        assertContains(answer.text, "有 1 句")
     }
 }

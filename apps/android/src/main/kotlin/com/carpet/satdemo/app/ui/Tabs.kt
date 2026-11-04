@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ai.PermissionTier
+import com.carpet.satdemo.core.ai.TurnScene
 import com.carpet.satdemo.core.runtime.DemoRuntime
 
 /**
@@ -66,11 +67,15 @@ private fun Page(
  *  - **动作挪到页尾**：那三个按钮一个都没接（要车机总线），摆在标题下面就是页面第一眼看
  *    见的三颗主行动 —— 而它们按下去只会在日志里写一句"还没接"。
  *  - **不再横向滚**：三个词装得下 360dp，横向滚动那条手势是"你以为还有第四个"的错觉来源。
+ *
+ * 顶上那根 [SceneAsk] 是后来加的：这一页问车的事不该先切回首页。它只吃这一页的对话，
+ * 记录仍是那一份（`TurnScene`）。
  */
 @Composable
 fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
     Page("车辆", "用车养车 · 卫星兜底", modifier = modifier) {
+        SceneAsk(app, TurnScene.vehicle, status.screenPage, "问一句这辆车", listOf("车在哪", "下次过境", "围栏开着吗"))
         CardStream(app.orderedCards(Scene.Vehicle), scope, grouped = true)
         SceneActions(app.scene.value.profile.actions, app)
     }
@@ -82,6 +87,8 @@ fun FamilyTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
     val scope = CardScope(app, status)
     val keys = (Scene.Kids.profile.cards + Scene.Health.profile.cards + listOf("share.objects")).distinct()
     Page("家人", "亲子陪伴 · 健康助手 · 共享对象", modifier = modifier) {
+        // 「娃在屏上说了啥」这一问读的就是那份记录：圆屏在亲子页时说的话已经归到这一串里
+        SceneAsk(app, TurnScene.family, status.screenPage, "问一句家里", listOf("娃在屏上说了啥", "额度还剩几条", "圆屏怎么连"))
         CardStream(keys, scope)
     }
 }

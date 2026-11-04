@@ -203,6 +203,20 @@ class AiGatewayTest {
     }
 
     @org.junit.jupiter.api.Test
+    fun `屏上没说过话时那一问答的是没说过而不是编一句`() = runBlocking {
+        val r = AiGateway(provider = LocalRuleProvider()).ask("娃在屏上说了啥", base)
+        assertEquals("kids.recap", r.skill)
+        assertContains(r.text, "还没有说过话")
+        // 空记录是一句实话，不是"没数据源"那种要打折的话，所以不打 mocked
+        assertTrue(!r.mocked)
+
+        val said = base.copy(screenTalk = listOf("今晚几点天黑"))
+        assertContains(AiGateway(provider = LocalRuleProvider()).ask("孩子今天说了啥", said).text, "今晚几点天黑")
+        // 给模型的那张事实表里也要有这几句：少了它，真模型接上之后这一问就变成现编
+        assertContains(AiGateway.summarize(said), "今晚几点天黑")
+    }
+
+    @org.junit.jupiter.api.Test
     fun `发给模型的事实是结构化键值`() {
         val obj: JsonObject = buildJsonObject { put("skill", "pass.window"); put("seconds", "180") }
         assertEquals("pass.window", (obj["skill"] as JsonPrimitive).content)

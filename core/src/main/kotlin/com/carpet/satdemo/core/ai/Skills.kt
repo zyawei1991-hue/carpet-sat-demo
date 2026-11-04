@@ -218,6 +218,28 @@ object BuiltinSkills {
                     },
                 )
             },
+
+            // 亲子页那一问：「娃在屏上说了啥」。**它读的是手机那份对话记录** ——
+            // 屏在亲子页时说的话会落到手机的家人页，scene 接上之后这一问才有东西可念。
+            // 只念原话、不加评价：那些话不是我们生成的，替它总结一句就等于替那句话负责。
+            Skill(
+                id = "kids.recap",
+                title = "屏上说了啥",
+                keywords = listOf("说了啥", "说了什么", "屏上", "孩子", "娃", "家里", "听了什么"),
+                needs = PermissionTier.ReadLocal,
+            ) { c ->
+                val said = c.screenTalk
+                SkillResult(
+                    skillId = "kids.recap",
+                    intent = "圆屏对话回看",
+                    fields = mapOf("count" to said.size.toString()),
+                    line = when {
+                        said.isEmpty() && c.screensOnline == 0 -> "圆屏现在没连着，也没有说话记录。"
+                        said.isEmpty() -> "圆屏上还没有说过话。"
+                        else -> "屏上最近有 ${said.size} 句：" + said.joinToString("、") { "「$it」" }
+                    },
+                )
+            },
         ),
     )
 }
