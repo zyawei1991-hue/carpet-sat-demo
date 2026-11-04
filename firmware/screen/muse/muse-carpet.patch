@@ -1803,10 +1803,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..1b35979
+index 0000000..dfcdadd
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,331 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2121,8 +2121,9 @@ index 0000000..1b35979
 +
 +    /* gap 换算成页面第一行那句中文的规则写在 carpet_page.c 的 tick 里：
 +     * 没网=等网络、没连=未接入、gap 无穷=等首帧、>10s=掉线重连、>3s=卡N秒、否则=已接入。 */
-+    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d\n",
-+           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state);
++    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu\n",
++           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state,
++           (unsigned long)screen_link_watchdog_fires());
 +    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
 +    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
 +    printf("@carpet card=%s emotion=%s\n", s.card[0] ? s.card : "-",

@@ -62,6 +62,12 @@ static volatile bool s_up = false;
 static volatile int s_negotiated = SCREEN_LINK_CONTRACT_MAX;
 static volatile int64_t s_last_state_us = 0;
 /**
+ * 看门狗踢过几次。放这里是为了让它能从串口被称出来：
+ * "我改了超时判断"和"那条半开链路真的会在 10 秒内自愈"是两件事，
+ * 只有这个数能证明是它起的作用，而不是又一次复位。
+ */
+static volatile uint32_t s_wd_fires = 0;
+/**
  * 上一帧 state 里手机给的 ts（Unix 毫秒）。0 = 这轮会话还没收到过 state。
  *
  * 这值由链路任务写、UI 任务读，而 S3 上 64 位读写不原子 —— 一次读到"半新半旧"就是
@@ -499,6 +505,8 @@ static void link_task(void *arg)
 
         if (bits & BIT_UP) {
             s_last_state_us = 0;
+            /* 首帧的截止线：连上那一刻。下面只看 s_last_state_us 会瞎 —— 见那里的注释 */
+            int64_t up_us = now_us();
             taskENTER_CRITICAL(&s_ts_mux);
             s_state_ts_ms = 0;
             taskEXIT_CRITICAL(&s_ts_mux);
@@ -508,13 +516,35 @@ static void link_task(void *arg)
 
             while (s_up && !s_stopping) {
                 rx_item_t item;
-                if (xQueueReceive(s_rx_q, &item, pdMS_TO_TICKS(250)) == pdTRUE) {
+                bool got = (xQueueReceive(s_rx_q, &item, pdMS_TO_TICKS(250)) == pdTRUE);
+                if (got) {
                     handle_frame(item.json);
                     free(item.json);
-                    continue;
                 }
-                if (screen_link_state_gap_s() > STATE_TIMEOUT_S) {
-                    ESP_LOGW(TAG, "state 超过 %d 秒没来，主动重连", STATE_TIMEOUT_S);
+                /* 超时判断每轮都跑，不再躲在"这一轮什么都没收到"后面。
+                 * gap 只在收到 t=="state" 那一帧时才更新（handle_frame 里 s_last_state_us），
+                 * 而 event / ack / dialog 那些帧不算数 —— 所以旧写法下服务端只要还在发
+                 * 非 state 帧，这个循环就一路 continue，看门狗永远轮不到。
+                 * 2026-11-04 真机踩到：linked 一直报 1、gap_s 涨到 565 秒不重连，
+                 * 屏上按哪条都发不出去（发送失败，sent 不涨），表现就是"按了没反应"。 */
+                /* 对端已经把 socket 关掉时 s_up 是 false —— 那是正常断线，不是看门狗踢的。
+                 * 以前不判这一条：每一次服务端下线都会让 wd +1，
+                 * "自愈到底踢过几次"这个数就完全没有参考价值了。 */
+                if (!s_up) break;
+                uint32_t gap = screen_link_state_gap_s();
+                /* gap_s() 在"连上了但一帧 state 都没来过"时**返回 0**（screen_link_state_gap_s
+                 * 里那句"别一上来就报灰"），所以它自己堵不住首帧永不到这种死法。
+                 * 2026-11-04 半开探针实测：服务端只发 ack、永不发 state 时，
+                 * 屏上 linked=1、gap_s=0 卡了 45 秒不重连，还挂着上一轮的旧值 ——
+                 * 这就是"按了没反应"的真身。这里改用"连上到现在"兜底。 */
+                if (s_last_state_us == 0) {
+                    gap = (uint32_t)((now_us() - up_us) / 1000000);
+                }
+                if (gap > STATE_TIMEOUT_S) {
+                    s_wd_fires++;
+                    ESP_LOGW(TAG, "state 超过 %d 秒没来（gap=%lu 秒），主动重连 第%lu 次",
+                             STATE_TIMEOUT_S, (unsigned long)gap,
+                             (unsigned long)s_wd_fires);
                     esp_websocket_client_close(s_ws, pdMS_TO_TICKS(500));
                     break;
                 }
@@ -600,6 +630,11 @@ uint32_t screen_link_state_gap_s(void)
     int64_t last = s_last_state_us;
     if (last == 0) return 0;   /* 刚连上，还没到第一帧：别一上来就报灰 */
     return (uint32_t)((now_us() - last) / 1000000);
+}
+
+uint32_t screen_link_watchdog_fires(void)
+{
+    return s_wd_fires;
 }
 
 uint32_t screen_link_state_age_ms(void)

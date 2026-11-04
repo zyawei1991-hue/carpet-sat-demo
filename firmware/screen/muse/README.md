@@ -25,13 +25,13 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 12 个文件、910 行新增 / 20 行删，外加一份 123,804 字节的字库
-  （`muse-carpet.patch`，2,902 行，`git diff --binary` 打的，字库在里面是 base85 段）：
+- 我们的全部改动 = 12 个文件、911 行新增 / 20 行删，外加一份 123,804 字节的字库
+  （`muse-carpet.patch`，2,903 行，`git diff --binary` 打的，字库在里面是 base85 段）：
   ```
-  esp32/components/muse/CMakeLists.txt       |  14 +-   (+embed 那行)
+  esp32/components/muse/CMakeLists.txt       |  17 +-   (+embed 那行)
   esp32/components/muse/Kconfig              |  14 +
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 123804   (新，字库)
-  esp32/components/muse/carpet/carpet_link.c | 330 +   (新，链路 + 上行命令队列)
+  esp32/components/muse/carpet/carpet_link.c | 331 +   (新，链路 + 上行命令队列)
   esp32/components/muse/carpet/carpet_link.h |  68 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 290 +   (新，Muse 样式的可点菜单)
   esp32/components/muse/carpet/carpet_page.h |  21 +   (新)
@@ -43,6 +43,15 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，12 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  2026-11-04 晚 §9.3 那轮改完重打过一次，重打命令（**`components/screen_link` 必须排除**，
+  它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
+  ```bash
+  cd D:/dev/projects/muse-gadget-sdk-main
+  git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet
+  git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet esp32/main \
+      > D:/dev/projects/carpet-sat-demo/firmware/screen/muse/muse-carpet.patch
+  git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet   # 别让状态多个暂存
+  ```
   `esp32/components/screen_link/` **不在 patch 里** —— 它就是把本仓库
   `firmware/screen/components/screen_link/` 整目录复制过去，只换一个 `CMakeLists.txt`（原因见 §4），
   复制命令在 §3。
@@ -487,3 +496,58 @@ cmd //c "gradlew.bat --console=plain -q :core:jar :simulator:classes"
 把那条长命令行**从中间插字**（`carpet-sat-demo` 这种碎片就是这么混进去的），
 所以别拿折行后的文件当可执行副本 —— 照字段手工重排一份脚本，重启前逐个 jar 路径 `[ -f ]` 验在不在。
 
+
+### 9.3 半夜那轮：半开链路上其实埋着三个洞，我只堵住了一个才算数
+
+§9.2 把"按了没反应"归到服务端那台旧 JVM，那是真的，但**屏侧当时并不干净**。
+契约里那句「state 超过 10 秒没来本组件自己断线重连」写在 `screen_link.h` 头上，
+实测它有三条不成立的路径（`screen_link.c` 的 `link_task`）：
+
+1. **被非 state 帧饿死**（旧代码的真 bug）。超时判断躲在"这一轮队列空"后面，
+   而 `ack`/`event`/`dialog` 也算"有货"。服务端只要还活着回 ack，循环就一路往下走，
+   判断永远轮不到 —— 你每按一次按钮恰好换来一条 ack，于是**越按越发不出去**。
+   修法：把超时判断挪出 `if (!got)`，每轮都跑。
+2. **连上了但一帧 state 都没来**（我第 1 条改完才撞见的，更要紧）。
+   `screen_link_state_gap_s()` 对 `s_last_state_us == 0` **返回 0** —— 那行是刻意写的
+   "刚连上别一上来就报灰"。可看门狗直接拿它当判据，就等于"服务端活着但不推首帧"这种
+   死法**永远不会超时**。半开探针实测（build #11，服务端每 500 ms 发一条 ack、永不发 state）：
+   45 秒里 `linked=1 gap_s=0 has_state=1 wd=0` 纹丝不动，屏上还挂着**上一轮的旧值**
+   —— 这就是"按了没反应"最完整的形态：界面看着正常、链路报"已接入"、数据全是陈的。
+   修法：`link_task` 在连上那一刻记一条 `up_us` 当首帧截止线，没收到首帧时用它算 gap；
+   **不改 `gap_s()` 的对外语义**（页面"等首帧"的显示口径还依赖它返回 0）。
+3. **计数器说谎**。对端下线时 `WEBSOCKET_EVENT_DISCONNECTED` 先把 `s_up` 置假，
+   循环最后那一轮再读 gap 就得到 `UINT32_MAX`，于是**每一次服务端重启都会被记成一次
+   "看门狗踢了"**，还会打一条 `gap=4294967295 秒` 的假 WARN。我第一版交上去的
+   `wd=1` 正是这么来的 —— 所以那个数当时**不能**当作自愈生效的证据，这条我收回。
+   修法：判超时前先 `if (!s_up) break;`（正常断线走外层退避阶梯，不算 fire）。
+
+复现与判据（都在这台机器上跑过，命令照抄可用）：
+
+```bash
+# 探针：只回 ack、永不发 state 的服务端，占 8443（起它之前要先停彩排台，杀 java.exe 不是杀 wrapper）
+# 源件在 tools/HalfOpen.java，classpath 里那两个 jar 是 gradle 缓存里的现成货
+JW=$(find /d/dev/gradle-home/caches/modules-2/files-2.1/org.java-websocket -name 'Java-WebSocket-1.5.6.jar')
+SL=$(find /d/dev/gradle-home/caches/modules-2/files-2.1/org.slf4j -name 'slf4j-api-2.0.6.jar')
+D:/dev/jdk/jdk-17.0.20.1+1/bin/javac.exe -cp "$JW" -d /d/dev/tmp/halfopen tools/HalfOpen.java
+D:/dev/jdk/jdk-17.0.20.1+1/bin/java.exe -cp "$JW;/d/dev/tmp/halfopen;$SL" HalfOpen
+
+# 被动抓串口 45 秒：DTR/RTS 必须在 open() 之前置 False，否则 RTS→EN 一脉冲就复位，
+# 而 wd 和 sent 都只在 RAM 里，复位即清零（这个坑我已经踩过一次，别再踩）
+/d/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe \
+  firmware/screen/tools/serwatch.py COM8 45 /d/dev/tmp/wd12-capture.txt
+```
+
+修完（build #12）的实测：
+
+- 半开探针下每 ~15 秒一轮，串口日志 `state 超过 10 秒没来（gap=11 秒），主动重连 第2/3/4 次`，
+  探针侧对应有 11 条 `OPEN`/`CLOSE` —— 两边数目吻合，是**真断开真重连**，不是只打日志。
+  `gap` 报 11 不是 10：判断每 250 ms 跑一次，越过阈值那一轮才打印。
+- 彩排台换回真驱动后：`linked=1 contract=v2 gap_s=0 has_state=1 wd=6`，之后不再涨。
+- 把驱动杀掉（对端正常下线）18 秒：串口**一条 WARN 都没有**，`wd` 冻在 6。
+  同一条动作在修复前会打出 `gap=4294967295 … 第 2 次` —— 这条对照就是第 3 个洞修好的凭据。
+
+还剩一条我没复现、别再自称解释了：**565 秒那次事故**。如果那时服务端真的连 ack 都不发，
+队列本该空、旧代码的第 1 个分支也该踢 —— 说明现场还叠着第三种情况，最像的是 **TCP 半开**
+（屏侧收不到 FIN，`esp_websocket_client_close()` 自己也发不出去）。
+这条我造不出环境，所以不写"已修"。它现在能被抓出来：`wd` 只在真超时时 +1，
+下次现场再演砸，回读 `>carpet` 那一行就能一次分清「没踢」「踢了但连不上」「连上了但服务端不推首帧」三种死法。
