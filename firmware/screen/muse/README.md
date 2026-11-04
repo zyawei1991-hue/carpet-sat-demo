@@ -451,3 +451,39 @@ I (6836) wifi:state: auth -> assoc ...
 另外 `>carpet` 要在复位后**至少等 16 秒**再发：`sercmd.py` 是开串口睡 6 秒就写，
 那块屏联上服务端要 7 秒，太早发就打出 `wifi=0 linked=0`，看着像链路死了其实是被你自己复位了。
 
+### 9.2 按完没反应：坑在服务端那台旧 JVM，不在屏
+
+他按了三个条目加一排按钮，屏上"看着什么都没发生"。两侧各自的账本一对，就知道屏是对的：
+
+- 屏侧（**不要用 `sercmd.py` 读这个数**，它开串口就复位板子，而 `s_sent` 只在 RAM 里，
+  一复位就清零，读出来永远是 0，会把人带沟里）：`tools/sercmd_norst.py` 在 `open()` **之前**
+  就把 dtr/rts 置 False，所以 COM8 那根 RTS→EN 不会跳。读出来：
+  ```
+  @carpet wifi=1 linked=1 contract=v2 gap_s=0 has_state=1
+  @carpet card=状态卡 emotion=中性
+  @carpet sent=4 last=poke
+  ```
+- 服务端侧：`cmd card_next args={"dir":-1}` / `{"dir":1}` / `cmd poke`×2，
+  外加处理后的 `> 屏请求切卡 · 往左 → clock`、`> 屏被戳了一下`。**4 = 4**，条数对得上。
+
+之前那台一直在 8443 上的 JVM 是 **0:04 启动**的，而 `core-0.1.0.jar` 是 **13:01** 重编的 ——
+它跑的那份 core 里根本没有 `CommandPayload`，所以旧日志里全是
+`展示端帧解不开：com/carpet/satdemo/core/protocol/CommandPayload$$serializer`：
+帧收到了、序列号也在（`seq 692/701`），只是解不开，屏那侧照样把 `s_sent` 加了。
+
+**判据（下次照着做）**：改过 `core/` 就重启彩排台，别看它还在监听就当它是新的。
+
+```bash
+# 1) 先看进程起于何时、jar 何时编出 —— 进程比 jar 旧就是旧的
+powershell -NoProfile -Command "(Get-Process -Id <pid>).StartTime"
+ls -la --time-style=+%m-%d_%H:%M core/build/libs/core-0.1.0.jar
+# 2) 重编两处（只编 jar 不够，DemoDriver.class 也会过期）
+cmd //c "gradlew.bat --console=plain -q :core:jar :simulator:classes"
+# 3) 杀掉 java.exe（杀 wrapper 不杀 java，8443 会被它占着），再按原命令行重启
+```
+
+重启前**先把旧命令行存下来**（`Get-CimInstance Win32_Process -Filter 'ProcessId=…'` 的
+`CommandLine`），照原样起回来。坑：PowerShell 的重定向会按控制台宽度折行，
+把那条长命令行**从中间插字**（`carpet-sat-demo` 这种碎片就是这么混进去的），
+所以别拿折行后的文件当可执行副本 —— 照字段手工重排一份脚本，重启前逐个 jar 路径 `[ -f ]` 验在不在。
+
