@@ -128,8 +128,8 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 | 屏上行 | 数据来自 | App/服务端现在写了吗 | 屏这边消费了吗 |
 ||-|-|-|-|
 | 链路 | 有没有收到 `state`（`screen_link_state_gap_s()`）、协商档位 | 有 | **有**（含 3 秒变灰、>10 秒重连） |
-| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有（**本轮新接，还没上板**） |
-| 对话 | `state.ui.card`（`status/sat/dialog/emotion/clock`）+ 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有（同上） |
+| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有（已上板，实测见 §9） |
+| 对话 | `state.ui.card`（`status/sat/dialog/emotion/clock`）+ 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有（同上。`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴） |
 | 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | 行上有值；**脸还跟着 Muse 自己的语音链路走**，见 §5.4 |
 | 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 行上有值；上行还没接（§5.5） |
 
@@ -143,6 +143,10 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 
 事件那边 `ack` 是组件无条件回的（`screen_link.c:370`），不接 `on_event` 也不会让手机端重试风暴，
 只是屏上不弹横幅 —— **屏上现在就没接 `on_event`**。
+
+**这五行有一条不看眼睛的验法**：串口发 `>carpet` 会把链路数字和五行当前值原样打回来
+（`carpet_link_dump()`，在 `#if LV_USE_SNAPSHOT` 外面，正式构建里也在）。另一台电脑没有抓屏环境时，
+这条就是判据来源，输出长什么样见 §9。
 
 ### 5.4 表情这一行的真相：7 个情绪要塞进 6 个模式
 
