@@ -507,12 +507,38 @@ function pushLine(raw){
 const press={timer:null,count:0};
 const screen=document.getElementById('screen');
 
-function hitRect(r,evt){
+function pos(evt){
   const b=screen.getBoundingClientRect();
-  const sx=(evt.clientX-b.left)/b.width*466, sy=(evt.clientY-b.top)/b.height*466;
-  return sx>=r.x && sx<=r.x+r.w && sy>=r.y && sy<=r.y+r.h;
+  /* 一律换算到 466 那套坐标：阈值才和固件 swipe_cb 里那个物理像素数同一个意思 */
+  return {x:(evt.clientX-b.left)/b.width*466, y:(evt.clientY-b.top)/b.height*466};
+}
+function hitRect(r,evt){
+  const p=pos(evt);
+  return p.x>=r.x && p.x<=r.x+r.w && p.y>=r.y && p.y<=r.y+r.h;
 }
 function hitPad(evt){ return hitRect(PAD,evt); }
+
+/* ── 卡面上的手势 ─────────────────────────────────────────────────────────────
+ * 阈值、方向、动作和固件 app_main.c 的 swipe_cb 是同一套，映射表在
+ * protocol/screen-link.md「这块玻璃上的手势」。为什么两边都要有：彩排演的那套动作
+ * 和装到板子上的那个东西不是一个，现场就会演一段设备上跑不出来的戏。
+ * 冒充件没有明细层（这张 466 的画布是示意排版，不是固件那套 hero+两行+六行），
+ * 所以上下滑只记一行说明，不发指令 —— 发一条没人接的帧比不发更容易骗过自己 */
+const SWIPE_PX=60, LONG_PRESS_MS=800;
+const touch={x:0,y:0,t:0,live:false};
+
+function resolveGesture(evt){
+  if(!touch.live) return;
+  touch.live=false;
+  const p=pos(evt), dx=p.x-touch.x, dy=p.y-touch.y, held=Date.now()-touch.t;
+  if(Math.abs(dx)>=SWIPE_PX && Math.abs(dx)>=Math.abs(dy)){
+    sendCmd('card_next',{dir:dx>0?1:-1});
+    return;
+  }
+  if(Math.abs(dy)>=SWIPE_PX){ note('上下滑 = 展开/收起明细层（真板才有，这块冒充件没画）','#7c8697'); return; }
+  if(held>=LONG_PRESS_MS){ sendCmd('card_auto'); return; }
+  sendCmd('poke');
+}
 
 function stopPress(fired){
   if(press.timer){ clearInterval(press.timer); press.timer=null; }
@@ -541,6 +567,8 @@ screen.addEventListener('pointerdown',(e)=>{
   if(!hitPad(e)){
     // 对话模式里点别处 = 收起回状态盘。SOS 那块位置不动，所以收起不会误触它
     if(dialogMode){ dialogMode=false; clearTimeout(dialogIdle); draw(last); }
+    const p=pos(e);
+    touch.x=p.x; touch.y=p.y; touch.t=Date.now(); touch.live=true;
     return;
   }
   if(last.sat.upgrade_pct!=null){ note('升级写锁生效，按钮已置灰','#ffb020'); return; }
@@ -552,8 +580,8 @@ screen.addEventListener('pointerdown',(e)=>{
     else draw(last);
   },1000);
 });
-screen.addEventListener('pointerup',()=>{ releaseMic(true); stopPress(false); });
-['pointercancel','pointerleave'].forEach(ev=>screen.addEventListener(ev,()=>{ releaseMic(false); stopPress(false); }));
+screen.addEventListener('pointerup',(e)=>{ resolveGesture(e); releaseMic(true); stopPress(false); });
+['pointercancel','pointerleave'].forEach(ev=>screen.addEventListener(ev,()=>{ touch.live=false; releaseMic(false); stopPress(false); }));
 
 // 右侧面板那个输入框：冒充"随便说一句"。它和按住说话发的是同一种帧，只是文本从键盘来
 (function wirePanelAsk(){

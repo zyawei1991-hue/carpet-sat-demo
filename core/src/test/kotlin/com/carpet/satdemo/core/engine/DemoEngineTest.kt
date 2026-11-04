@@ -119,7 +119,7 @@ class DemoEngineTest {
         // §6.1 红线一：星上 ACK 只把状态推到"已发出、卫星已应答"，离"平台已回执"还差一步
         assertEquals(SosLevel.sent, e.snapshot().sos.level)
         assertEquals(true, e.snapshot().sos.satAck)
-        e.onPlatformAck()
+        e.onPlatformAck(clock.ms)
         assertEquals(SosLevel.acked, e.snapshot().sos.level)
     }
 
@@ -290,8 +290,10 @@ class DemoEngineTest {
         modem.passWindowMs = Long.MAX_VALUE / 4
         e.triggerSos(nowSec = clock.ms / 1000, cellOk = false)
         assertEquals(SosLevel.sent, e.snapshot().sos.level, "星上 ACK 不等于平台回执，红字不能自己收（§6.1 红线一）")
-        e.onPlatformAck()
+        e.onPlatformAck(clock.ms)
         assertEquals(SosLevel.acked, e.snapshot().sos.level)
+        drive(e, clock, dead, durationMs = 5_000)
+        assertEquals(SosLevel.acked, e.snapshot().sos.level, "回执那 12 秒是留给眼睛的，不能下一拍就收回")
         drive(e, clock, dead, durationMs = 20_000)
         assertEquals(SosLevel.normal, e.snapshot().sos.level, "确认回执停一会儿就该收回，别一直压着轨迹图")
     }

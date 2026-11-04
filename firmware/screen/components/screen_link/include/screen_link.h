@@ -41,6 +41,11 @@ typedef struct {
     const char *fw;
     /** desk_stand / collar / dash_mount */
     const char *dock_type;
+    /**
+     * 底座电池电压，毫伏；返回负数 = 不知道，那这一项就不进帧（schema 里它不是必填）。
+     * 建链时现读一次，所以链路断开重连后带的是新值 —— 中途换电池要等重连才报得出去。
+     */
+    int (*read_battery_mv)(void);
 } screen_link_cfg_t;
 
 typedef struct {
@@ -52,8 +57,13 @@ typedef struct {
     void (*on_state)(const cJSON *state, uint32_t seq);
     /** 契约 v2。dir 可能是 up（手机/另一块屏起的头）也可能是 down（本屏那轮的答） */
     void (*on_dialog)(const cJSON *dialog);
-    /** 已经按 event_id 去过重：重发的那条不会再回调一次，但 ack 已经回了 */
-    void (*on_event)(const cJSON *event, const char *event_id, uint32_t ttl_ms);
+    /** 已经按 event_id 去过重：重发的那条不会再回调一次，但 ack 已经回了。
+     *
+     * 过期的那条**不会走到这里**（契约：收到时若已过期则丢弃且不弹提示），但 ack 照回 ——
+     * 屏确实收到了，只是不该再画。判定要用整帧的 ts 和"上一帧 state 的 ts + 它过了多久"
+     * 对表，这两份时钟算术都在本组件里，别再让调用方各写一遍。
+     * 所以 left_ms 是**还剩多少毫秒**，不是帧里的 ttl_ms；0 = 帧里没给 ttl，显示多久由展示端定。 */
+    void (*on_event)(const cJSON *event, const char *event_id, uint32_t left_ms);
     void (*on_command)(const char *cmd, const cJSON *args);
     void (*on_ack)(const cJSON *ack);
     /** negotiated 是本会话谈下来的契约档；只有它 ≥2 才能走对话 */
@@ -76,6 +86,19 @@ int screen_link_negotiated(void);
  */
 uint32_t screen_link_state_gap_s(void);
 
+/**
+ * 同上一条的毫秒版。给钟面用：**手机的 ts 加上这个 age，就是此刻该显示的手机时间**。
+ * 这样屏不需要自己的 RTC 也不需要 SNTP —— 它没有电池-backed 时钟，
+ * 而车载那个网一断，走 NTP 只会拿到一个更误导人的读数。没连上过返回 UINT32_MAX。
+ */
+uint32_t screen_link_state_age_ms(void);
+
+/**
+ * 上一帧 state 的整帧 `ts`（Unix 毫秒，手机时钟）。契约说不信任它、仅用于显示，
+ * 所以这里原样给出去，不做任何校正。0 = 这轮会话还没收到过 state。
+ */
+int64_t screen_link_state_ts_ms(void);
+
 /** 能不能说话：连着 + 谈到了 v2。App 上那句"圆屏可以说话"读的是同一个条件 */
 bool screen_link_dialog_ready(void);
 
@@ -92,8 +115,23 @@ esp_err_t screen_link_send_dialog_up(
 /** 收到 event 必须回 ack。for_seq 是**整帧**的 seq，不是 event 对象中字段 */
 esp_err_t screen_link_ack_event(uint32_t for_seq, const char *event_id);
 
-/** 屏侧发起的触摸事件（SOS 长按那一路）。payload 所有权交给本函数，失败时也已被释放 */
+/** 屏侧上报一条 event。注意 kind 用的是**手机→屏那 11 个 EventKind**，
+ *  长按呼救要走的是下面那条 `screen_link_send_command`，不是这里 */
 esp_err_t screen_link_send_event(const char *kind, cJSON *payload, uint32_t ttl_ms);
+
+/**
+ * 屏 → 手机下指令，走 `t=command`。**这才是屏能让手机做事的那条路**：
+ * `t=event` 的 kind 是手机→屏那 11 个（屏发出去手机按 EventKind 解，非法值直接断连），
+ * 而 CommandType 是 schema 里 `command.cmd` 那一串：`sos_press`（屏上按钮被长按，手机立即执行双发）/
+ * `sos_cancel` / `track_pull` / `set_demo_mode` / `set_fence` / `reboot_ui` /
+ * `card_next`（左右滑请求切一张，args.dir = +1/-1）/ `card_auto`（把定卡权交回手机策略）/
+ * `poke`（单击，手机换脸并可答一句）。
+ * 后三条**都是请求**：画哪张卡、画哪张脸最终仍由手机写进 `state.ui.card` / `ui.emotion`，
+ * 所以 SOS 进行中手机可以把 `card_next` 顶回去，观众切不走卫星卡。
+ * 传别的字符串本函数当场退回 ESP_ERR_INVALID_ARG，不会把一条解不开的帧推给手机。
+ * args 所有权交给本函数（传 NULL 发空对象），失败时也已被释放。
+ */
+esp_err_t screen_link_send_command(const char *cmd, cJSON *args);
 
 /** 回一条 command 的执行结果，走 ack 帧：error 传 NULL 表示成功 */
 esp_err_t screen_link_ack_command(uint32_t for_seq, const char *error);

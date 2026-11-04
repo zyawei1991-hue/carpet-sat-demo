@@ -40,6 +40,7 @@ import com.carpet.satdemo.core.protocol.SosFrameEncoder
 import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.StatePayload
+import com.carpet.satdemo.core.protocol.UiState
 import com.carpet.satdemo.core.protocol.toHex
 import com.carpet.satdemo.core.queue.Outbox
 import com.carpet.satdemo.core.queue.OutboxClass
@@ -123,8 +124,18 @@ class DemoEngine(
     private var fix: GnssState? = null
     private var phoneBatteryPct = 100
     private var fence = FenceState(active = false, inside = true)
+    /** 围栏那个圆。core 里只有 GeodeticPosition 那一个大圆距离公式，够用（半径阈值本来就不精确） */
+    private var fenceCenter: GeodeticPosition? = null
+    private var fenceRadiusM = 0.0
     private var sentinel = SentinelState()
     private var demoMode = false
+    /**
+     * 这块屏此刻画哪张卡。null = 手机还没定 / 压根不打算定，屏继续画它的状态总览。
+     *
+     * 只有 App 上的卡片选择器和演示脚本写它，固件不许自己挑：和 eph_fail 同一个口径 ——
+     * 产品判断在手机上定稿，屏只负责画。所以这里存的是**成品决定**，不是候选列表
+     */
+    private var ui: UiState? = null
     private var sosLevel = SosLevel.normal
     private var sosSinceTs: Long? = null
     private var sosAttempts = 0
@@ -208,6 +219,7 @@ class DemoEngine(
         fix = GnssState(lat, lon, altM = null, hdop = hdop, source = source, fixAgeS = fixAgeSec)
         // 位置一有新值就交给 TPI 任务：模组那边只认我们推过去的这一份（E.5）
         tpi?.onPosition(GeodeticPosition.of(lat, lon))
+        recomputeFence()
     }
 
     fun onPhoneBattery(pct: Int) {
@@ -216,6 +228,17 @@ class DemoEngine(
 
     fun onDemoModeChanged(on: Boolean) {
         demoMode = on
+    }
+
+    /**
+     * 换屏上那张卡。传 null 是**主动收回决定权**：屏回到总览，而不是停在最后一张卡上
+     * —— 演示现场点错了一下就该能退回来，所以这条不是可有可无的。
+     *
+     * [UiState.tzMin] 由调用方给。core 不去读系统默认区：演示机上跑的可能是 UTC，
+     * 真机是东八区，固件那边更不许猜（屏没有电池-backed RTC，SNTP 一断就只剩猜）
+     */
+    fun onUiChanged(state: UiState?) {
+        ui = state
     }
 
     fun armSentinel(armed: Boolean) {
@@ -227,8 +250,27 @@ class DemoEngine(
         fence = fence.copy(inside = distM >= 0, distM = distM)
     }
 
-    fun setFence(active: Boolean, name: String?) {
+    /**
+     * 围栏开关。给了圆（圆心 + 半径）就**由引擎自己按定位算越界**，
+     * 不给就还是等外部调 [onFenceDistance] —— 那条路是给真实车载用的，那边有现成的地图 SDK。
+     *
+     * 为什么在 core 里算：之前 setFence 只收名字和开关，`onFenceDistance` 一个调用方都没有，
+     * 于是"越界"这件事在演示里永远不会发生，屏上那张围栏卡和 fence_exit 事件全是死的。
+     */
+    fun setFence(active: Boolean, name: String?, centerLat: Double? = null, centerLon: Double? = null,
+                 radiusM: Double = 0.0) {
+        fenceCenter = if (centerLat != null && centerLon != null) GeodeticPosition.of(centerLat, centerLon) else null
+        fenceRadiusM = radiusM
         fence = fence.copy(active = active, inside = true, name = name, distM = null)
+        recomputeFence()
+    }
+
+    /** 位置一变就重判一次。没有圆或还没有定位就不动 —— 猜出来的越界比没有越界更糟 */
+    private fun recomputeFence() {
+        val c = fenceCenter ?: return
+        val f = fix ?: return
+        if (!fence.active) return
+        onFenceDistance(fenceRadiusM - c.distanceMetersTo(GeodeticPosition.of(f.lat, f.lon)))
     }
 
     fun fenceBreached(): Boolean = fence.active && !fence.inside
@@ -446,15 +488,30 @@ class DemoEngine(
     }
 
     /**
+     * 彩排台专用：脚本把窗口相位拨回每轮开头之后，星历那份缓存算的还是上一轮的窗，
+     * 不强制重算就会出现"模组说在窗口里、屏上倒计时说还有 600 秒"。
+     * 真机上没有这一条 —— 相位不会往回拨，`refresh` 自己按配置排班。
+     */
+    suspend fun reseedEphemeris() {
+        val tracker = ephemeris ?: return
+        tracker.refresh(fix?.let { GeodeticPosition.of(it.lat, it.lon) }, force = true)
+    }
+
+    /**
      * 平台侧回执到了（4G 下行或卫星下行里的救援受理确认）。
      *
      * 名字故意不叫 `onAck`：**星上 ACK 不算**（〔规 §3.1.4 注6〕卫星应答只代表卫星收到），
      * 叫 ack 会让后来人以为可以在发送回调里调它。这是 §6.1 红线一在代码里的唯一入口。
+     *
+     * `nowMs` 由调用方给，和这个类里其余带时间的方法同一个口径。
+     * 这里以前直接读 `System.currentTimeMillis()`：假时钟跑在真时间前面，
+     * 于是那一行算出的是一个巨大的差，「回执停 12 秒再收回」当场就收回 ——
+     * 屏上根本看不到这条，而单测照样绿（它只断言"20 秒后没了"）。
      */
-    fun onPlatformAck() {
+    fun onPlatformAck(nowMs: Long) {
         if (sosLevel == SosLevel.sent || sosLevel == SosLevel.pending) {
             sosLevel = SosLevel.acked
-            sosSinceTs = System.currentTimeMillis()
+            sosSinceTs = nowMs
             // 平台都回执了，模组队列里那条早就发走了，盯梢副本没用了
             outbox.confirm(lastSosHex)
         }
@@ -551,6 +608,7 @@ class DemoEngine(
             sentinel = sentinel,
             phoneBattery = phoneBatteryPct,
             demoMode = demoMode,
+            ui = ui,
         )
     }
 

@@ -18,3 +18,13 @@ note-v*.md
 
 # vendor/ 里那两个 zip 是厂商原始交付物，必须进仓库；*.zip 那条规则在这儿要开口子
 !vendor/gt1005/*.zip
+
+# ESP-IDF 那边 build/ 已经被上面挡住了，剩下这三类要单独挡：
+# managed_components 是组件管理器每次构建重新拉的源码树；
+# dependencies.lock 每次拉的版本可能不同，进了库反而会把人锁死在某个旧 BSP 上；
+# **sdkconfig 必须挡掉** —— 它里面写着这台机器连的那个 Wi-Fi 的明文密码，
+# 而本仓库是公开的。仓库只提交 sdkconfig.defaults，密码只活在各自的本机 sdkconfig 里。
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old

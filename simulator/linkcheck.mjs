@@ -66,6 +66,56 @@ const run = async () => {
   if (miss.length) fail('state 缺字段：' + miss.join(','));
   else ok('state 必填字段齐（link/sat/gnss/fence/sos）');
 
+  // ── ui 块（可选，决定屏上画哪张卡）。这条必须有自动化盯着：
+  //    ui 缺失或取值不认识时**两边都不报错** —— 固件默默画回总览，现场表现是
+  //    "手机上换了卡、屏没动"，然后所有人去怀疑网络。屏那边是手写分支表，
+  //    App 的枚举手滑多一个值就是这么个静默法
+  const CARDS = ['status', 'sat', 'dialog', 'emotion', 'clock'];
+  const EMOS = ['neutral', 'happy', 'excited', 'sad', 'worried', 'sleepy', 'thinking'];
+  const uis = states.map((m) => m.state?.ui).filter((u) => u !== undefined && u !== null);
+  const badCard = uis.filter((u) => !CARDS.includes(u.card)).map((u) => String(u.card));
+  const badEmo = uis.filter((u) => u.emotion != null && !EMOS.includes(u.emotion)).map((u) => String(u.emotion));
+  // ts 必须是**毫秒**。固件拿它除以 1000 拆时分秒，这里是秒的话屏上会显示 1970 年
+  const badTs = states.filter((m) => typeof m.ts !== 'number' || m.ts < 1e12).length;
+  if (!uis.length) fail('整场 1Hz 快照里一帧 ui 都没有 —— 那个决定没下发，屏只会画总览');
+  else if (badCard.length) fail('ui.card 有屏画不出来的取值：' + [...new Set(badCard)].join(','));
+  else if (badEmo.length) fail('ui.emotion 有屏画不出来的取值：' + [...new Set(badEmo)].join(','));
+  else if (badTs) fail(`${badTs} 帧的 ts 不是 Unix 毫秒，钟面会画成 1970 —— 契约写的是毫秒`);
+  else {
+    const cards = [...new Set(uis.map((u) => u.card))].join(',');
+    const emos = [...new Set(uis.map((u) => u.emotion ?? 'null'))].join(',');
+    ok(`ui ${uis.length}/${states.length} 帧：卡=[${cards}] 表情=[${emos}] tz_min=${uis.at(-1).tz_min ?? '未给(屏按 UTC 标)'}`);
+  }
+
+  // ── 上行的三条切卡请求。这三条**全是请求**：屏只是说"我想看下一张"，画哪张仍由手机定。
+  //    所以这里验的是"手机接住了没有"，不是"屏切到了哪张"。
+  //    放在 sos 之前跑：呼救一旦没走完，card_next 会被顶回去，那是正确答案，不是这条要测的东西
+  const cardOf = (m) => m?.state?.ui?.card;
+  const c0 = cardOf(states.at(-1));
+  send('command', { command: { cmd: 'card_next', args: { dir: 1 } } });
+  await sleep(2500);
+  const c1 = cardOf(states.at(-1));
+  if (c1 === c0) fail(`card_next 之后卡还停在 ${c0} —— 要么 dispatch 没通，要么 args 里的 dir 没解出来`);
+  else ok(`card_next(dir=1)：${c0} → ${c1}`);
+
+  // 交回策略之后才轮得到戳屏：手动钉住那张卡压过一切判据（含 poke），
+  // 所以这条必须排在 card_auto 后面 —— 顺序反了它就不是在验 poke，是在验"钉住还留着"
+  send('command', { command: { cmd: 'card_auto', args: {} } });
+  await sleep(1500);
+
+  send('command', { command: { cmd: 'poke', args: {} } });
+  await sleep(2500);
+  const c2 = cardOf(states.at(-1));
+  const last = states.at(-1)?.state ?? {};
+  // poke 是**请求**，不是命令：呼救没走完、已越界、蜂窝不顶用又快到窗口 —— 这三种时候它必须让路。
+  // 所以这里按当下相位分两判，而不是死要 emotion：死要 emotion 的话，脚本一挪到离线段就自己报错
+  const safetyHolds = (last.sos?.level && last.sos.level !== 'normal' && last.sos.level !== 'armed_ok')
+    || (last.fence?.active && last.fence?.inside === false)
+    || (!last.link?.cellOk && last.sat?.nextPassInS != null && last.sat.nextPassInS <= 120);
+  if (safetyHolds && c2 !== 'emotion') ok(`poke 让路给安全那一句（当下画 ${c2}）—— 一次触摸不该劫走倒计时`);
+  else if (c2 !== 'emotion') fail(`poke 之后屏上应该是那张会动的脸，实际是 ${c2} —— 戳了没反应是现场最容易被当成屏坏了的一种`);
+  else ok('poke 被接住，屏上换成表情卡');
+
   const before = events.length;
   send('command', { command: { cmd: 'sos_press', args: {} } });
   await sleep(3500);
@@ -118,7 +168,10 @@ const run = async () => {
   const lastSeq = seq;
   byeAt = Date.now();
   send('bye', {});
-  await sleep(1500);
+  // 实测这条 close 落在 1.5 秒上下：`hello` 已建立的连接走不到 ScreenLinkServer 那个
+  // "当场摘台账"的快路径（它的条件是 `hello == null`），所以要等下一轮才关。
+  // 判据卡 1500ms 就是掷硬币，昨天那句 FAIL 是脚本自己造的。真要 bye 立刻断，改的是服务端那一支
+  await sleep(3500);
   if (!closes.length) fail('发了 bye，连接还挂着 —— 台账上那台屏会离线不及时');
   else ok(`bye 后 ${Date.now() - byeAt}ms 关闭（code=${closes[0].code}${closes[0].reason ? ' ' + closes[0].reason : ''}）`);
 

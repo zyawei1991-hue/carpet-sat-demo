@@ -53,7 +53,7 @@
         "sat": {
           "type": "object",
           "description": "GT1005 卫星侧状态，字段直接映射 SDK 回调",
-          "required": ["phase"],
+          "required": ["phase", "module_ok", "queue_pending"],
           "properties": {
             "phase": {
               "enum": ["idle", "searching", "locked", "tx_pending", "tx_ok", "tx_fail", "tx_no_ack"],
@@ -124,7 +124,28 @@
           }
         },
         "phone_battery": { "type": "integer", "minimum": 0, "maximum": 100 },
-        "demo_mode": { "type": "boolean", "description": "演示模式：展示端隐藏调试信息，放大关键视觉元素" }
+        "demo_mode": { "type": "boolean", "description": "演示模式：展示端隐藏调试信息，放大关键视觉元素" },
+        "ui": {
+          "type": "object",
+          "description": "t=state 时**可选**。「这块屏此刻该画什么」由手机定，固件不猜 —— 和 eph_fail 同一个口径：产品判断在 App 侧就定稿，屏只负责画。**它是加性字段，所以不升契约版本**：固件的 cJSON 只读它认识的键，多一个键不花它一分钱；升级版本是为了防'一种它不认识的 t 把分派 if-else 撞穿'（v2 加 dialog 就是这个原因），可选字段没这个问题。但**整个 ui 缺失时必须退回画状态总览，不许黑屏、不许弹错** —— 老 App、v1 会话、还有手机刚起还没算出该展示哪张卡的那几秒，都是这个形状",
+          "required": ["card"],
+          "properties": {
+            "card": {
+              "enum": ["status", "sat", "dialog", "emotion", "clock"],
+              "description": "全屏画这一张。status=链路/卫星/围栏总览（也是 ui 缺失时的兜底那张）；dialog=对话（要 v2 会话才可能有内容，屏侧自己判断该档，低于 2 就画'这条要手机开 v2'而不是空白）；clock=钟面，时间取**整帧的 ts**、时区取 ui.tz_min；sat=过境卡，取 state.sat 那一路字段。**故意没有 image**：图片要的字节数远超契约那条 4KB TEXT 通道，通道没建之前先给个屏画不出来的枚举值，只会换来一张空白卡"
+            },
+            "emotion": {
+              "enum": ["neutral", "happy", "excited", "sad", "worried", "sleepy", "thinking", null],
+              "description": "这块屏当下'穿着'的那张脸。**它是全局的，不是 emotion 卡专用**：dialog 卡把脸画在文字上方、emotion 卡把它铺满整屏，读的是同一个字段。屏上的脸由矢量图元现画（LVGL 画弧和圆），不需要往屏下图 —— 这也是这里敢给七个取值、而 image 不敢给的原因。null / 缺失 = 不定，由屏按链路和 SOS 档位自己挑一张中性的"
+            },
+            "tz_min": {
+              "type": ["integer", "null"],
+              "minimum": -840,
+              "maximum": 840,
+              "description": "手机时区相对 UTC 的偏移分钟数（东八区 480）。clock 卡靠它把 ts 那串 Unix 毫秒拆成时分秒 —— 固件**不要去猜时区**：这台设备没有电池-backed RTC，SNTP 在车里那个网上一开放就可能拿不到，猜出来的表比没有表更糟。null 或缺失 = 按 UTC 画并在角上标一个小小的 UTC，让人一眼看出这不是本地时间"
+            }
+          }
+        }
       }
     },
 
@@ -144,7 +165,7 @@
           ],
           "description": "sat_visible=卫星进入过境窗口，可发 SOS，展示端应弹提示；downlink_msg=收到 MCI 下行。注意 sos_acked 指的是**卫星应答**（MCQ COMPLETE），平台回执是另一件事，只能靠 state.sos.level==acked 表达 —— 见 §6.1 红线一"
         },
-        "event_id": { "type": "string", "description": "UUID，展示端 ack 时回填，App 据此判断哪些事件展示端没收到" },
+        "event_id": { "type": "string", "maxLength": 39, "description": "全局唯一，不是进程内唯一：展示端的去重环形缓冲跨重连不清空，所以发送方每次启动带一个唯一前缀（App 用 evt-<boot>-<n>，屏用 scr-<boot>-<n>）。≤39 字符是屏侧 EVENT_ID_MAX 减一，超了会被截断成两个 id 共用一段。展示端 ack 时回填，App 据此判断哪些事件展示端没收到" },
         "payload": { "type": "object", "description": "kind 相关的负载，见下方各 kind 定义" },
         "ttl_ms": { "type": "integer", "description": "过期时间。展示端收到时若已过期则丢弃且不弹提示" }
       }
@@ -152,12 +173,12 @@
 
     "command": {
       "type": "object",
-      "description": "t=command 时必填。展示端 -> App",
+      "description": "t=command 时必填。展示端 -> App。**都是请求，不是命令**：画哪张卡最终仍由 App 算出来写进 state.ui.card，定卡权不下放给屏（见 UiCard 那段）。这样 SOS 进行中可以把切卡请求顶回去，不让观众把卫星卡滑走。",
       "required": ["cmd"],
       "properties": {
         "cmd": {
-          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui"],
-          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹"
+          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui", "card_next", "card_auto", "poke"],
+          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹；card_next=左右滑请求切一张，args.dir 取 +1/-1，App 在 status/sat/dialog/emotion/clock 五张里算出下一张（SOS armed/pending/sent 时拒绝并回一条事件说明原因）；card_auto=把定卡权交回 App 的优先序，这是手动钉住之后唯一的出口；poke=单击，App 换一张脸并可答一句，是「互动表情」这条链的起点。**这里刻意没有 card_set**：屏不许指定画哪张。"
         },
         "args": { "type": "object" }
       }

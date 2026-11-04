@@ -1,5 +1,7 @@
 package com.carpet.satdemo.core.ai
 
+import com.carpet.satdemo.core.protocol.SatPhase
+
 /**
  * Skill 注册表：**关键词触发 + 结构化 JSON + 权限分档**（digivita 那条已经跑通的形状，附录 D.2）。
  *
@@ -32,7 +34,31 @@ class SkillRegistry(skills: List<Skill>) {
 }
 
 /** 已经锁上星、正在窗口里的相位。这些时候"距下次过顶"这个数已经没有意义了 */
-private val IN_WINDOW = setOf("locked", "tx_pending", "tx_ok", "tx_fail", "tx_no_ack")
+private val IN_WINDOW = setOf(SatPhase.locked, SatPhase.tx_pending, SatPhase.tx_ok,
+                              SatPhase.tx_fail, SatPhase.tx_no_ack)
+
+/** SkillContext 里相位是线上的字符串（协议键名），比对枚举前先解回来；解不回来就当不知道 */
+private fun phaseOf(raw: String?): SatPhase? = SatPhase.entries.firstOrNull { it.name == raw }
+
+/**
+ * 相位给人读的那一个词。**和圆屏固件 app/main/app_main.c 里那张 PHASE_CN 逐条同字** ——
+ * 同一件事在屏上和手机里说出两种口径，展台上的观众只会信错的那个。
+ * 「tx_ok」只说"卫星已收到"，不说"发送成功"：后者在 [com.carpet.satdemo.core.link.SosCopy.BANNED] 里，
+ * 卫星 ACK 不等于平台受理（红线一）。
+ *
+ * 当 enum 用而不是继续拼字符串，是为了让"新加一个相位忘了配文案"在编译期就红，
+ * 而不是在屏上出现一个没人认识的键名（#31，2026-11-02 实拍「当前相位 idle」直接上了屏）
+ */
+private fun phaseCn(p: SatPhase?): String = when (p) {
+    null -> "未知"
+    SatPhase.idle -> "待命"
+    SatPhase.searching -> "对星中"
+    SatPhase.locked -> "已锁定"
+    SatPhase.tx_pending -> "正在发送"
+    SatPhase.tx_ok -> "卫星已收到"
+    SatPhase.tx_fail -> "没发出去"
+    SatPhase.tx_no_ack -> "没等到回执"
+}
 
 /**
  * 「下一次过顶」那半句。**窗口内 secondsToNextPass 就是 0**，照字面念成了"还有 0 秒"，
@@ -40,7 +66,7 @@ private val IN_WINDOW = setOf("locked", "tx_pending", "tx_ok", "tx_fail", "tx_no
  * 空串表示这事现在没得说（还没算出过境时间），由调用方决定兜底话。
  */
 internal fun passSentence(c: SkillContext): String = when {
-    c.phase in IN_WINDOW -> "正在过境窗口内。"
+    phaseOf(c.phase)?.let { it in IN_WINDOW } == true -> "正在过境窗口内。"
     c.secondsToNextPass == null -> ""
     c.secondsToNextPass <= 0 -> "窗口已经打开。"
     else -> "下一次过顶还有 ${c.secondsToNextPass} 秒。"
@@ -73,7 +99,7 @@ object BuiltinSkills {
                     skillId = "link.status",
                     intent = "链路状态查询",
                     fields = f,
-                    line = "当前相位 ${c.phase ?: "未知"}，$module。" + passSentence(c),
+                    line = "当前相位 ${phaseCn(phaseOf(c.phase))}，$module。" + passSentence(c),
                 )
             },
 

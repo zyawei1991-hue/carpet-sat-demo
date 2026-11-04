@@ -15,8 +15,14 @@ import com.carpet.satdemo.core.modem.MonoClock
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.CommandType
+import com.carpet.satdemo.core.protocol.DialogDir
+import com.carpet.satdemo.core.protocol.DialogPayload
+import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.GnssSource
+import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
+import com.carpet.satdemo.core.protocol.UiCard
+import com.carpet.satdemo.core.protocol.UiState
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.core.screen.ScreenLinkServer
 import com.sun.net.httpserver.HttpServer
@@ -26,6 +32,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
+import java.time.Instant
+import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -46,6 +54,7 @@ import kotlinx.coroutines.runBlocking
  * `--hold N`      走到第 N 步结束时定格
  * `--freeze-sec S` 走到第 S 个假秒定格 —— 步内发生的相位变化用它抓
  * `--blocked`     演「卫星没过顶」：探测无 ACK、SOS 三次重发、只剩倒计时
+ * `--card NAME`   把圆屏那张卡钉死（status/sat/dialog/emotion/clock），不跟脚本轮播
  */
 object DemoDriver {
 
@@ -59,20 +68,53 @@ object DemoDriver {
         val cell: CellStatus,
         /** false 演「模块掉线」（车断电一类），心跳就只能留在 App 侧队列 */
         val moduleOnline: Boolean = true,
+        /**
+         * 这一步把定位挪到围栏圆外面去。**围栏越界以前在彩排里根本不会发生**：
+         * setFence 只收名字和开关，而 `onFenceDistance` 一个调用方都没有，
+         * 于是 fence_exit 这条事件和屏上那句「已越界」全是死字。
+         */
+        val outOfFence: Boolean = false,
+        /**
+         * 这一步冒充圆屏上行问一句话（真机上是车里那个麦）。
+         * 对话卡**只能**由一句真答完的话切出来，脚本钉它就等于回到"画面在轮播"。
+         */
+        val ask: String? = null,
     )
 
     private const val PASS_PERIOD_MS = 720_000L
-    private const val PASS_WINDOW_MS = 240_000L
 
     /**
-     * 假时钟起点距下次过顶 24 个假秒 —— 正好是第 4 步的结尾，
+     * 窗口只给 24 个假秒，比真星座的 4 分钟短 —— 因为脚本一轮才 84 秒。
+     * 窗口一长，第 5 步之后整轮都算「正在过境」，[com.carpet.satdemo.core.screen.CardPolicy]
+     * 就把卫星卡压在屏上不放，对话卡和脸那张永远轮不上：那正好是这次要治的"轮播"的反面。
+     * 相位由 [SimulatedModem.replayPassWindow] 每轮拨回开头，两轮之间演的是同一个故事。
+     */
+    private const val PASS_WINDOW_MS = 24_000L
+
+    /** 每轮开头，下一次过顶还剩这么多假秒 —— 正好是第 4 步的结尾 */
+    private const val OPEN_IN_MS = 24_000L
+
+    /** 围栏那个圆：圆心就是脚本里那个"西湖景区"的停车位，半径 600 米（约 4 分钟步行） */
+    private const val FENCE_LAT = 30.2741
+    private const val FENCE_LON = 120.1551
+    private const val FENCE_RADIUS_M = 600.0
+    /** 外面那一点：往北 0.01° ≈ 1112 米，出界但不至于跑到另一个市，回放里看着仍是一段路 */
+    private const val OUTSIDE_LAT = 30.2841
+
+    /**
+     * 假时钟起点距下次过顶 [OPEN_IN_MS] —— 正好是第 4 步的结尾，
      * 于是「倒计时走完 → 窗口打开 → 锁定」连着发生，抓静帧不用凑时间。
      */
     private val T0 = run {
         val base = 1_795_200_000_000L
-        base - base % PASS_PERIOD_MS + PASS_PERIOD_MS - 24_000
+        base - base % PASS_PERIOD_MS + PASS_PERIOD_MS - OPEN_IN_MS
     }
 
+    /**
+     * 脚本只管把**场面**演出来：蜂窝几格、模块在不在、车在围栏里外、按钮按没按。
+     * 它不再决定屏上画哪张卡 —— 那个决定归 [com.carpet.satdemo.core.screen.CardPolicy]，
+     * 和真 App 上手机做的是同一份决定。想钉住某张卡给 Bring-up 用，走 `--card`。
+     */
     private val SCRIPT: List<Step> = listOf(
         Step(6, "城市道路：蜂窝主链路，轨迹 1Hz 上报", GOOD),
         Step(6, "进停车场：信号 1 格，判据过半，提前切 PROBE", WEAK),
@@ -81,8 +123,14 @@ object DemoDriver {
         Step(6, "过境窗口打开：锁住卫星，星名和 CNR 上来", DEAD),
         Step(8, "按下 SOS，卫星确认送达", DEAD),
         Step(4, "平台回执横幅停在屏上", DEAD),
+        // 这一段演的不是链路，是「终端没电睡了」那种现场：模组掉线、屏上只剩一张脸
         Step(12, "GT1005 掉线：心跳只能留在 App 队列，一条不能丢", DEAD, moduleOnline = false),
         Step(12, "蜂窝恢复：进 RECOVER，把攒下的补发出去", GOOD),
+        // 对话这张卡的文本不来自 state 而来自另一条 `t=dialog` 帧：脚本只负责把场面造出来，
+        // 句子由 DialogBridge 的主动扫描推下来，卡由"刚刚有下行对话"这条优先序切过去
+        Step(10, "到景区了，家长问了一句，答句直接上屏", GOOD, ask = "现在链路什么情况"),
+        // 越界单独一步，接在对话后面：先是"人和屏说话"，再是"屏自己有事要说"，两种驱动源分开演
+        Step(8, "车开出围栏：fence_exit 弹横幅，轨迹照旧走蜂窝", GOOD, outOfFence = true),
     )
 
     @JvmStatic
@@ -90,6 +138,19 @@ object DemoDriver {
         val hold = args.argAfter("--hold")
         val freezeAt = args.argAfter("--freeze-sec")
         val blocked = args.contains("--blocked")
+        /**
+         * `--card NAME` 把卡片钉死成那一张，不再跟着脚本轮播。
+         * 给真圆屏 Bring-up 用的：一次只验一张卡，屏上不对至少不用先怀疑是脚本切走了
+         */
+        val pinCard = args.argTextAfter("--card")?.let { name ->
+            UiCard.values().firstOrNull { it.name == name.lowercase() }
+                ?: error("--card 只认 ${UiCard.values().joinToString("/")}")
+        }
+        /**
+         * 时区偏移由这台机器给，固件那边不许猜：彩排机常常就是 UTC，而真手机是东八区。
+         * 钟面拿整帧的 ts 加上它拆时分秒 —— 屏自己算不出来，它没有「区号」这个概念
+         */
+        val tzMin = ZoneId.systemDefault().rules.getOffset(Instant.now()).totalSeconds / 60
         val record = args.indexOf("--record").takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }?.let { Paths.get(it) }
 
         val clock = FakeClock(T0)
@@ -122,19 +183,15 @@ object DemoDriver {
         val runtime = DemoRuntime(engine, server, clock::now, heartbeatEvery = 3)
         server.accepting = true
         /**
-         * 圆屏指令按 App 同一套接线处理（[com.carpet.satdemo.app.AppRuntime.wireCommands]）。
-         * 驱动器不接这一段，彩排演过的就是"没有这条链路的 App"—— 而明天现场用的恰恰是这条路。
+         * 指令的处理收在 [DemoRuntime.handleScreenCommand] 一处，真机和彩排台共用那一份 ——
+         * 驱动器再写一个 when 的话，彩排演过的就不是装到手机上的那个东西。
+         * 这里只留控制台回显：不打印的话，彩排时看不见屏那侧按下了什么。
          */
         runtime.onCommand = { msg ->
-            val cmd = msg.command?.cmd
             println("cmd      ${msg.command?.cmd}  args=${msg.command?.args}")
-            when (cmd) {
-                CommandType.sos_press -> runtime.pressSos()
-                CommandType.sos_cancel -> runtime.cancelSos { r ->
-                    println("cancel   ${SosCopy.cancelLine(r.send, r.alreadyHanded)}")
-                }
-                else -> Unit
-            }
+        }
+        runtime.onCancelResult = { r ->
+            println("cancel   ${SosCopy.cancelLine(r.send, r.alreadyHanded)}")
         }
         /**
          * 对话接线，和 [com.carpet.satdemo.app.AppRuntime] 同一份 [DialogBridge]、同一张事实表。
@@ -164,19 +221,47 @@ object DemoDriver {
         if (blocked) println("模式：卫星未过顶，所有 MCQ 都拿不到 ACK")
         if (args.contains("--eph-offline")) println("模式：星历 NETWORK_ERROR —— 屏上应该说「请联网更新」，不能说「没卫星信号」")
         if (args.contains("--update-fail")) println("模式：星历下载失败，只能靠本地缓存算窗口")
+        if (pinCard != null) println("模式：卡片钉在 $pinCard（表情仍由策略给），时区偏移 $tzMin 分")
 
-        runtime.onFix(30.2741, 120.1551, GnssSource.phone, 1.2, 2.0)
-        runtime.setFence(true, "西湖景区")
+        runtime.onFix(FENCE_LAT, FENCE_LON, GnssSource.phone, 1.2, 2.0)
+        runtime.setFence(true, "西湖景区", FENCE_LAT, FENCE_LON, FENCE_RADIUS_M)
         runtime.setDemoMode(true)
         runtime.onPhoneBattery(78)
+        // 屏上画哪张卡不再由脚本交代：脚本给场面，[com.carpet.satdemo.core.screen.CardPolicy] 给决定。
+        // 这里只交时区（这台机器的），和 Bring-up 用的那一张钉卡
+        if (pinCard != null) runtime.setUi(UiState(pinCard, null, tzMin)) else runtime.setScreenStyle(tzMin = tzMin)
 
         var round = 0
         while (true) {
             round++
+            // 每一轮都把窗口相位拨回开头：不然第 2 轮起就整轮碰不上过境，
+            // 那张卫星卡、那次 SOS、那句横幅只在第一轮演得出来（详见 SimulatedModem.replayPassWindow）。
+            // 星历那份必须和模组一起拨，拨完还要强制重算一次 —— 它缓存的是上一轮算出来的窗
+            modem.replayPassWindow(OPEN_IN_MS)
+            ephemeris.replayPassWindow(OPEN_IN_MS)
+            engine.reseedEphemeris()
+            val roundStartMs = clock.ms
             SCRIPT.forEachIndexed { i, step ->
                 modem.reachable = step.moduleOnline
+                // 「家长问了一句」得真问一句。对话卡不是脚本钉的，它靠"刚有一句答完了"切过去，
+                // 而 turn_id 必须每轮唯一 —— 复用旧的会被屏那侧的去重当成重发吃掉
+                step.ask?.let {
+                    dialog.onScreenFrame(
+                        ScreenMessage(
+                            t = MsgType.dialog, seq = 0, ts = clock.ms,
+                            dialog = DialogPayload(
+                                turnId = "s-$round-$i", dir = DialogDir.up,
+                                text = it, source = DialogSource.asr,
+                            ),
+                        )
+                    )
+                }
                 repeat(step.seconds) {
                     runtime.onCellSample(step.cell)
+                    // 位置每拍都喂：越界判定是"位置变了吗"的函数，只在脚本开头喂一次的话
+                    // 那一步之后的 fence_exit / fence_enter 一个都不会触发
+                    runtime.onFix(if (step.outOfFence) OUTSIDE_LAT else FENCE_LAT, FENCE_LON,
+                        GnssSource.phone, 1.2, 2.0)
                     runtime.tickOnce()
                     clock.advance(1_000)
                     if (freezeAt != null && (clock.ms - T0) / 1000 >= freezeAt) {
@@ -187,9 +272,14 @@ object DemoDriver {
                     if ((clock.ms - T0) / 1000 % 10 == 0L) dialog.scanProactive()
                     delay(TICK_MS)
                 }
-                println("step ${i + 1}  t=${(clock.ms - T0) / 1000}s  ${step.label}  ->  ${engine.phase}")
+                val d = runtime.lastUiDecision
+                println("step ${i + 1}  轮内 t=${(clock.ms - roundStartMs) / 1000}s  ${step.label}  ->  ${engine.phase}" +
+                    "  屏=${d?.card}/${d?.emotion}｜${d?.why}")
                 printConsole(runtime)
                 if (step.label.contains("SOS")) runtime.pressSos().join()
+                // 彩排台没有云端推送，平台那一路的回执就由脚本在这一步替它到达。
+                // 注意这改的是**场面**（回执到没到），不是屏上画哪张卡 —— 那条仍然归 CardPolicy
+                if (step.label.contains("回执")) runtime.platformAck()
                 if (hold == i + 1) {
                     println("定格在第 ${i + 1} 步：${step.label}。界面保持这一帧。")
                     holdScreen(runtime)
@@ -221,6 +311,11 @@ object DemoDriver {
     private fun Array<String>.argAfter(name: String): Int? {
         val i = indexOf(name).takeIf { it >= 0 } ?: return null
         return getOrNull(i + 1)?.toIntOrNull()
+    }
+
+    private fun Array<String>.argTextAfter(name: String): String? {
+        val i = indexOf(name).takeIf { it >= 0 } ?: return null
+        return getOrNull(i + 1)
     }
 
     /**

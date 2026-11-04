@@ -5,6 +5,11 @@
  * 板级那三样（屏怎么画、麦克风怎么取、按钮怎么读）每个工程都不一样，
  * 但链路侧该做的事全在这几行里。
  *
+ * 2026-10-30：这份文件在真 IDF 5.5.2 上单独编过一遍（工程在 `D:\dev\screen-link-probe`，
+ * 用绝对路径把它塞进 main 的 SRCS，仓库这边仍然不编它）。编出两个错，都改了：
+ * `cJSON_TRUE` 在 IDF 那份 cJSON 里不存在，换帧时摘下来的旧树没人释放（1Hz 一秒漏一棵）。
+ * 改完的道理写在各自那行旁边的注释里。
+ *
  * 验收三条（对应打通第 2 步）：
  *   1. 连上后 1Hz 有画面；
  *   2. 拔网线/关热点 3 秒 → 链路图标变灰、**保留最后一帧** + "链路中断 mm:ss"，不许黑屏；
@@ -16,6 +21,7 @@
 #include "screen_link.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "screen_app";
@@ -25,17 +31,24 @@ static const char *TAG = "screen_app";
 static cJSON *s_state_copy = NULL;
 static volatile bool s_dirty = false;
 static uint32_t s_state_seq = 0;
+/* UI 任务和链路任务碰同一棵树，必须有锁。没锁的"换帧时删旧的"就是 use-after-free */
+static SemaphoreHandle_t s_state_lock = NULL;
 
 static void on_state(const cJSON *state, uint32_t seq)
 {
-    cJSON *dup = cJSON_Duplicate(state, cJSON_TRUE);
+    /* IDF 那份 cJSON 只有 cJSON_True（类型位枚举），没有上游 1.7.18 才加的 cJSON_TRUE，
+     * 抄的时候写 true 或 cJSON_True 都行，写 cJSON_TRUE 直接编译不过 */
+    cJSON *dup = cJSON_Duplicate(state, cJSON_True);
     if (dup == NULL) return;           /* 拷不动就沿用上一帧，反正 1 秒后还有 */
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
     cJSON *old = s_state_copy;
     s_state_copy = dup;
     s_state_seq = seq;
     s_dirty = true;
-    /* UI 任务：看到 s_dirty 就画，画完清 0，然后 cJSON_free 掉它拿走的那份由 UI 负责释放。
-     * 更省事的做法是 UI 只读 s_state_copy 不释放，由这里在换帧时释放 —— 上面就是这么写的 */
+    xSemaphoreGive(s_state_lock);
+    /* 旧树在锁外删：UI 只能通过 s_state_copy 拿到树，摘出来之后它已经碰不到了 */
+    if (old) cJSON_Delete(old);
+    /* UI 侧读法：拿同一把锁，把要画的字段抄进自己的局部变量再放锁，别把指针带出临界区 */
 }
 
 static void on_dialog(const cJSON *dialog)
@@ -53,13 +66,14 @@ static void on_dialog(const cJSON *dialog)
     /* TODO：把 shown 画进对话列表。dir=down 且 turn_id 是本地起的那一轮 → 补在原问题下面 */
 }
 
-static void on_event(const cJSON *event, const char *event_id, uint32_t ttl_ms)
+static void on_event(const cJSON *event, const char *event_id, uint32_t left_ms)
 {
     (void)event_id;
-    (void)ttl_ms;
+    (void)left_ms;
     const cJSON *kind = cJSON_GetObjectItemCaseSensitive(event, "kind");
     ESP_LOGI(TAG, "event %s", cJSON_IsString(kind) ? kind->valuestring : "?");
-    /* ack 已经由本组件回过了，这里只管弹提示 */
+    /* ack 已经由本组件回过了，过期的那套判定也做过了（过期的一条根本不会走到这里）。
+     * left_ms 是**还剩**多少毫秒，弹出来的提示按它自己收：0 = 帧里没给 ttl。 */
 }
 
 static void on_connected(int negotiated)
@@ -82,6 +96,7 @@ static void on_contract_error(const char *raw, const char *reason)
 
 void screen_app_start(void)
 {
+    if (s_state_lock == NULL) s_state_lock = xSemaphoreCreateMutex();
     screen_link_cfg_t cfg = {
         .url = CONFIG_SCREEN_LINK_URL,
         .screen_id = CONFIG_SCREEN_LINK_ID,
@@ -118,6 +133,9 @@ void screen_app_sos_pressed(void)
 {
     cJSON *payload = cJSON_CreateObject();
     cJSON_AddStringToObject(payload, "from", "screen_sos_key");
-    /* ttl 给 30 秒：过顶窗口之外这条只能排队，说清"多久之内算数"比"发出去了"要紧 */
-    screen_link_send_event("sos_press", payload, 30000);
+    /* kind 必须是 EventKind 里的名字。这里原来写的是 "sos_press" —— 那是 **CommandType**
+     * （手机下发给屏的指令）里的值，不是 EventKind；服务端 ScreenMessage.decode 撞上它
+     * 会直接 close("bad contract")，链路自己打断，2026-10-31 真机复现过同一类错。
+     * ttl 给 30 秒：过顶窗口之外这条只能排队，说清"多久之内算数"比"发出去了"要紧。 */
+    screen_link_send_event("sos_triggered", payload, 30000);
 }

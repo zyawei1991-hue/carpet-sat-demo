@@ -608,19 +608,18 @@ class AppRuntime(private val host: Application) {
         )
     }
 
-    /** 圆屏上的按键动作。在 App 启动服务之后才会被填上 */
+    /**
+     * 圆屏上的按键动作。在 App 启动服务之后才会被填上。
+     *
+     * **这里不再自己 dispatch**：那一张表在 [DemoRuntime.handleScreenCommand]，真机和彩排台共用。
+     * 本机只管两件屏管不到的事 —— 清掉/写上首页那行撤销文案。
+     */
     internal fun wireCommands() {
         runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
+        runtime.onCancelResult = { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
         runtime.onCommand = { msg ->
-            val cmd = msg.command?.cmd
-            runtime.log("展示端指令 $cmd")
-            when (cmd) {
-                CommandType.sos_press -> runtime.pressSos()
-                // 圆屏那颗键能长按 3 秒触发，就必须也能撤销：两边能力不对称时，
-                // 用户在圆屏上按完会发现 App 里找不到那条"取消"
-                CommandType.sos_cancel -> cancelSos()
-                else -> Unit
-            }
+            // 屏上按出来的呼救和手机上按的是同一件事，那首页就不许留着上一条"撤销中"
+            if (msg.command?.cmd == CommandType.sos_press) _cancelLine.value = null
         }
     }
 

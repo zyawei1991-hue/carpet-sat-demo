@@ -73,8 +73,40 @@ enum class EventKind {
     track_reset,
 }
 
+/**
+ * 屏 → 手机的上行动作。
+ *
+ * **这里没有 `card_set`，是故意的**：切卡那三条（[card_next] / [card_auto] / [poke]）都只是
+ * **请求**，画哪一张仍由手机算出来写进 `ui.card`。定卡权一旦下放到屏，同一辆车就会在手机和屏上
+ * 讲两件事，而 §6.1 那套文案红线只约束得过网关这一路。请求制还留了一个拒绝对：
+ * SOS 正在走的时候 [card_next] 会被顶回"呼救还没走完"，屏上那张卫星卡切不走。
+ *
+ * - [card_next]：左右滑。`args.dir` = +1 往后一张、-1 往前一张。
+ * - [card_auto]：把定卡权交回 [com.carpet.satdemo.core.screen.CardPolicy] 那条优先序（手动钉住之后的出口）。
+ * - [poke]：单击。手机换一张脸并可以答一句 —— "互动表情"这条链的起点。
+ */
 @Serializable
-enum class CommandType { sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui }
+enum class CommandType {
+    sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui,
+    card_next, card_auto, poke,
+}
+
+/**
+ * 圆屏此刻全屏画哪一张。**这个选择是产品决定，所以它由手机下发，固件不许自己挑**
+ * —— 同一个 ui 缺失时它退回 [status]，那一档也是这里的一员，不是代码里的隐式默认。
+ *
+ * 这里刻意没有 `image`：契约传不动一张照片（见 protocol/screen-link.md 待办那条）。
+ */
+@Serializable
+enum class UiCard { status, sat, dialog, emotion, clock }
+
+/**
+ * 这块屏当下「穿着」的那张脸。它不是 [UiCard.emotion] 专用字段：
+ * 对话卡把脸画在文字上方、表情卡把它铺满整屏，读的是同一个值，
+ * 所以 App 改一次就两边都跟着变。屏上的脸是矢量现画的，不下图。
+ */
+@Serializable
+enum class UiEmotion { neutral, happy, excited, sad, worried, sleepy, thinking }
 
 /** 对话通道。[up]=屏上说的话（要手机回答），[down]=手机说的话（要在屏上显示） */
 @Serializable
@@ -138,10 +170,19 @@ data class SatState(
     /**
      * GT1005 本身在不在。掉线和「在窗口外没锁到星」是两件事：
      * 前者是硬件没了，展示端要说"终端离线"，后者才是"等过顶"。
+     *
+     * **不能有默认值**：`Json { encodeDefaults = false }` 会把「等于默认值」的字段整个省掉，
+     * 而 `= true` 意味着终端健康时这个键根本不上线，屏那边 `bool_of` 找不到键就不动缓存、
+     * 开机 memset 成 false —— 于是卫星卡永远画「卫星终端离线 / --:--」，串口一个错都不报
+     * （2026-11-02 真机 11 步实拍抓到的）。屏用"缺了等于不知道"读的布尔都必须必填。
      */
-    @SerialName("module_ok") val moduleOk: Boolean = true,
-    /** App 侧攒着待补发的条数。掉线期间这个数字一直涨，就是"一条不能丢"的凭据 */
-    @SerialName("queue_pending") val queuePending: Int = 0,
+    @SerialName("module_ok") val moduleOk: Boolean,
+    /**
+     * App 侧攒着待补发的条数。掉线期间这个数字一直涨，就是"一条不能丢"的凭据。
+     * 同样不能有默认值：屏把"没有这个键"和"队里 0 条"当成两句话（前者是手机还没算），
+     * 带默认值时 0 会被省掉，屏就永远显示「待补发 -」。
+     */
+    @SerialName("queue_pending") val queuePending: Int,
     /**
      * 因为队列满了被挤掉/拒收的条数（E.10 #8）。容量按模组型号注入（GM1001 500 / GM1003 50），
      * 所以这个数字非零是**可能**发生的：展示端要把它画出来，而不是假装"一条没丢"。null = 没有队列概念
@@ -226,6 +267,18 @@ data class SentinelState(
 )
 
 @Serializable
+data class UiState(
+    val card: UiCard,
+    val emotion: UiEmotion? = null,
+    /**
+     * 手机时区相对 UTC 的偏移分钟数（东八区 480）。钟面拿整帧的 [ScreenMessage.ts] 加上它拆时分秒。
+     * null = 没给，屏按 UTC 画并在角上标一个小小的 UTC —— 这台设备没有电池-backed RTC，
+     * 也不要在固件里猜时区：车里那个网络一断，SNTP 就拿不到，猜出来的表比没有表更误导人。
+     */
+    @SerialName("tz_min") val tzMin: Int? = null,
+)
+
+@Serializable
 data class StatePayload(
     val link: LinkState,
     val sat: SatState,
@@ -235,6 +288,12 @@ data class StatePayload(
     val sentinel: SentinelState? = null,
     @SerialName("phone_battery") val phoneBattery: Int? = null,
     @SerialName("demo_mode") val demoMode: Boolean = false,
+    /**
+     * 展示端该画哪张卡。null = 这一帧没定，屏继续画它自己的状态总览 ——
+     * 老 App、v1 会话、还有手机刚起来还没算出卡的那几秒都是这个形状，
+     * 所以**它缺失绝不能黑屏或报错**。加性字段，不占契约版本。
+     */
+    val ui: UiState? = null,
 )
 
 @Serializable

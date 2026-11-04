@@ -147,12 +147,33 @@ class SimulatedModem(
 
     /** 给演示脚本直接查，不经 suspend */
     fun secondsToNextPassAt(): Long {
-        val into = clock.nowMs() % passPeriodMs
+        val into = passInto()
         val rest = passPeriodMs - into
         return if (into < passWindowMs) 0 else rest / 1000
     }
 
-    private fun inPassWindow(): Boolean = clock.nowMs() % passPeriodMs < passWindowMs
+    private fun inPassWindow(): Boolean = passInto() < passWindowMs
+
+    /**
+     * 窗口相位默认贴着假时钟的 0 点取模；彩排台每轮开头会把它拨回去，见 [replayPassWindow]。
+     * 用 `mod`（向下取模）而不是 `%`：anchor 一旦晚于 now，`%` 会给出负数，
+     * 于是 `into < passWindowMs` 恒真 —— 屏上永远写着「窗口已打开」。
+     */
+    private var passAnchorMs = 0L
+
+    private fun passInto(): Long = (clock.nowMs() - passAnchorMs).mod(passPeriodMs)
+
+    /**
+     * 把"下一次过顶"重新定在 openInMs 之后。
+     *
+     * 这是彩排台的道具，不是产品能力：脚本一轮只有 84 个假秒，而周期是 720 秒，
+     * 不按轮重置相位的话，第 2、3 轮就整轮碰不上窗口 —— 于是那张卫星卡、
+     * 那次 SOS、那句横幅，只有第一轮演得出来。屏侧代码拿不到这个区别，
+     * 它看到的仍然是一份正常的过境预报。
+     */
+    fun replayPassWindow(openInMs: Long) {
+        passAnchorMs = clock.nowMs() + openInMs - passPeriodMs
+    }
 
     override fun close() {
         downlink = null

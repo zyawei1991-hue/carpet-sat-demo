@@ -45,8 +45,9 @@ class SimulatedEphemerisSource(
         val now = clock.nowMs()
         val horizonMs = (request.horizonHours * 3_600_000).toLong()
         val out = ArrayList<SatellitePass>()
-        var index = (now / passPeriodMs).toInt()
-        var start = index * passPeriodMs
+        // 窗口格点照旧按周期铺，只是整条网格平移 [passAnchorMs]，见 [replayPassWindow]
+        var index = Math.floorDiv(now - passAnchorMs, passPeriodMs).toInt()
+        var start = passAnchorMs + index * passPeriodMs
         while (start < now + horizonMs) {
             if (start >= now) {
                 // 最大仰角按序号在 22°~78° 之间转，让低仰角那颗能被阈值筛掉
@@ -63,8 +64,19 @@ class SimulatedEphemerisSource(
                 }
             }
             index++
-            start = index * passPeriodMs
+            start = passAnchorMs + index * passPeriodMs
         }
         return EphResult(EphState.SUCCESS, out.sortedBy { it.startMs }, dataTimestampMs = if (online) now else null)
+    }
+
+    private var passAnchorMs = 0L
+
+    /**
+     * 把"下一次过顶"定在 openInMs 之后，和 [com.carpet.satdemo.core.modem.SimulatedModem.replayPassWindow]
+     * 是同一件道具，**必须成单调**：星历和模组各拨各的，就会真的出现
+     * "屏上说还在窗口、模组却说没过顶"那种自己打自己的帧。
+     */
+    fun replayPassWindow(openInMs: Long) {
+        passAnchorMs = clock.nowMs() + openInMs - passPeriodMs
     }
 }

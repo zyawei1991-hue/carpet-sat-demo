@@ -50,6 +50,7 @@ class SchemaDriftTest {
             "fence" to FenceState.serializer().descriptor,
             "sos" to SosState.serializer().descriptor,
             "sentinel" to SentinelState.serializer().descriptor,
+            "ui" to UiState.serializer().descriptor,
         )
 
         for (i in cases.indices) {
@@ -62,14 +63,31 @@ class SchemaDriftTest {
 
     @Test
     fun `schema 说的 required 在 Kotlin 侧真的没有默认值`() {
-        val state = at(schema(), listOf("state"))!!
-        val required = state["required"]!!.jsonArray.map { it.jsonPrimitive.content }
-        val desc = StatePayload.serializer().descriptor
-        val defaulted = (0 until desc.elementsCount).filter { desc.isElementOptional(it) }.map { desc.getElementName(it) }
-        for (key in required) {
-            assertTrue(key in props(state).keys, "state 的 required 说了个不存在的字段：$key")
-            assertTrue(key !in defaulted, "$key 有默认值，App 漏发也不会报错，不该出现在 required 里")
+        val root = schema()
+        val blocks = listOf(
+            listOf("state") to StatePayload.serializer().descriptor,
+            // ui 一旦带上来就必须说清画哪张卡；整个 ui 缺失是另一回事（那边允许，屏画总览）
+            listOf("state", "ui") to UiState.serializer().descriptor,
+        )
+        for ((path, desc) in blocks) {
+            val node = at(root, path)!!
+            val required = node["required"]!!.jsonArray.map { it.jsonPrimitive.content }
+            val defaulted = (0 until desc.elementsCount).filter { desc.isElementOptional(it) }.map { desc.getElementName(it) }
+            for (key in required) {
+                assertTrue(key in props(node).keys, "$path 的 required 说了个不存在的字段：$key")
+                assertTrue(key !in defaulted, "$key 有默认值，App 漏发也不会报错，不该出现在 required 里")
+            }
         }
+    }
+
+    @Test
+    fun `ui 的 card 和 emotion 取值两边一模一样`() {
+        // 固件照 schema 那串枚举手写「这张卡画哪几行、这张脸画几道弧」的分支表。
+        // App 的枚举多一个值，屏上不会报错，只会**默默落回兜底那一支** ——
+        // 现场看到的就是「手机点了没反应」，然后去怀疑网络。dialog 当年差点就是这么漏的
+        val ui = at(schema(), listOf("state", "ui"))!!["properties"]!!.jsonObject
+        assertEquals(UiCard.values().map { it.name }.toSet(), enumValues(ui, "card"), "card 的两边取值不一致")
+        assertEquals(UiEmotion.values().map { it.name }.toSet(), enumValues(ui, "emotion"), "emotion 的两边取值不一致")
     }
 
     @Test
@@ -102,6 +120,114 @@ class SchemaDriftTest {
         }
     }
 
+    @Test
+    fun `健康态那一帧里 module_ok 和 queue_pending 必须真的在线上`() {
+        // 2026-11-02 真机 11 步实拍：卫星卡每一步都画「卫星终端离线 / --:--」，而手机那边
+        // sat_ok=true、星锁着 GW-07。串口一个错都没报，因为屏读不到键就不动缓存，
+        // 而缓存是开机 memset 出来的 false。根因就是这个字段带 `= true` 默认值，
+        // 被 encodeDefaults=false 省掉了。这类错只有把像素读回来才看得见
+        val wire = ScreenCodec.json.encodeToString(
+            SatState.serializer(),
+            SatState(phase = SatPhase.idle, moduleOk = true, queuePending = 0),
+        )
+        assertTrue("\"module_ok\":true" in wire, "终端健康时 module_ok 没上线，屏会永远停在离线文案：$wire")
+        assertTrue("\"queue_pending\":0" in wire, "队里 0 条时省掉这个键，屏会画「待补发 -」（= 手机还没算）：$wire")
+    }
+
+    @Test
+    fun `屏用「缺了等于不知道」读的字段，schema 列了必填 Kotlin 就必须真的必填`() {
+        // 固件的 bool_of / int_of 找不到键就不写出参，而出参缓存来自 memset(0)。
+        // schema 是固件手写 cJSON 的唯一事实来源，所以钉这一对：schema 说必填的，
+        // Kotlin 那边就不许带默认值 —— 带了就等于"等于默认值的那一帧它整个不上线"
+        val mustRequire = mapOf(
+            "sat" to listOf("module_ok", "queue_pending"),
+        )
+        val descs = mapOf(
+            "sat" to SatState.serializer().descriptor,
+        )
+        for ((block, keys) in mustRequire) {
+            val required = at(schema(), listOf("state", block))!!["required"]!!
+                .jsonArray.map { it.jsonPrimitive.content }
+            val desc = descs[block]!!
+            for (key in keys) {
+                assertTrue(key in required, "schema 里 $block.$key 不是必填，固件就不该依赖它；要依赖得先补 schema")
+                val idx = (0 until desc.elementsCount).firstOrNull { desc.getElementName(it) == key }
+                    ?: error("$block 里找不到 $key")
+                assertTrue(!desc.isElementOptional(idx), "$block.$key 带默认值，encodeDefaults=false 会在最该有它的那一帧省掉它")
+            }
+        }
+    }
+
+    @Test
+    fun `固件手写的枚举手必须和 schema 的取值一字不差`() {
+        // app_main.c 里那几张 `static const char *const *_NAMES` 是**照这份 schema 手抄**的分支表：
+        // App 加了个取值而表没跟，屏不会报错，只会默默落回兜底那一支，
+        // 画出来是一个没人认识的词或者一句不相干的话（#31 那条实拍就是这么来的）。
+        // 光有 Kotlin↔schema 的比对拦不住这一环，所以这里直接把那份 C 读回来比
+        val root = schema()
+        val src = firmwareSource()
+        val ui = at(root, listOf("state", "ui"))!!["properties"]!!.jsonObject
+        val link = at(root, listOf("state", "link"))!!["properties"]!!.jsonObject
+        val sat = at(root, listOf("state", "sat"))!!["properties"]!!.jsonObject
+        val event = at(root, listOf("event"))!!["properties"]!!.jsonObject
+        val cases = listOf(
+            "CARD_NAMES" to enumValues(ui, "card"),
+            "EMOTION_NAMES" to enumValues(ui, "emotion"),
+            "PHASE_NAMES" to enumValues(sat, "phase"),
+            "PRIMARY_NAMES" to enumValues(link, "primary"),
+            "EVENT_NAMES" to enumValues(event, "kind"),
+        )
+        for ((table, want) in cases) {
+            val got = cStringTable(src, table).toSet()
+            assertEquals(want, got, "$table 和 schema 对不上：固件多的是 ${got - want}，缺的是 ${want - got}")
+        }
+        // 中文那一列的条数必须和键名列一样：少一格就是有取值没配文案。
+        // 那种漏法在屏上表现为"永远画兜底那句"，而固件一条日志都不报
+        val cnPairs = listOf(
+            "PHASE_CN" to "PHASE_NAMES",
+            "PRIMARY_CN" to "PRIMARY_NAMES",
+            "EMOTION_CN" to "EMOTION_NAMES",
+        )
+        for ((cn, names) in cnPairs) {
+            assertEquals(cStringTable(src, names).size, cStringTable(src, cn).size,
+                "$cn 的条数和 $names 不一样，有相位/链路/表情没配中文")
+        }
+
+        // 上行指令是**四张**表而不是一张：schema 的 enum、Kotlin 的 CommandType、
+        // 屏上真会发的那几条（COMMAND_NAMES），再加组件里那道合法值闸（ALLOWED）。
+        // 屏发的必须是 schema 的子集（track_pull / set_demo_mode / set_fence / reboot_ui
+        // 是手机侧和工程侧用的，屏不发），但子集里任何一条过不了组件那道闸就压根发不出去 ——
+        // 那种漏法的现场现象是"按了没反应"，而串口里一条契约错都没有，是最难查的那一类
+        val cmd = enumValues(at(root, listOf("command"))!!["properties"]!!.jsonObject, "cmd")
+        assertEquals(CommandType.values().map { it.name }.toSet(), cmd, "CommandType 和 schema 的 cmd 对不上")
+        val screenSends = cStringTable(src, "COMMAND_NAMES").toSet()
+        assertTrue(screenSends.all { it in cmd }, "屏发的指令不在 schema 里：${screenSends - cmd}")
+        val gated = cStringTable(componentSource(), "ALLOWED").toSet()
+        assertTrue(screenSends.all { it in gated }, "组件那道闸挡掉了屏要发的指令：${screenSends - gated}")
+        // 屏只能"请求"，不能指定画哪张卡。契约里出现 card_set 就是有人把定卡权下放给了屏，
+        // 那一放，同一辆车会在手机和屏上讲两件事，而文案红线只约束得过网关那一路
+        assertTrue("card_set" !in cmd, "契约里不该出现让屏直接定卡的取值")
+        // 名字进表、组件放行，但固件里一处都没发 —— 那种指令在屏上是死的，而三份文档都写着"支持"。
+        // #39 加那三条上行时正好就停在这个状态（表齐全、手势没有），所以这条比表本身更该钉住
+        for (gesture in listOf("CMD_CARD_NEXT", "CMD_CARD_AUTO", "CMD_POKE")) {
+            assertTrue("send_cmd($gesture" in src, "固件分支表里有 $gesture 但没有一处真的发出去：屏上那个动作是死的")
+        }
+    }
+
+    @Test
+    fun `schema 让 hello 带的电量，固件那手写的一帧里必须真的有`() {
+        /* 上面第一条比的是 schema ↔ Kotlin 的字段名，管不到 C：C 侧是手搓 JSON 的，
+           少写一行不会编译错、不会契约错，手机那边只是永远显示「外接供电」——
+           而那句和"这块屏没装电池"长得一模一样，靠眼睛在外场分辨不出来 */
+        val declared = props(at(schema(), listOf("hello"))!!).keys
+        assertTrue("battery_mv" in declared, "schema 的 hello 里没有 battery_mv，那固件发它就是在发野字段")
+
+        val hello = componentSource()
+            .substringAfter("static void send_hello")
+            .substringBefore("static void send_bye")
+        assertTrue("battery_mv" in hello, "固件的 send_hello 里没带 battery_mv：手机会一直显示「外接供电」")
+    }
+
     private fun checkBlock(
         root: JsonObject,
         name: String,
@@ -129,6 +255,17 @@ class SchemaDriftTest {
 
     private fun props(o: JsonObject): JsonObject = o["properties"]?.jsonObject ?: o
 
+    /**
+     * schema 的 enum 里允许写 `null` 这个取值（意思是「这一项没定」），
+     * Kotlin 那边对应的是可空类型本身而不是一个叫 null 的枚举名，比对时摘掉。
+     * JsonNull 的 content 就是字符串 "null"，所以直接按内容滤
+     */
+    private fun enumValues(parent: JsonObject, key: String): Set<String> {
+        val field = parent[key]?.jsonObject ?: error("schema 里 $key 不是个对象")
+        val list = field["enum"]?.jsonArray ?: error("schema 里 $key 没有 enum")
+        return list.map { it.jsonPrimitive.content }.filterNot { it == "null" }.toSet()
+    }
+
     private fun schema(): JsonObject {
         val candidates = listOf(
             Paths.get("protocol", "screen-link.schema.json"),
@@ -137,5 +274,28 @@ class SchemaDriftTest {
         val file = candidates.firstOrNull { it.toFile().exists() }
             ?: throw IllegalStateException("找不到 protocol/screen-link.schema.json，测试必须在仓库内运行")
         return Json.parseToJsonElement(file.toFile().readText()).jsonObject
+    }
+
+    private fun firmwareSource(): String = cSource("app", "main", "app_main.c")
+
+    /** 组件那份也读回来比：`screen_link_send_command` 里有一道合法值闸，它和 schema 分叉比表分叉更糟 ——
+     *  屏发一条合法但被闸挡下的指令，现象是"按了没反应"，而串口里连一条契约错都没有 */
+    private fun componentSource(): String =
+        cSource("components", "screen_link", "screen_link.c")
+
+    private fun cSource(vararg parts: String): String {
+        val tail = (listOf("firmware", "screen") + parts.toList()).joinToString("/")
+        val file = listOf(Paths.get("..", tail), Paths.get(tail))
+            .firstOrNull { it.toFile().exists() }
+            ?: throw IllegalStateException("找不到 $tail，那份手抄的分支表没人比")
+        return file.toFile().readText()
+    }
+
+    /** 抠出 `static const char *const NAME[...] = { … };` 里那串字面量，按出现顺序返回 */
+    private fun cStringTable(src: String, name: String): List<String> {
+        val decl = Regex("static const char \\*const $name\\[[^\\]]*]\\s*=\\s*\\{(.*?)};", RegexOption.DOT_MATCHES_ALL)
+            .find(src)
+            ?: error("app_main.c 里找不到 $name 这张表")
+        return Regex("\"([^\"]*)\"").findAll(decl.groupValues[1]).map { it.groupValues[1] }.toList()
     }
 }
