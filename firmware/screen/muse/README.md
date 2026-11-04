@@ -25,25 +25,27 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 12 个文件、911 行新增 / 20 行删，外加一份 123,804 字节的字库
-  （`muse-carpet.patch`，2,903 行，`git diff --binary` 打的，字库在里面是 base85 段）：
+- 我们的全部改动 = 12 个文件、1487 行新增 / 20 行删，外加一份 154,528 字节的字库
+  （`muse-carpet.patch`，3,907 行，`git diff --binary` 打的，字库在里面是 base85 段）：
   ```
   esp32/components/muse/CMakeLists.txt       |  17 +-   (+embed 那行)
   esp32/components/muse/Kconfig              |  14 +
-  esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 123804   (新，字库)
-  esp32/components/muse/carpet/carpet_link.c | 331 +   (新，链路 + 上行命令队列)
-  esp32/components/muse/carpet/carpet_link.h |  68 +   (新)
-  esp32/components/muse/carpet/carpet_page.c | 290 +   (新，Muse 样式的可点菜单)
-  esp32/components/muse/carpet/carpet_page.h |  21 +   (新)
-  esp32/components/muse/muse_input.c         |  17 +   (>carpet 回读 + bench 命令 ui=carpet)
-  esp32/components/muse/muse_ui.c            | 129 +-   (tile + 手势吞并修 + 圆点可点)
-  esp32/components/muse/muse_ui.h            |   5 +
+  esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
+  esp32/components/muse/carpet/carpet_link.c | 383 +   (新，链路 + 上行命令队列 + page_report)
+  esp32/components/muse/carpet/carpet_link.h |  77 +   (新)
+  esp32/components/muse/carpet/carpet_page.c | 746 +   (新，场景选择页 + 五个场景页 + 明细页)
+  esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
+  esp32/components/muse/muse_input.c         |  29 +   (>carpet / >page 回读 + bench 命令 ui=carpet)
+  esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
+  esp32/components/muse/muse_ui.h            |  10 +
   esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条)
   esp32/main/muse_glue.c                     |   9 +
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，12 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-04 晚 §9.3 那轮改完重打过一次，重打命令（**`components/screen_link` 必须排除**，
+  2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮改完重打过一次，
+  并且在 baseline 干净树上重打**验过 `PAGE_NAMES` 解得出来**（漂移测试靠这一个符号，
+  补丁里没有它就是静默不比，绿灯是假的）。重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
@@ -117,15 +119,33 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 
 ### 5.1 板子上现在的样子
 
-三块 tile：面（0,0）、设置（右滑到 1,0）、**车联页（上滑到 0,1）**。
+三块 tile：面（0,0）、设置（右滑到 1,0）、**车联页（上滑到 0,1）**。开机默认落在**面**那一格
+（就是 Muse 那张会听会说的脸），上滑才进场景。
 
 为什么不是左滑：横向那一轴已经被占了 —— 设置页自己的子页**也用横滑**，
 `muse_ui_set_swipe_enabled(false)` 就是在子页里把 tile 滑动关掉好让手势归子页；
 再挂一块横向 tile 会和它抢同一个轴。竖向原来没有任何竞争者，`LV_DIR_TOP` 是空的。
 车联页的 `dir` 只给 `TOP`：从那儿往左右都是"面"的后面，不该能滑过去。
 
-车联页现在画 5 行：链路 / 卫星 / 对话 / 表情 / 呼救。**只有第一行接了真状态**，
-其余四行是占位（`—`）。
+车联格里面是**三层**，都在这块玻璃上自己走完，不需要手机参与（2026-11-04 深夜那一轮改的）：
+
+```
+第 1 层 场景选择   车载 / 亲子 / 数字分身 / 时钟 / 图片播放   （点一条 = 进第 2 层）
+第 2 层 场景页     这个场景里现在说什么 + 页底那排按钮 + 每条可点进第 3 层
+第 3 层 明细       一条一个字段的大字读数，只回一层
+返回有两条：每页左上角那颗「返回」，和**从左边缘向右滑**（≥60 px，阈值还没实测，见 §9.4）
+```
+
+第 3 层不设"层数上限"这种说法：它是明细，不是新的一屏功能。**图片播放这一版是明着的空页**
+（屏上不放假数据，进去只有一句"这一版还没接上"），别当已通去讲。
+
+### 5.1b 屏在哪一页，手机怎么知道
+
+第 1、2 层每换一次页，屏就往手机发一条 `command{cmd:"page_report", args:{page:"…"}}`；
+第 3 层（明细）**不发**，设置格**不发**。发的是**通报**，不是申请 —— 手机不许因为它改任何东西，
+也**不会**把它写回 `state.ui.page` 来命令屏（那个字段是**回声**，屏这边只读不切页）。
+断线重连（`hello` 发出去）之后会补报一次当前页，不然手机上那一格要空到下次真翻页。
+下行 `dialog{dir:down, action:"kids"}` 会让屏翻到那一页 —— 只翻页，不做别的事。
 
 ### 5.2 一条硬的接线规则
 
@@ -143,12 +163,12 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 
 | 数据 | 来自 | App/服务端现在写了吗 | 屏这边 |
 ||-|-|-|-|
-| 链路 | 有没有收到 `state`（`screen_link_state_gap_s()`）、协商档位 | 有 | **画在第一行**（含 3 秒变灰、>10 秒重连） |
-| 手机画哪张 | `state.ui.card`（`status/sat/dialog/emotion/clock`） | 有 | **画在第二行"手机在画 X"**；页底三个按钮请求换的就是它 |
-| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有（点这张卡 = 发 `poke`） |
-| 对话 | 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有（`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴；5 秒后按约定清空） |
-| 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 有；**上行还没接**（§5.5，物理入口不能是 BOOT 长按 5 秒） |
-| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | **不在页上占一行**了 —— 脸本身就在演它（§5.4），页面要塞下"三个可点 + 一排按钮"就没有它的位置；`>carpet` 回读里照样有这一行 |
+| 链路 | 有没有收到 `state`（`screen_link_state_gap_s()`）、协商档位 | 有 | **画在第 1 层顶上那句**（没网=等网络、没连=未接入、等首帧、>10 秒=掉线重连、>3 秒=卡 N 秒、否则=已接入 v1/v2） |
+| 手机画哪张 | `state.ui.card`（`status/sat/dialog/emotion/clock`） | 有 | 画在**带按钮那两页（车载/亲子）的副行**"手机在画 X"；页底三个按钮请求换的就是它。**时钟页那一条行值也是它**（这一页的功能就是"看手机在画哪张"） |
+| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有：车载页「卫星」、亲子页「过境」；点条目 = 进第 3 层看明细 |
+| 对话 | 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有：车载/亲子各一行「对话」，数字分身页叫「答句」（`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴；5 秒后按约定清空） |
+| 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 有：车载页「呼救」、亲子页「安全」；**上行还没接**（§5.5，物理入口不能是 BOOT 长按 5 秒） |
+| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | 数字分身页「情绪」那一行；**脸本身也在演它**（§5.4）。`>carpet` 回读里照样有这一行 |
 
 **接线规则已经照 §5.2 落进代码**：`carpet_link.c` 的 `on_state` 只做一次
 `cJSON_Duplicate` + 换树（mutex 保护），`carpet_page_tick()` 在 LVGL 任务里取值、做差分。
@@ -162,11 +182,16 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 只是屏上不弹横幅 —— **屏上现在就没接 `on_event`**。
 
 **这些值有一条不看眼睛的验法**：串口发 `>carpet` 会把链路数字、各项当前值、
-还有 `sent=N last=<命令名>`（页上按出来的）原样打回来
-（`carpet_link_dump()`，在 `#if LV_USE_SNAPSHOT` 外面，正式构建里也在）。另一台电脑没有抓屏环境时，
+还有 `sent=N last=<命令名>`（页上按出来的）、`nav=<页名> reported=N last=<页名>`（翻出去的和报出去的）
+原样打回来（`carpet_link_dump()`，在 `#if LV_USE_SNAPSHOT` 外面，正式构建里也在）。另一台电脑没有抓屏环境时，
 这条就是判据来源，输出长什么样见 §9。
 
-### 5.4 表情这一行的真相：7 个情绪要塞进 6 个模式
+发串口命令**要先发一个裸字符 `w` 把屏叫醒**：Muse 的自动熄屏（默认 120 秒无操作）让
+`frame_tick` 在 `update_sleep()` 那里直接 return，而 `carpet_page_tick()` 挂在它后面的
+`update_chrome()` 里 —— 屏睡着的时候 `>page kids` 会被收下、`nav` 却不动，看着像翻页坏了。
+`>` 那一行**不算按键**，所以它自己不会唤醒屏幕（`w`=醒、`z`=睡，`muse_input.c` 的 `serial_task`）。
+
+### 5.4 表情这一路的真相：7 个情绪要塞进 6 个模式
 
 Muse 的 `muse_mode_t` 是**状态机**，不是情绪表：`BOOT / IDLE / LISTENING / THINKING / SPEAKING / ERROR / OFF`。
 脸的动画由 `mode` + `muse_state_set_level(float)`（音量/进度）+ `muse_state_set_caption(fmt, ...)` 三者共同决定，
@@ -198,15 +223,19 @@ dialog 帧 dir=down source=model|xiaozhi_cloud → MUSE_MODE_SPEAKING
 
 ### 5.5 屏能往手机发什么（我们自己的 App 要做服务端就得收这些）
 
-`screen_link_send_command(cmd, args)`，`cmd` 只收 schema 里那九个名字，别的当场退回
+`screen_link_send_command(cmd, args)`，`cmd` 只收 schema 里那十个名字，别的当场退回
 `ESP_ERR_INVALID_ARG`：`sos_press / sos_cancel / track_pull / set_demo_mode / set_fence /
-reboot_ui / card_next / card_auto / poke`。
+reboot_ui / card_next / card_auto / poke / page_report`。
 
 - `card_next` 的 `args.dir = ±1`、`poke` 是单击 —— **屏这边已经接上了**（2026-11-04 这一轮）：
-  页底三个按钮是 上一张=`card_next dir=-1` / 下一张=`card_next dir=+1` / 交回=`card_auto`，
-  页面上那三张状态卡（卫星/对话/呼救）点哪张都发 `poke`。
+  带按钮那两页（车载/亲子）页底三个按钮是 上一张=`card_next dir=-1` / 下一张=`card_next dir=+1` / 交回=`card_auto`；
+  `poke` 现在挂在**第 3 层明细页**那颗「戳一下」上（第 2 层的行点了是翻页，不是戳屏 —— 一层只干一件事）。
   屏只发**请求**，服务端不许收到"屏自己挑了张卡"这种东西 —— 屏上不出现 `card_set` 这条命令，
   也永远不要加（`ScreenLink.kt` 里那句"没有 card_set 是故意的"是同一件事）。
+- `page_report{page:"…"}` —— **屏在第 1/2 层每换一次页发一条**（第 3 层和设置格不发）。
+  这条是**通报**，不是申请：手机端只拿它更新首页那一格和"这句话归哪一页"，
+  **不许**反过来靠它决定屏该显示什么。取值必须是 schema 里那七个页名之一，
+  和 Kotlin `ScreenPage`、屏侧 `PAGE_NAMES` 由 `SchemaDriftTest` 逐条比着。
 - **屏上的点击不直接碰 socket**：点击只往一个四条深的队列里塞一条，发送在
   `carpet_cmd` 任务里做。原因不是洁癖 —— `screen_link_send_command()` 走 websocket，
   链路卡住时它能阻塞接近两秒，而点击回调跑在 LVGL 任务里，一阻塞整块屏就冻在那儿。
@@ -226,7 +255,7 @@ Muse 给的中文只有 **16 px 位图**两档（`muse_font_cjk_16.c` 是 Unifon
 位图字体的字号是刻死的，**这一页嫌字小就没有"调大一号"这条路**。
 
 做法是把老固件那套搬过来了：页面上用 LVGL 的 **tiny_ttf** 现算字号，字库是一份
-**只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，123,804 字节，
+**只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，154,528 字节（683 个码位），
 由 `../tools/muse_font_subset.py` 造：
 
 ```bash
@@ -245,10 +274,12 @@ cp D:/dev/tmp/carpet-muse.ttf firmware/screen/muse/font/carpet_font.ttf
 1. **改了车联页的文案就要重跑这一条**。漏收的字不是豆腐块 —— `fallback` 挂在 16 px 那份全量上，
    表现是**一行里字大小不一**，很好认，但也很容易被当成渲染 bug 去查半天。
 2. 那工具是**扫源码里的非 ASCII**，连注释一起扫（所以词表比页面真正画的字多，
-   现在 576 个码位）。想再压尺寸就得不扫注释，但那会漏掉查表翻出来的中文，别省这一步。
-3. 字号阶梯只有两档：24 px（条目名、链路那行）和 20 px（值、按钮、副行）。
-   再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下五行加一排按钮，
-   算过的余量写在 `carpet_page.c` 那三行注释里。
+   这一版扫到 685 个码位、子集里真的收下 683 个，缺的 `⇒` 和 `・` 只出现在注释和 EXTRA 里、不会上屏）。
+   想再压尺寸就得不扫注释，但那会漏掉查表翻出来的中文，别省这一步。
+3. 字号阶梯只有两档：28 px（页面标题、条目名）和 22 px（值、副行、按钮）。
+   再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下"六个入口 / 五行加一排按钮"：
+   300 宽的一列最高只能 356 px（半宽 150、半径 233 算出来的），实测第一层 330 px、
+   最满的场景页 338 px。算式写在 `carpet_page.c` 开头那几行注释里。
 
 `devices/sdkconfig.carpet` 里因此有三条，**第三条不是调优，是压 bug**：
 
@@ -551,3 +582,52 @@ D:/dev/jdk/jdk-17.0.20.1+1/bin/java.exe -cp "$JW;/d/dev/tmp/halfopen;$SL" HalfOp
 （屏侧收不到 FIN，`esp_websocket_client_close()` 自己也发不出去）。
 这条我造不出环境，所以不写"已修"。它现在能被抓出来：`wd` 只在真超时时 +1，
 下次现场再演砸，回读 `>carpet` 那一行就能一次分清「没踢」「踢了但连不上」「连上了但服务端不推首帧」三种死法。
+
+### 9.4 深夜那一轮：信息架构改成三层，翻页通了，但"报出去"还没通
+
+这轮做的事：把车联格里那一页五行的旧设计换成**场景选择 + 场景页 + 明细**三层，
+加上契约那半条 `page_report`（屏报页）和 `dialog.action`（手机拉起页）。
+方案本身是和产品那侧拉齐的：**定页权归屏，一页里说什么归手机** —— 所以屏翻页不问手机，
+手机也不能靠 `state.ui.page` 把屏拽走（那个字段是回声，固件读了只用于显示，不切页）。
+
+**这台板子上实测到的（build #14，COM8）**：
+
+```
+> w                    # 先叫醒，见下面那条坑
+> page kids   →  @page want=kids now=kids
+> carpet      →  @carpet nav=kids reported=0 last=-
+> page vehicle / clock / face 同法，nav 一条条跟着走，没有 unknown action page
+```
+
+也就是：**页名合法就翻、翻完 `nav=` 跟着变、脸那一格算 `face`、明细页不报**这一半是通的。
+`reported=0 last=-` 不是 bug —— 那条链路当时压根没连上。
+
+**这轮撞到的坑：`>` 那一行命令不唤醒屏幕。** `>page kids` 发下去 `nav` 不动，
+`>carpet` 里 `linked` 又一直是 0，看着像"pending 被吞了"或者翻页写坏了。
+真实原因是 Muse 的自动熄屏（`@status` 里 `"sleep":120`）：屏一睡，`frame_tick` 就在
+`update_sleep()` 那里 return，而 `carpet_page_tick()` 挂在后面的 `update_chrome()` 里 ——
+**整个 tick 不跑，pending 的名字就一直攒着**。串口发一个裸字符 `w`（醒）之后，
+前面那几条命令立刻一条条生效，一条没丢。所以判"翻页坏了"之前先 `w`，再 `>carpet`。
+这条对功能本身有个连带含义：手机在屏睡着时发来 `dialog.action`，**不是丢了，是延到醒过来那一刻**，
+这也对——睡着的屏不该自己亮。
+
+**还没验的，别当已验**：
+
+1. **`page_report` 真的上线**。屏里烧的 URL 是 `ws://192.168.43.1:8443`（手机开热点时它自己），
+   而这台机器上的彩排台在 `192.168.43.161:8443`，`@status` 里那块屏连的是热点、ping 得通，
+   但 Windows 默认挡入站 —— 现在这台机器上**没有**任何放行 8443 的规则（`netsh ... show rule` 查过，空）。
+   要走 PC 当服务端就得：跑一次 `../tools/firewall-allow-8443.cmd`（管理员，装完永久，
+   还原命令写在那份 .cmd 里）→ 改 `build-muse-s3-175-carpet/sdkconfig`（未跟踪那份）的 URL → 重编 → `app-flash`。
+   判据是**彩排台日志**出现 `cmd      page_report  args={"page":"kids"}`，而屏上 `>carpet` 变 `reported=1`。
+2. **手指走一遍三层**：入口点得进、场景页点得进明细、返回两条（左上角那颗 + 左边缘右滑）都回得去。
+   串口只能替我翻页，替不了"点得到"。
+3. **28 / 22 的字有没有掉到 16 px 那份 fallback**。这轮把字库重跑过一次
+   （123,804 → 154,528 字节，683 码位；缺的 `⇒`、`・` 只在注释里，不上屏），
+   掉 fallback 的表现是**一行里字大小不一**。正式构建 `CONFIG_LV_USE_SNAPSHOT` 是关的，
+   我这边抓不到像素，只能靠眼睛。
+4. 左滑返回那个 60 px 阈值（≈5.7 mm）还是纸面算的，没实测（任务 #42）。
+
+**代码侧的守卫**：`PAGE_NAMES` 那七条已经进了 `muse-carpet.patch`，
+`SchemaDriftTest` 里那条"它一旦出现就必须和 `ScreenPage` 一模一样"从此**真的在比**
+（以前是 `table == null` 静不比，等于没有守卫）；补丁在 baseline `cdc169d` 干净树上
+`git apply` 打过一次，12 个文件、字库解出来 154,528 字节一致。
