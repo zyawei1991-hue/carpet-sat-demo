@@ -691,7 +691,10 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x16),
-            verticalAlignment = Alignment.CenterVertically,
+            // **顶对齐**。居中那一版把右下角那个大数卡在"窗口开着，现在就能发"和
+            // "展开卫星详情"两行中间 —— 它到底是这句的尾巴，还是下面那行的注脚，读不出来。
+            // 这一格的大数永远是正文那一句的答案（开窗 / 561s），所以它必须和正文同一条带
+            verticalAlignment = Alignment.Top,
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
                 Text(

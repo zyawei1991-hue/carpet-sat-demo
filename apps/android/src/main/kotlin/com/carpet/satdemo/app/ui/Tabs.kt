@@ -2,7 +2,6 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -81,15 +80,30 @@ fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier =
     }
 }
 
-/** Tab3 家人：亲子 + 健康 + 共享对象三个场景的卡合在一页（§5.1 里 Tab3 就是这个口径） */
+/**
+ * Tab3 家人：亲子 + 健康 + 共享对象三个场景的卡合在一页（§5.1 里 Tab3 就是这个口径）。
+ *
+ * **这一页自己列一张表，不再拿两个场景的 cards 拼**。拼出来的结果是十二张同宽同底同圆角的
+ * 方块一路排到底，中间没有一句话告诉用户"这几张是一件事"—— 那是全 App 最乱的一屏，
+ * 而看这一页的人是家长，恰恰最不该让他自己找。现在按 守护 / 亲子陪伴 / 健康 / 共享对象 四段走。
+ *
+ * 拼表还带来两张重复：`queue`（待发队列）和车辆页那张同名，`sos` 和首页那颗钮同屏两次。
+ * 卫星管道的事留在车辆页讲，这一页只讲家里的事（§5.2「一页两张同名重卡是最直接的乱」）。
+ */
 @Composable
 fun FamilyTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
-    val keys = (Scene.Kids.profile.cards + Scene.Health.profile.cards + listOf("share.objects")).distinct()
+    val keys = listOf(
+        "dock",
+        "fence", "position", "sos",
+        "kids.control", "kids.growth", "kids.ai",
+        "health.vitals", "health.checkin", "health.agent",
+        "share.objects",
+    )
     Page("家人", "亲子陪伴 · 健康助手 · 共享对象", modifier = modifier) {
         // 「娃在屏上说了啥」这一问读的就是那份记录：圆屏在亲子页时说的话已经归到这一串里
         SceneAsk(app, TurnScene.family, status.screenPage, "问一句家里", listOf("娃在屏上说了啥", "额度还剩几条", "圆屏怎么连"))
-        CardStream(keys, scope)
+        CardStream(keys, scope, grouped = true)
     }
 }
 
@@ -165,6 +179,11 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
  * 主理人的"能碰什么"。首页那张卡只管问与答，这一张管权限：
  * **档位逐条列出每条技能当前准不准** —— 只写一句"已放开"的话，用户不知道放开的是什么，
  * 出事时也读不出是哪一条越了档（§6 第 3 条要的是能核对，不是能开关）。
+ *
+ * **拆成两张卡**。上一版这是一张七百多 dp 高的方块：端点、密钥、五档芯片、七行准入清单、
+ * 一句脚注全在一个圆角里 —— 那是五张卡挤在一个描边里，「我的」整页读下来只有七个同宽方块，
+ * 没有一处告诉用户哪儿换了一件事。现在「主理人与模型」管配置，「它现在会做什么」管清单，
+ * 中间那道缝就是这两件事的分界。
  */
 @Composable
 private fun AssistantSettings(app: AppRuntime) {
@@ -173,21 +192,24 @@ private fun AssistantSettings(app: AppRuntime) {
     val rows = remember(granted) { app.aiSkills() }
     InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
         CardTitle("主理人与模型", trailing = if (endpoint.configured) endpoint.model else "只用本机状态作答")
-        ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() })
-        ValueRow("密钥", if (endpoint.apiKey.isBlank()) null else "已存本机")
+        ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() } ?: "没配（只用本机状态）")
+        ValueRow("密钥", if (endpoint.apiKey.isBlank()) "没存" else "已存本机")
         // 档位标题必须大过它管的三枚芯片。之前这里用 11sp 的 SectionLabel，
         // 而下面的芯片是 12.5sp —— 屏幕上是小字在领读，标题在当注脚
         SectionHead("权限档：${granted.label}", "往右每高一档都更危险")
-        // 五档一排，384dp 装不下。Row 不换行，装不下就把字竖着拆成一列一列 —— 和隐私档位那一格同一条 bug
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-        ) {
-            PermissionTier.entries.forEach { t ->
-                Chip(t.label, selected = t === granted) { app.setAiGranted(t) }
-            }
-        }
-        SectionHead("它现在会做什么")
+        // 五档一行装不下，横向滚的话最后一枚「不可逆动作」只剩半个词 —— 这是权限档，
+        // 切掉的那半恰恰是最该看清的一档。折成 3+2，一枚都不缺字
+        ChipBand(PermissionTier.entries.map { t ->
+            ChipSpec(t.label, selected = t === granted) { app.setAiGranted(t) }
+        })
+        Text(
+            "密钥只存这台手机。「发求救」不会由对话发出，只会提示你自己去长按。",
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
+    }
+    InkCard(icon = MIcons.task) {
+        CardTitle("它现在会做什么", trailing = "${rows.count { it.allowed }}/${rows.size} 条放开")
         rows.forEach { r ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -200,10 +222,5 @@ private fun AssistantSettings(app: AppRuntime) {
                 Badge(if (r.allowed) "准许" else "拦下", if (r.allowed) Tone.Ok else Tone.Wait)
             }
         }
-        Text(
-            "密钥只存这台手机。「发求救」不会由对话发出，只会提示你自己去长按。",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
     }
 }

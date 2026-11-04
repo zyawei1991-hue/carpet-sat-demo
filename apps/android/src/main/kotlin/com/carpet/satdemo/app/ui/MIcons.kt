@@ -10,6 +10,7 @@ import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.automirrored.outlined.BluetoothSearching
 import androidx.compose.material.icons.outlined.CardMembership
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.CellTower
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.ChildCare
@@ -95,6 +96,8 @@ object MIcons {
     val kid = Icons.Outlined.ChildCare
     val health = Icons.Outlined.MonitorHeart
     val send = Icons.AutoMirrored.Outlined.Send
+    /** 页尾那三颗动作：Bolt 是"能按一下"，不是"求救"（Sos 已经被真求救占了） */
+    val action = Icons.Outlined.Bolt
     val settings = Icons.Outlined.Settings
     val speech = Icons.AutoMirrored.Outlined.Chat
 

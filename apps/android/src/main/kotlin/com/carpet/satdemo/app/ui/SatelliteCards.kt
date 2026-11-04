@@ -201,8 +201,17 @@ fun SosCard(s: CardScope) {
         )
         // 没按过就不该有"这次怎么样"那一句：engine 里的 sosSend 有初始值，
         // 直接念出来会让首屏一上来就挂一行失败结论
-        if (level == null || level == SosLevel.normal) {
-            Text("还没触发过。按住下面那颗钮 3 秒，或长按圆屏侧键", style = Type.Body, color = Ink.TextMid)
+        val idle = level == null || level == SosLevel.normal
+        if (idle) {
+            // **"怎么触发"这一件事在这张卡里只说一遍**。上一版说了三遍：
+            // 「按住下面那颗钮 3 秒，或长按圆屏侧键」/「按住底部中间那颗红色 SOS，三秒才生效，中途松手就取消」/
+            // 「圆屏侧键长按同样能触发」。三句是同一条操作，卡片因此三百多 dp 高，
+            // 而家人页那屏上，重复的正文比它要回答的"现在什么状态"长得多
+            Text(
+                "还没触发过。按住底部中间那颗红色 SOS 三秒才生效，中途松手就取消；长按圆屏侧键同样能触发",
+                style = Type.Body,
+                color = Ink.TextMid,
+            )
         } else {
             Text(SosCopy.statusLine(send, snap?.sat?.countdown(), platformAcked), style = Type.Body, color = Ink.TextMid)
         }
@@ -232,12 +241,11 @@ fun SosCard(s: CardScope) {
             }
         } else {
             // 这张卡里不再画第二颗长按钮：导航栏正中那颗（[SosDial]）每一页都在，
-            // 同一屏两颗 SOS，出事时人只会先按错一个。这张卡管的是"那颗按下去之后是什么状态"
-            Text(
-                "按住底部中间那颗红色 SOS，三秒才生效，中途松手就取消",
-                style = Type.Caption,
-                color = Ink.TextLow,
-            )
+            // 同一屏两颗 SOS，出事时人只会先按错一个。这张卡管的是"那颗按下去之后是什么状态"。
+            // 没触发过的时候上面那句已经讲完怎么按了，这里不再讲第二遍
+            if (!idle) {
+                Text("三秒才生效，中途松手就取消", style = Type.Caption, color = Ink.TextLow)
+            }
         }
         if (fired) {
             Button(
@@ -246,11 +254,13 @@ fun SosCard(s: CardScope) {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("撤销这次 SOS") }
         }
-        Text(
-            "圆屏侧键长按同样能触发。没确认时换到开阔处再按一次，比等下次过境快",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
+        if (!idle) {
+            Text(
+                "没确认时换到开阔处再按一次，比等下次过境快",
+                style = Type.Caption,
+                color = Ink.TextLow,
+            )
+        }
     }
 }
 

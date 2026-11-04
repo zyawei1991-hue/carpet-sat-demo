@@ -14,10 +14,18 @@ import androidx.compose.runtime.CompositionLocalProvider
 enum class CardGroup(val label: String, val note: String?) {
     /** 不分组：跟着前面的内容走，不另起一段 */
     Inline("", null),
-    Vehicle("车况", null),
+    /** 越界、静止、求救 —— 三件事都是"出事了怎么办"，所以是一组 */
     Guard("守护", null),
+    Vehicle("车况", null),
     Satellite("卫星兜底", "蜂窝不通的时候才轮到它"),
-    Family("家人", null),
+    /**
+     * 亲子与健康分开。原来这两堆共用一个 `Family("家人")`，于是家人页分段等于没分：
+     * 管控、成长、AI 育儿、体征、打卡、主理人六张卡挂在同一个标题下面，
+     * 而家长找"今天新词"和找"血压"根本不是一件事。
+     */
+    Kids("亲子陪伴", null),
+    Health("健康", null),
+    Share("共享对象", null),
     Account("订阅与隐私", null),
 }
 
@@ -29,14 +37,14 @@ object Cards {
     val registry = CardRegistry(
         listOf(
             // 卫星守护：数据全部来自 StatePayload / DemoRuntime，没有一张卡可以自己编数
-            CardDescriptor("sos", "紧急求助", CardGroup.Inline, setOf(Capability.SatelliteLink)) { SosCard(it) },
+            CardDescriptor("sos", "紧急求助", CardGroup.Guard, setOf(Capability.SatelliteLink)) { SosCard(it) },
             CardDescriptor("link", "链路", CardGroup.Inline, setOf(Capability.SatelliteLink)) { LinkCard(it) },
             CardDescriptor("pass", "下次过境", CardGroup.Satellite, setOf(Capability.Ephemeris)) { PassWindowCard(it) },
             CardDescriptor("terminal", "卫星终端", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TerminalCard(it) },
             CardDescriptor("queue", "待发队列", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { QueueCard(it) },
             CardDescriptor("usage", "卫星用量", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { UsageCard(it) },
             CardDescriptor("tpi", "终端位置", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TpiCard(it) },
-            CardDescriptor("position", "位置", CardGroup.Vehicle, setOf(Capability.PositionSource)) { PositionCard(it) },
+            CardDescriptor("position", "位置", CardGroup.Guard, setOf(Capability.PositionSource)) { PositionCard(it) },
             CardDescriptor("fence", "电子围栏", CardGroup.Guard, setOf(Capability.Geofence)) { FenceCard(it) },
             CardDescriptor("sentinel", "哨兵模式", CardGroup.Guard, setOf(Capability.Sentinel)) { SentinelCard(it) },
             CardDescriptor("dock", "圆屏", CardGroup.Inline, setOf(Capability.Dock)) { DockCard(it) },
@@ -48,19 +56,19 @@ object Cards {
             CardDescriptor("vehicle.energy", "能耗", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleEnergyCard(it) },
 
             // 亲子
-            CardDescriptor("kids.control", "亲子管控", CardGroup.Family, setOf(Capability.ChildDevice)) { KidsControlCard(it) },
-            CardDescriptor("kids.growth", "成长记录", CardGroup.Family, setOf(Capability.ChildDevice)) { KidsGrowthCard(it) },
-            CardDescriptor("kids.ai", "AI 育儿", CardGroup.Family, setOf(Capability.AiAgent)) { KidsAiCard(it) },
+            CardDescriptor("kids.control", "亲子管控", CardGroup.Kids, setOf(Capability.ChildDevice)) { KidsControlCard(it) },
+            CardDescriptor("kids.growth", "成长记录", CardGroup.Kids, setOf(Capability.ChildDevice)) { KidsGrowthCard(it) },
+            CardDescriptor("kids.ai", "AI 育儿", CardGroup.Kids, setOf(Capability.AiAgent)) { KidsAiCard(it) },
 
             // 健康
-            CardDescriptor("health.vitals", "体征", CardGroup.Family, setOf(Capability.HealthBand), hero = true) { HealthVitalsCard(it) },
-            CardDescriptor("health.checkin", "打卡", CardGroup.Family, setOf(Capability.HealthBand)) { HealthCheckinCard(it) },
-            CardDescriptor("health.agent", "健康主理人", CardGroup.Family, setOf(Capability.AiAgent)) { HealthAgentCard(it) },
+            CardDescriptor("health.vitals", "体征", CardGroup.Health, setOf(Capability.HealthBand), hero = true) { HealthVitalsCard(it) },
+            CardDescriptor("health.checkin", "打卡", CardGroup.Health, setOf(Capability.HealthBand)) { HealthCheckinCard(it) },
+            CardDescriptor("health.agent", "健康主理人", CardGroup.Health, setOf(Capability.AiAgent)) { HealthAgentCard(it) },
 
             // 综合场景
             CardDescriptor("social.avatar", "数字分身", CardGroup.Inline, setOf(Capability.AiAgent)) { AvatarCard(it) },
             CardDescriptor("social.a2a", "A2A 社交", CardGroup.Inline, setOf(Capability.AiAgent)) { A2aCard(it) },
-            CardDescriptor("share.objects", "共享对象", CardGroup.Inline, setOf(Capability.Account)) { ShareObjectsCard(it) },
+            CardDescriptor("share.objects", "共享对象", CardGroup.Share, setOf(Capability.Account)) { ShareObjectsCard(it) },
 
             // 我的
             CardDescriptor("device.manager", "我的设备", CardGroup.Inline, setOf(Capability.Dock)) { DeviceManagerCard(it) },

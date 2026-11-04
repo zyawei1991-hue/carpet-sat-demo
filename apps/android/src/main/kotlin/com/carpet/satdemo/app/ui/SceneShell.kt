@@ -6,8 +6,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
@@ -28,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
@@ -38,25 +37,21 @@ import com.carpet.satdemo.core.runtime.DemoRuntime
  * 因为连接握在 [AppRuntime] 上，这一屏只是换一批卡片。
  */
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SceneSwitcher(app: AppRuntime, modifier: Modifier = Modifier) {
     val current by app.scene.collectAsState()
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
-        // 五个全排在一条横向可滚的带上，不再"先摆三个 + 更多场景（2）"：
-        // 那一行折叠让首屏多出一条只有我们自己在乎的链接，而滚动条本来就装得下五个。
         // **上面不再重复写一遍场景名** —— 选中那枚是实底蓝，它自己就是标题，
-        // 标题行再念一次就是同一屏两个重心（截图里"车载守护"出现过两次）
-        // **五个场景全部排得出来，不再横向切掉最后一个**。上一版这里是一条横向可滚的带，
-        // 截图里第五枚只剩一个"数"字 —— 没有箭头也没有渐隐，第一次看会以为是渲染坏了。
-        // 改成折行：窄屏上它变成两排，每一枚都完整可读，也不用猜"这条还能往右划吗"
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-            verticalArrangement = Arrangement.spacedBy(Grid.x8),
-        ) {
-            Scene.entries.toList().forEach { sc -> Chip(sc.label, selected = sc === current) { app.sceneOn(sc) } }
-        }
+        // 标题行再念一次就是同一屏两个重心（截图里"车载守护"出现过两次）。
+        //
+        // 五枚场景分带排（3+2）：既不是横向滚动（会把第五枚切掉半个"数"字，
+        // 没有箭头没有渐隐，第一次看会以为是渲染坏了），也不是让它自己折
+        // （384dp 上量出来是 4+1，掉下去那一枚会被读成"另外还有一个别的"）。
+        ChipBand(
+            Scene.entries.toList().map { sc ->
+                ChipSpec(sc.label, selected = sc === current) { app.sceneOn(sc) }
+            },
+        )
         // 副标题只留场景自己那句话。"默认隐私：只上传必要字段"是我们内部的档位口径，
         // 挂在标题下面，用户读到的是"这行在跟我讲规则"，不是"现在是什么模式"
         Text(current.subtitle, style = Type.Caption, color = Ink.TextLow)
@@ -112,23 +107,29 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
  *
  * **不横向滚**：三个词在任何一档视口都装得下，而横向滚动会让人以为后面还有第四个。
  * 最小高度 48dp —— Material 的触摸目标下限，点得着比它长得瘦重要。
+ *
+ * **装进一张卡，并给它一个标题**：Mate 60 的整页截图上，这三颗裸排在页面底色上，
+ * 前后都是卡片，于是它们读起来像上一页掉下来的三块碎片，而不像"这一页能做的事"。
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-    ) {
-        actions.forEach { a ->
-            OutlinedButton(
-                onClick = { app.say("「$a」还没接：需要车辆总线或账号通道") },
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                shape = RoundedCornerShape(Round.Chip),
-                border = BorderStroke(1.dp, Ink.Outline),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink.TextHigh, containerColor = Ink.Sunk),
-                contentPadding = PaddingValues(horizontal = Grid.x8, vertical = Grid.x4),
+    InkCard(icon = MIcons.action) {
+        CardTitle("常用动作", trailing = "要车机总线")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
             ) {
-                Text(a, style = Type.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            actions.forEach { a ->
+                OutlinedButton(
+                    onClick = { app.say("「$a」还没接：需要车辆总线或账号通道") },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(Round.Chip),
+                    border = BorderStroke(1.dp, Ink.Outline),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink.TextHigh, containerColor = Color.Transparent),
+                    contentPadding = PaddingValues(horizontal = Grid.x8, vertical = Grid.x4),
+                ) {
+                    Text(a, style = Type.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
     }

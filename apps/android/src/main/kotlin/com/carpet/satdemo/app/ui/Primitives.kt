@@ -272,6 +272,15 @@ private fun RowLineHead(title: String, trailing: String?) {
     }
 }
 
+/**
+ * 值缺失时屏幕上那三个字。
+ *
+ * 原来这里是 `"--"`：整页截图里「接入点 --」「卡号 --」看着像字段没渲染出来，
+ * 而它恰恰是最该说人话的地方 —— "--" 不告诉用户是"没有这个东西"还是"App 没读到"。
+ * 两个破折号在等宽字体下还会被读成一串范围符号。
+ */
+const val NoValue = "没拿到"
+
 /** 组里的一行。行与行之间一根 [HairLine]，比"每行一张卡"密得多也好读得多 */
 @Composable
 fun RowLine(
@@ -293,7 +302,7 @@ fun RowLine(
         Text(label, style = Type.Body.copy(color = Ink.TextMid), modifier = Modifier.padding(end = Grid.x12))
         if (warming) SkeletonBar(width = 56.dp)
         else Text(
-            value ?: "--",
+            value ?: NoValue,
             // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
             style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,
             color = when {
@@ -567,6 +576,34 @@ fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClic
     }
 }
 
+/** 一排芯片里的一枚：写什么、现在选没选、按下去干什么 */
+class ChipSpec(val label: String, val selected: Boolean, val onSelect: () -> Unit)
+
+/**
+ * 选一档的芯片带，**每行最多 [perRow] 枚**。
+ *
+ * 为什么不是 `FlowRow` 让它自己折：这一版 Compose 的 FlowRow 没有 `maxItemsInPerRow`
+ * （传了直接编译不过），让它自己折，384dp 上五枚场景就量出 4+1 —— 第五枚一个人掉在第二行。
+ * 五选一是**一排控件**，不是列表：掉下来的那一枚会被读成"哦，另外还有一个别的"，
+ * 而它明明是同一组的第五个选项。手工分带就是为了让它稳定落成 3+2。
+ *
+ * 为什么也不是横向滚动那条带：滚动会把最后一枚切掉半截（隐私档那枚「本地留存，仅 SOS 出网」
+ * 就是这么被切掉的），而切掉的恰恰是最该看清的一档。
+ *
+ * 每行的宽度上限按 360dp / 字号 1.3 量过：场景三枚 283dp、权限档三枚 251dp、
+ * 隐私档两枚 264dp，都还在 328dp 里 —— 分带不会把字挤成竖排。
+ */
+@Composable
+fun ChipBand(items: List<ChipSpec>, perRow: Int = 3, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        items.chunked(perRow).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
+                row.forEach { Chip(it.label, selected = it.selected, onClick = it.onSelect) }
+            }
+        }
+    }
+}
+
 /**
  * 长说明文字。**默认收起，点标题才展开** —— 上一版把"配对为什么是这三步""为什么不先做自动发现"
  * 这类工程说明直接摊在首页正文里，那是把 changelog 当界面用，也是"信息乱"最实在的来源。
@@ -787,7 +824,7 @@ fun ValueRow(
         Text(label, style = Type.Caption.copy(lineHeight = 21.sp), modifier = Modifier.padding(end = Grid.x12))
         if (warming) SkeletonBar(width = 56.dp)
         else Text(
-            value ?: "--",
+            value ?: NoValue,
             // 等宽只换字体、不掉字号：值比标签小一档会被读成"这行不重要"，而它恰恰是这行的答案
             style = if (mono) Type.Body.copy(fontFamily = FontFamily.Monospace) else Type.Body,
             color = when {

@@ -1,14 +1,12 @@
 package com.carpet.satdemo.app.ui
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -232,7 +230,9 @@ fun SubscriptionCard(s: CardScope) {
             if (u.capacity > 0) "${u.handedOver} / ${u.capacity} 条" else "还没读到终端型号",
             if (u.pressure >= 0.9f) Tone.Alert else Tone.Neutral,
         )
-        ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
+        // **一条用满 0 的进度条不是"零"，是一条没人能读懂的横线**。
+        // 0/50 那三个字已经把额度说完了，条只在真的开始占用之后才有信息
+        if (u.pressure > 0f) ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
         ValueRow("到期", "2026-12-01")
         ValueRow("套餐", "守护版")
     }
@@ -267,7 +267,10 @@ fun PrivacyCard(s: CardScope) {
 /**
  * 一档隐私。**不排成"标签 — 芯片 — 说明"三列**：384dp（Mate60）上三列装不下，
  * 最右那一列被压成一字一行的竖排、左边留一整片空白 —— Row 不换行，装不下就只能拆字。
- * 改成上下两行，档位那一行走横向滚动。
+ *
+ * **也不能横向滚**。上一版把三列改成"一行 + 横向滚动"，结果第三枚「本地留存，仅 SOS 出网」
+ * 被容器边切掉后半截（整页截图里就在「只上传必要字段」右边）—— 而这是隐私档：
+ * 用户选的是"我的数据去哪儿"，选项被切一半等于让他猜。改成折行，三枚都在，一枚都不缺字。
  *
  * 只读的那一档（底座默认）不给三枚可点的芯片：它不能选，画成能选的样子是骗人。
  */
@@ -283,12 +286,13 @@ private fun TierRow(label: String, tier: PrivacyTier, onPick: ((PrivacyTier) -> 
         if (onPick == null) {
             Text(tier.label, style = Type.Caption, color = Ink.TextLow)
         } else {
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-            ) {
-                PrivacyTier.entries.forEach { t -> Chip(t.label, selected = t === tier) { onPick(t) } }
-            }
+            // 两枚一行：这三档名字长短差很多（「全量上传」约 74dp，「本地留存，仅 SOS 出网」约 154dp），
+            // 三枚挤一行在 360dp 上就超宽 —— 不换行的那一行会把最后一枚切掉半截，
+            // 而隐私档被切掉的那半截恰恰是最该看清的一档
+            ChipBand(
+                PrivacyTier.entries.map { t -> ChipSpec(t.label, selected = t === tier) { onPick(t) } },
+                perRow = 2,
+            )
         }
     }
 }
@@ -312,7 +316,7 @@ fun DeviceManagerCard(s: CardScope) {
         ValueRow(
             "常驻",
             when {
-                !st.running -> "没跑"
+                !st.running -> "没跑起来"
                 s.app.guardPinned -> "后台常驻，锁屏也不断"
                 else -> "只在 App 开着时跑：定位权限没批，锁屏会停"
             },
