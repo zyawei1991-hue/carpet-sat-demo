@@ -25,20 +25,24 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 11 个文件、651 行新增 / 19 行删（`muse-carpet.patch`，893 行）：
+- 我们的全部改动 = 12 个文件、910 行新增 / 20 行删，外加一份 123,804 字节的字库
+  （`muse-carpet.patch`，2,902 行，`git diff --binary` 打的，字库在里面是 base85 段）：
   ```
-  esp32/components/muse/CMakeLists.txt       |  10 +-
+  esp32/components/muse/CMakeLists.txt       |  14 +-   (+embed 那行)
   esp32/components/muse/Kconfig              |  14 +
-  esp32/components/muse/carpet/carpet_link.c | 254 +   (新)
-  esp32/components/muse/carpet/carpet_link.h |  50 +   (新)
-  esp32/components/muse/carpet/carpet_page.c | 167 +   (新)
+  esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 123804   (新，字库)
+  esp32/components/muse/carpet/carpet_link.c | 330 +   (新，链路 + 上行命令队列)
+  esp32/components/muse/carpet/carpet_link.h |  68 +   (新)
+  esp32/components/muse/carpet/carpet_page.c | 290 +   (新，Muse 样式的可点菜单)
   esp32/components/muse/carpet/carpet_page.h |  21 +   (新)
   esp32/components/muse/muse_input.c         |  17 +   (>carpet 回读 + bench 命令 ui=carpet)
-  esp32/components/muse/muse_ui.c            | 103 +-
+  esp32/components/muse/muse_ui.c            | 129 +-   (tile + 手势吞并修 + 圆点可点)
   esp32/components/muse/muse_ui.h            |   5 +
-  esp32/devices/sdkconfig.carpet             |  20 +   (新)
+  esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条)
   esp32/main/muse_glue.c                     |   9 +
   ```
+  这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
+  再 `git apply`，12 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
   `esp32/components/screen_link/` **不在 patch 里** —— 它就是把本仓库
   `firmware/screen/components/screen_link/` 整目录复制过去，只换一个 `CMakeLists.txt`（原因见 §4），
   复制命令在 §3。
@@ -54,6 +58,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 ```bash
 # 1) 解 zip 得到上游树，做个 baseline 提交，然后打补丁
 git apply muse-carpet.patch                       # 冲突就 git apply -3
+#    patch 里带那份字库（carpet/carpet_font.ttf）。不想打整份补丁、只搬我们的目录时，
+#    这一份必须单独拷过去 —— CMakeLists 里那行 embed 指的就是它，缺了直接 configure 失败：
+cp firmware/screen/muse/font/carpet_font.ttf <muse>/esp32/components/muse/carpet/
 
 # 2) 搬 Screen-Link 客户端组件
 cp -r firmware/screen/components/screen_link  <muse>/esp32/components/screen_link
@@ -119,19 +126,20 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 
 所以两边接法只有一种：**回调里只存快照 + 置脏，取值在 tick 里做**。
 现成的样板就是 `carpet_link.c`（写）+ `carpet_page.c:carpet_page_tick()`（读），
-`set_value()` 里那句 `strcmp` 就是差分——没变就不重画。
+`set_line()` 里那句 `strcmp` 就是差分——没变就不重画。
 
-### 5.3 五行分别吃什么
+### 5.3 每一项分别吃什么、画在哪
 
 字段名都取自 `protocol/screen-link.schema.json`（`state` 那一支），不是我编的：
 
-| 屏上行 | 数据来自 | App/服务端现在写了吗 | 屏这边消费了吗 |
+| 数据 | 来自 | App/服务端现在写了吗 | 屏这边 |
 ||-|-|-|-|
-| 链路 | 有没有收到 `state`（`screen_link_state_gap_s()`）、协商档位 | 有 | **有**（含 3 秒变灰、>10 秒重连） |
-| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有（已上板，实测见 §9） |
-| 对话 | `state.ui.card`（`status/sat/dialog/emotion/clock`）+ 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有（同上。`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴） |
-| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | 行上有值；**脸还跟着 Muse 自己的语音链路走**，见 §5.4 |
-| 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 行上有值；上行还没接（§5.5） |
+| 链路 | 有没有收到 `state`（`screen_link_state_gap_s()`）、协商档位 | 有 | **画在第一行**（含 3 秒变灰、>10 秒重连） |
+| 手机画哪张 | `state.ui.card`（`status/sat/dialog/emotion/clock`） | 有 | **画在第二行"手机在画 X"**；页底三个按钮请求换的就是它 |
+| 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有（点这张卡 = 发 `poke`） |
+| 对话 | 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有（`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴；5 秒后按约定清空） |
+| 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 有；**上行还没接**（§5.5，物理入口不能是 BOOT 长按 5 秒） |
+| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | **不在页上占一行**了 —— 脸本身就在演它（§5.4），页面要塞下"三个可点 + 一排按钮"就没有它的位置；`>carpet` 回读里照样有这一行 |
 
 **接线规则已经照 §5.2 落进代码**：`carpet_link.c` 的 `on_state` 只做一次
 `cJSON_Duplicate` + 换树（mutex 保护），`carpet_page_tick()` 在 LVGL 任务里取值、做差分。
@@ -144,7 +152,8 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 事件那边 `ack` 是组件无条件回的（`screen_link.c:370`），不接 `on_event` 也不会让手机端重试风暴，
 只是屏上不弹横幅 —— **屏上现在就没接 `on_event`**。
 
-**这五行有一条不看眼睛的验法**：串口发 `>carpet` 会把链路数字和五行当前值原样打回来
+**这些值有一条不看眼睛的验法**：串口发 `>carpet` 会把链路数字、各项当前值、
+还有 `sent=N last=<命令名>`（页上按出来的）原样打回来
 （`carpet_link_dump()`，在 `#if LV_USE_SNAPSHOT` 外面，正式构建里也在）。另一台电脑没有抓屏环境时，
 这条就是判据来源，输出长什么样见 §9。
 
@@ -184,19 +193,72 @@ dialog 帧 dir=down source=model|xiaozhi_cloud → MUSE_MODE_SPEAKING
 `ESP_ERR_INVALID_ARG`：`sos_press / sos_cancel / track_pull / set_demo_mode / set_fence /
 reboot_ui / card_next / card_auto / poke`。
 
-- `card_next` 的 `args.dir = ±1`、`poke` 是单击行 → 这两条要接在**行的点击手势**上，屏这边还没做。
+- `card_next` 的 `args.dir = ±1`、`poke` 是单击 —— **屏这边已经接上了**（2026-11-04 这一轮）：
+  页底三个按钮是 上一张=`card_next dir=-1` / 下一张=`card_next dir=+1` / 交回=`card_auto`，
+  页面上那三张状态卡（卫星/对话/呼救）点哪张都发 `poke`。
+  屏只发**请求**，服务端不许收到"屏自己挑了张卡"这种东西 —— 屏上不出现 `card_set` 这条命令，
+  也永远不要加（`ScreenLink.kt` 里那句"没有 card_set 是故意的"是同一件事）。
+- **屏上的点击不直接碰 socket**：点击只往一个四条深的队列里塞一条，发送在
+  `carpet_cmd` 任务里做。原因不是洁癖 —— `screen_link_send_command()` 走 websocket，
+  链路卡住时它能阻塞接近两秒，而点击回调跑在 LVGL 任务里，一阻塞整块屏就冻在那儿。
+- 串口 `>carpet` 现在多回读一行 `@carpet sent=N last=<命令名>`：按了按钮但 `sent` 不动，
+  就是点击没吃到（版式/遮挡问题）；`sent` 动了屏上"手机在画"却不变，是服务端没接或没写回
+  `state.ui.card`。这两种坏的修法完全不同，别靠猜。
 - 三条都是**请求**：画哪张卡最终仍由服务端写回 `state.ui.card`，所以 SOS 进行中你可以顶掉切卡请求。
 - `screen_link_send_dialog_up(text, source, ...)` 已经有了（`turn_id` 形如 `s-<开机随机>-<自增>`，
   跨重启唯一，服务端按它去重）。
 
 **SOS 的物理入口不能是 BOOT 长按 5 秒** —— Muse 把那个组合当成恢复出厂用了。这是这一版必须换掉的老设计。
 
-### 5.6 字号这件事先别按老固件想
+### 5.6 字号：这一页现在自带一份小字库，别再按 16 px 想
 
-圆屏可读的中文只有 Muse 那份 16 px CJK 两档可选：`muse_font_cjk_16.c`（Unifont 1bpp，约 1.2MB flash）
-或 `muse_font_cjk_noto_16.c`（Noto Sans SC 4bpp，GB2312 那 6763 字，约 910KB，车联页 select 的就是这份）。
-**老固件那套 tiny_ttf 32 px hero 大字在这条路上没有对应物** —— Muse 没有现成的大字号 CJK，
-要大得先生成字体。排版因此照 Muse 的 16 px 走（行高 44、列宽 340、居中偏下 24px）。
+Muse 给的中文只有 **16 px 位图**两档（`muse_font_cjk_16.c` 是 Unifont 1bpp 约 1.2MB flash，
+`muse_font_cjk_noto_16.c` 是 Noto Sans SC 4bpp、GB2312 那 6763 字、约 910KB，车联页 select 的是这份）。
+位图字体的字号是刻死的，**这一页嫌字小就没有"调大一号"这条路**。
+
+做法是把老固件那套搬过来了：页面上用 LVGL 的 **tiny_ttf** 现算字号，字库是一份
+**只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，123,804 字节，
+由 `../tools/muse_font_subset.py` 造：
+
+```bash
+# 三个参数：源字体（整片 Noto，这台在 D:/dev/tmp/carpet-noto.ttf）、扫哪个目录、写到哪
+D:/dev/python311/python.exe firmware/screen/tools/muse_font_subset.py \
+    D:/dev/tmp/carpet-noto.ttf \
+    <muse>/esp32/components/muse/carpet \
+    D:/dev/tmp/carpet-muse.ttf
+# 然后两处都要换：fork 里那份是编译用的，我们仓库这份是别人重编用的
+cp D:/dev/tmp/carpet-muse.ttf <muse>/esp32/components/muse/carpet/carpet_font.ttf
+cp D:/dev/tmp/carpet-muse.ttf firmware/screen/muse/font/carpet_font.ttf
+```
+
+三条规矩：
+
+1. **改了车联页的文案就要重跑这一条**。漏收的字不是豆腐块 —— `fallback` 挂在 16 px 那份全量上，
+   表现是**一行里字大小不一**，很好认，但也很容易被当成渲染 bug 去查半天。
+2. 那工具是**扫源码里的非 ASCII**，连注释一起扫（所以词表比页面真正画的字多，
+   现在 576 个码位）。想再压尺寸就得不扫注释，但那会漏掉查表翻出来的中文，别省这一步。
+3. 字号阶梯只有两档：24 px（条目名、链路那行）和 20 px（值、按钮、副行）。
+   再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下五行加一排按钮，
+   算过的余量写在 `carpet_page.c` 那三行注释里。
+
+`devices/sdkconfig.carpet` 里因此有三条，**第三条不是调优，是压 bug**：
+
+```
+CONFIG_LV_USE_TINY_TTF=y
+CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT=64
+CONFIG_LV_TINY_TTF_CACHE_KERNING_CNT=0     # 不为 0 会画坏字（LVGL 的跨缓存释放，另一台实拍过）
+```
+
+字模缓存落在 PSRAM：Muse 把 LVGL 的分配器接到了 PSRAM（`muse_lv_mem.c`），
+所以这两档缓存不会来抢内部 RAM。开机判据就一行：
+
+```
+I (2679) carpet_page: tiny_ttf 123804 字节 → 24/20px
+```
+
+镜像尺寸这笔账要盯着：app 分区 4M，这一版 `muse-gadget.bin` 是 **3,280,896 字节，余 913,408（22%）**。
+字库那份 123,804 是直接从整片 Noto 里裁出来的；**整片子集（2.18MB）这条路是走不通的**，
+装不进这个分区，所以才要工具。
 
 ## 6. 现场怎么连（拓扑与地址）
 
@@ -253,18 +315,17 @@ reboot_ui / card_next / card_auto / poke`。
 
 ## 8. 还没做的（不要在这里以为已经做了）
 
-1. ~~`on_state` → 五行数值~~ **代码已经写完**（§5.3），**但还没在屏上验过** —— 刷进去看五行跟着帧变，
-   是这一版剩下的唯一动作。
+1. ~~`on_state` → 五行数值~~ **已经上板验过**（§9）：倒计时在走、`dialog` 按时清空、表情换得动。
 2. `state.ui.emotion` → `muse_state_set_mode()`（§5.4，**接法有条件，照那段的两条约束做，否则砸掉口型动画**）。
-3. 行可点 → `card_next`/`poke`/`sos_press`（§5.5）。
-   注意 `screen_link_send_command()` 现在只能从 LVGL 任务里调，而它里面那句
-   `esp_websocket_client_send_text(..., pdMS_TO_TICKS(2000))`（`screen_link.c:122`）
-   **最多阻塞 2 秒**：发送卡住 = 界面卡住、触摸没反应。要接就先改成"置位、由链路任务发"，
-   别直接在点击回调里发。
+3. ~~行可点 → `card_next`/`poke`~~ **已经接完**（§5.5：三张卡 = `poke`，页底三个按钮 = `card_next ±1` / `card_auto`；
+   发送按那条说的挪进了 `carpet_cmd` 任务，点击回调只入队，所以界面不会被 2 秒阻塞拖住）。
+   **还差的是 `sos_press`** —— 它需要一个屏外的物理入口（见第 5 条），不是这一页上的一个按钮就能算数。
 4. `on_event` 没接 → 屏上不弹横幅（`sat_visible`/`fence_exit`/`downlink_msg` 那三类）。
    `ack` 组件已经无条件回了，所以服务端不会重试风暴，只是观众看不见。
 5. SOS 的物理入口挪走（BOOT 长按被上游占作恢复出厂）。
-6. 大字号 CJK 字体（§5.6），要不要做取决于展台距离。
+6. ~~大字号 CJK 字体~~ **做完并上板**（§5.6：123,804 字节的本页词表子集 + tiny_ttf 24/20 px）。
+   展台距离真要不要更大，是下一件事 —— 现在这套是 24/20，还能往上加，
+   但加一档就要重排这一页（圆里的余量已经用完了，见 §9.1 最后那条）。
 7. 语音：屏侧"听/说"是 Muse 自己那条云链路，**和我们自己的 App 无关**；
    要让它走我们 App 的服务端，得先看 Muse 的 endpoint 能不能被屏上那四个字段改掉。
 8. 屏幕上的第三块 tile **还没有目视确认过**（判据见 §9）。
@@ -337,11 +398,56 @@ reboot_ui / card_next / card_auto / poke`。
 两个都在 `#if LV_USE_SNAPSHOT` 里，bench 关着时不占一个字节。
 `snap.py` 会把图放大 3 倍再写 PNG，中文才看得清。
 
-四条判据，缺一不算过：
+五条判据，缺一不算过：
 
 1. 面上**上滑**能到车联页，圆点是 3 个，页面不闪；从车联页**只能上滑回面**（左右划不动）。
+   三个圆点本身也能点（第 3 个点直接跳车联页）—— 到这一页不该只靠手势划得对。
 2. 没连 Wi-Fi 时第一行是"等网络"（橙）；连上 Wi-Fi 但服务端没起是"未接入"；
-   服务端起来后 **≤5 秒**变"已接入 v2"（蓝）。
+   服务端起来后 **≤5 秒**变"已接入 v2"（紫，`COLOR_ACCENT`）。
 3. `CONFIG_MUSE_CARPET_CARDS=n` 重编一次，圆点回到 2 个、左右滑行为与上游一致 —— 这条是回滚保险。
 4. 串口 60 秒内没有 `Guru meditation` / `abort()`，且能看到 `hello` 发出去
    （`screen_link` 的日志 tag 就是 `screen_link`；连接失败只会以 `websocket_client` 的错露头）。
+5. **页上的东西按得动**：手按"下一张"两下，串口 `>carpet` 的 `sent` 要跟着涨、
+   `last=card_next`，并且第二行"手机在画 X"在两秒内换掉（这条要服务端接得住，见 §5.5）。
+   按三张状态卡任意一张 = 发 `poke`，`sent` 同样要涨。
+
+### 9.1 同一天的傍晚：他挑出来三件事，都改了
+
+现场反馈是"四个手势都能成，但你那页**条目点不了、字太小、UI 和 Muse 不统一**"。三条都是真的，
+各自的根因记在这儿，免得下一个人重新查：
+
+- **点不了**：那五行是 `lv_obj_create` 建的 —— 普通对象默认不带 `CLICKABLE`，
+  所以按上去什么也不发生，看着像"页面对触摸没反应"。现在条目是 `lv_button_create`
+  （Muse 的 `card()` 就是这么分的：能点就建按钮）。
+- **上滑吞手势**（同一批里更早的那次反馈）：tile 本身是普通 `lv_obj`，**默认就带
+  `SCROLLABLE`**，而 LVGL 找滚动对象时是从按下的那个控件往上走、**遇到第一个在该方向可滚的就停手**。
+  脸那张 tile 的孩子在中心线上下都有，于是它看起来"竖向可滚"，上滑被它自己吃掉，
+  tileview 根本没机会动。修的是 `muse_ui.c`：给 face 和 carpet 两块 tile
+  `lv_obj_set_scroll_dir(..., LV_DIR_NONE)` —— 设成 NONE **不会**动 `SCROLLABLE` 标志位，
+  于是拖动会链回 tileview。车联页里每张卡也照样摘掉 `SCROLLABLE`，同一个理由。
+  圆点同时改成可点（点第 3 个直接跳车联页），到这一页就不只靠手势划得对。
+- **字太小**：Muse 的中文只有 16 px 位图那一档，不是"没调大"，是**调不动**，
+  要走 §5.6 那份子集 + tiny_ttf 才有 24/20 px。**别的第一件事**：`CONFIG_LV_TINY_TTF_CACHE_KERNING_CNT=0`
+  必须带上，不为 0 会画坏字（老固件实拍过的 LVGL 跨缓存释放），这条丢了就是"字大了但是残缺"。
+- **不统一**：配色和卡片全部改成抄 `muse_settings_ui.c`（`COLOR_CARD 0x1a1530` /
+  按下 `0x2e2552` / `COLOR_ACCENT 0xa77dff` / 圆角 18 / 左右内衬 16 / 列宽 330 = 它的 `LIST_W`）。
+  卡片高用 56 而不是它的 58，是因为这一页比设置页多一排按钮，58 会把最外那张顶出圆（余量算在源码注释里）。
+
+**这一轮实测到的**（build #10，只 `app-flash`，`Hash of data verified`）：
+
+```
+muse-gadget.bin binary size 0x321000 bytes. Smallest app partition is 0x400000. 0xdf000 bytes (22%) free.
+I (2679) carpet_page: tiny_ttf 123804 字节 → 24/20px        ← 字库真的起来了，不是退回 16px
+I (6836) wifi:state: auth -> assoc ...
+@carpet wifi=1 linked=1 contract=v2 gap_s=0 has_state=1
+@carpet sat=空闲 下次11:32
+@carpet dialog=-
+@carpet card=对话卡 emotion=难过
+@carpet sos=已确认
+@carpet sent=0 last=-
+```
+
+`sent=0` 是**当时还没人按**，不是通路坏了 —— 按完再发一遍 `>carpet` 看它涨不涨（判据 5）。
+另外 `>carpet` 要在复位后**至少等 16 秒**再发：`sercmd.py` 是开串口睡 6 秒就写，
+那块屏联上服务端要 7 秒，太早发就打出 `wifi=0 linked=0`，看着像链路死了其实是被你自己复位了。
+
