@@ -31,6 +31,7 @@ import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.StatePayload
+import com.carpet.satdemo.core.protocol.UiCard
 
 /**
  * 圆屏镜像：**这一格画的就是手机每 1 Hz 推给屏的那一帧**，不是又写一套 UI。
@@ -183,7 +184,18 @@ fun ScreenMirror(
                 SkeletonBar(width = 104.dp, height = 11.dp)
             }
         } else {
-            MirrorText(snap, moduleOff, left, diameter, online)
+            val ui = snap.ui
+            if (ui?.card == UiCard.emotion) {
+                // 屏正在演那张脸的时候，手机这块镜像不许还画着卫星那五行字：
+                // 两边看的是同一帧，画成两件事就是骗人。这也是 App 第一次把 ui.emotion 画出来
+                PixelAvatar(
+                    emotion = ui.emotion,
+                    diameter = diameter * 0.62f,
+                    live = online,
+                )
+            } else {
+                MirrorText(snap, moduleOff, left, diameter, online)
+            }
         }
     }
 }

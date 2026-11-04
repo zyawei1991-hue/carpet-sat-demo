@@ -22,6 +22,9 @@ import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.StatePayload
+import com.carpet.satdemo.core.protocol.UiCard
+import com.carpet.satdemo.core.protocol.UiEmotion
+import com.carpet.satdemo.core.protocol.UiState
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import java.io.File
 import org.junit.Assert.assertTrue
@@ -163,6 +166,27 @@ class ScreenMirrorRenderTest {
         @Suppress("DEPRECATION")
         compose.activity.resources.updateConfiguration(cfg, null)
         shootHome("mirror-384-font130", live(), 1)
+    }
+
+    /**
+     * 屏正在演那张脸（`ui.card == emotion`）：这时圆里就该是那张脸，不许还是卫星那五行字。
+     * 这张是"形象在手机上看多大、清不清楚"的唯一凭据 —— 64×64 缩到 224dp 里那格，
+     * 和对照表上 4 倍放大不是一回事。挑 happy 这一档：它是七档里装饰最多的（^^ 眼 + 两颗心 + 跳），
+     * 最挤的一档能看清，其余六档就能看清
+     */
+    @Test
+    @Config(qualifiers = "w384dp-h1600dp-xhdpi")
+    fun renderEmotionFace() {
+        val p = live().copy(ui = UiState(card = UiCard.emotion, emotion = UiEmotion.happy, tzMin = 480))
+        shootHome("mirror-384-face-happy", p, 1)
+    }
+
+    /** 同一格换 thinking：状态色该从 IDLE 那支紫退成 THINKING 那支粉，天线头和边缘光都要跟着变 */
+    @Test
+    @Config(qualifiers = "w384dp-h1600dp-xhdpi")
+    fun renderEmotionFaceThinking() {
+        val p = live().copy(ui = UiState(card = UiCard.emotion, emotion = UiEmotion.thinking, tzMin = 480))
+        shootHome("mirror-384-face-thinking", p, 1)
     }
 
     private fun shoot(name: String) {
