@@ -1,0 +1,893 @@
+diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
+index b478d5e..650bf25 100644
+--- a/esp32/components/muse/CMakeLists.txt
++++ b/esp32/components/muse/CMakeLists.txt
+@@ -46,6 +46,10 @@ if(CONFIG_MUSE_ENABLED)
+     else()
+         list(APPEND srcs "muse_ui.c" "muse_menu.c" "muse_settings_ui.c" "muse_keypad.c" "muse_lv_mem.c")
+     endif()
++    if(CONFIG_MUSE_CARPET_CARDS)
++        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
++        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c")
++    endif()
+     if(CONFIG_MUSE_HATCH)
+         list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
+         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
+@@ -192,7 +196,11 @@ set(muse_priv_requires
+     esp_driver_pcnt efuse
+     # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
+     # before Kconfig values exist, so these can't depend on it; only the code does.
+-    fatfs esp_driver_sdspi sdmmc)
++    fatfs esp_driver_sdspi sdmmc
++    # The car-link page's client. Requirements are resolved before Kconfig
++    # exists, so this is unconditional; with CONFIG_MUSE_CARPET_CARDS off no
++    # object from it is referenced and none gets linked.
++    screen_link)
+ list(APPEND muse_priv_requires camera)
+ 
+ idf_component_register(
+diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
+index 588d7c6..75c4bf6 100644
+--- a/esp32/components/muse/Kconfig
++++ b/esp32/components/muse/Kconfig
+@@ -297,6 +297,20 @@ menu "Muse"
+             rarer characters and Korean show as boxes. Takes about 910 KB of
+             flash, against about 1.2 MB.
+ 
++    config MUSE_CARPET_CARDS
++        bool "Car-link page above the face (Screen-Link cards)"
++        depends on MUSE_ENABLED && !MUSE_UI_FREEINK
++        select MUSE_CJK_FONT
++        select MUSE_CJK_FONT_NOTO
++        default n
++        help
++            Adds a third tile to the touch UI: swipe up from the face for our
++            own menu (link / satellite / dialog / emotion / SOS), fed by the
++            Screen-Link client in components/screen_link. Home Link still owns
++            Wi-Fi and pairing, so the link starts only once a network is up.
++            Its labels are Chinese, so this selects the CJK caption font
++            (about 910 KB of flash). Off, the build is upstream's.
++
+     config MUSE_LATIN_FONT
+         bool "Show Vietnamese and other accented letters in captions"
+         depends on MUSE_ENABLED && !MUSE_UI_FREEINK
+diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
+new file mode 100644
+index 0000000..d6fd342
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_link.c
+@@ -0,0 +1,254 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "carpet_link.h"
++
++#include "sdkconfig.h"
++#if CONFIG_MUSE_CARPET_CARDS
++
++#include <stdio.h>
++#include <string.h>
++
++#include "cJSON.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/semphr.h"
++#include "freertos/task.h"
++#include "muse_wifi.h"
++#include "screen_link.h"
++
++static const char *TAG = "carpet";
++
++/* One word each, written from the link task and read from the UI task: a
++ * briefly stale value only costs one frame of the page. */
++static volatile bool s_linked;
++static volatile int s_negotiated;
++static TaskHandle_t s_gate;
++
++/* 最新一帧 state 的**副本**：组件在回调返回后就把那棵原树释放了。
++ * UI 任务和链路任务碰同一棵树，所以必须有锁 —— 没锁的"换帧时删旧的"就是 use-after-free。 */
++static cJSON *s_state;
++static SemaphoreHandle_t s_lock;
++static char s_dialog[40];
++static uint32_t s_dialog_tick;
++
++/* 契约里的英文枚举一律不许上屏（这是排版红线，不是风格），所以每个都查表；
++ * 认不出的值落"未知"而不是把原样印出去 —— 服务端加一个枚举值不该在屏上冒英文。 */
++typedef struct {
++    const char *key;
++    const char *cn;
++} kv_t;
++
++static const char *kv_lookup(const kv_t *tbl, const char *key, const char *fallback)
++{
++    if (!key) return fallback;
++    for (; tbl->key; tbl++) {
++        if (strcmp(tbl->key, key) == 0) return tbl->cn;
++    }
++    return "未知";
++}
++
++static const kv_t SAT_PHASE[] = {
++    { "idle", "空闲" },       { "searching", "找星" },   { "locked", "已锁定" },
++    { "tx_pending", "发送中" }, { "tx_ok", "已送达" },   { "tx_fail", "发送失败" },
++    { "tx_no_ack", "无回执" }, { NULL, NULL },
++};
++static const kv_t UI_CARD[] = {
++    { "status", "状态卡" },   { "sat", "卫星卡" },     { "dialog", "对话卡" },
++    { "emotion", "表情卡" },  { "clock", "钟面" },     { NULL, NULL },
++};
++static const kv_t EMOTION[] = {
++    { "neutral", "中性" },    { "happy", "开心" },     { "excited", "兴奋" },
++    { "sad", "难过" },        { "worried", "担心" },   { "sleepy", "犯困" },
++    { "thinking", "思考" },   { NULL, NULL },
++};
++static const kv_t SOS_LEVEL[] = {
++    { "normal", "正常" },     { "armed", "待命" },     { "pending", "待发送" },
++    { "sent", "已发出" },     { "acked", "已确认" },   { NULL, NULL },
++};
++static const kv_t DIALOG_SRC[] = {
++    { "asr", "你说的" },      { "local_rule", "本地规则" }, { "model", "模型答的" },
++    { "local_fallback", "兜底话术" }, { "denied", "被拦住" }, { "xiaozhi_cloud", "小智云" },
++    { NULL, NULL },
++};
++
++static const char *str_of(const cJSON *obj, const char *key)
++{
++    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
++    return cJSON_IsString(item) ? item->valuestring : NULL;
++}
++
++static void fill_from_state(const cJSON *st, carpet_state_view_t *out)
++{
++    const cJSON *sat = cJSON_GetObjectItemCaseSensitive(st, "sat");
++    if (cJSON_IsObject(sat)) {
++        const char *phase = kv_lookup(SAT_PHASE, str_of(sat, "phase"), "—");
++        const cJSON *np = cJSON_GetObjectItemCaseSensitive(sat, "next_pass_in_s");
++        if (cJSON_IsNumber(np) && np->valueint >= 0) {
++            snprintf(out->sat, sizeof out->sat, "%s 下次%d:%02d",
++                     phase, np->valueint / 60, np->valueint % 60);
++        } else {
++            snprintf(out->sat, sizeof out->sat, "%s", phase);
++        }
++    }
++
++    const cJSON *ui = cJSON_GetObjectItemCaseSensitive(st, "ui");
++    if (cJSON_IsObject(ui)) {
++        snprintf(out->card, sizeof out->card, "%s",
++                 kv_lookup(UI_CARD, str_of(ui, "card"), "—"));
++        /* 契约里 emotion 可以是 null：那是"这一帧不带情绪"，落回中性，
++         * 不是"保持上一帧"。这条在老固件上踩过一次（旧值一直挂着）。 */
++        const char *emotion = str_of(ui, "emotion");
++        snprintf(out->emotion, sizeof out->emotion, "%s",
++                 emotion ? kv_lookup(EMOTION, emotion, "未知") : "中性");
++    } else {
++        snprintf(out->emotion, sizeof out->emotion, "%s", "中性");
++    }
++
++    const cJSON *sos = cJSON_GetObjectItemCaseSensitive(st, "sos");
++    snprintf(out->sos, sizeof out->sos, "%s",
++             cJSON_IsObject(sos) ? kv_lookup(SOS_LEVEL, str_of(sos, "level"), "—") : "—");
++}
++
++bool carpet_link_state(carpet_state_view_t *out)
++{
++    memset(out, 0, sizeof *out);
++    if (!s_lock) return false;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (s_state) {
++        fill_from_state(s_state, out);
++        out->has_state = true;
++    }
++    /* 一句对话只挂 5 秒：链路断了、或者两边不说话了，这一行不该一直写"手机在说" */
++    if (s_dialog[0]) {
++        uint32_t age_s = (xTaskGetTickCount() - s_dialog_tick) * portTICK_PERIOD_MS / 1000;
++        if (age_s <= 5) snprintf(out->dialog, sizeof out->dialog, "%s", s_dialog);
++    }
++    xSemaphoreGive(s_lock);
++    return out->has_state;
++}
++
++static void on_state(const cJSON *state, uint32_t seq)
++{
++    (void)seq;
++    /* IDF 那份 cJSON 只有 cJSON_True（类型位枚举），没有上游才加的 cJSON_TRUE */
++    cJSON *dup = cJSON_Duplicate(state, cJSON_True);
++    if (!dup) return;            /* 拷不动就沿用上一帧，反正 1 秒后还有 */
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    cJSON *old = s_state;
++    s_state = dup;
++    xSemaphoreGive(s_lock);
++    /* 旧树在锁外删：摘出来之后 UI 已经碰不到它了 */
++    if (old) cJSON_Delete(old);
++}
++
++static void on_dialog(const cJSON *dialog)
++{
++    const char *dir = str_of(dialog, "dir");
++    const char *src = str_of(dialog, "source");
++    const char *who = (dir && strcmp(dir, "up") == 0) ? "屏在说" : "手机在说";
++    /* source 在契约里就不是必填（必填只有 turn_id / dir / text），缺了就只说谁在说。
++     * 补一个"· —"的尾巴是让人念不通的。 */
++    char line[40];
++    if (src) snprintf(line, sizeof line, "%s · %s", who, kv_lookup(DIALOG_SRC, src, "未知"));
++    else     snprintf(line, sizeof line, "%s", who);
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    snprintf(s_dialog, sizeof s_dialog, "%s", line);
++    s_dialog_tick = xTaskGetTickCount();
++    xSemaphoreGive(s_lock);
++}
++
++static void on_connected(int negotiated)
++{
++    s_negotiated = negotiated;
++    s_linked = true;
++    ESP_LOGI(TAG, "linked, contract v%d", negotiated);
++}
++
++static void on_disconnected(void)
++{
++    s_linked = false;
++    s_negotiated = 0;
++}
++
++static void gate_task(void *arg)
++{
++    (void)arg;
++    /* Home Link joins only after the phone has paired this gadget, so wait for
++     * a network instead of starting a link that can't resolve the URL. */
++    while (!muse_wifi_connected()) {
++        vTaskDelay(pdMS_TO_TICKS(2000));
++    }
++
++    screen_link_cfg_t cfg = {
++        .url = CONFIG_SCREEN_LINK_URL,
++        .screen_id = CONFIG_SCREEN_LINK_ID,
++        .fw = CONFIG_SCREEN_LINK_FW,
++        .dock_type = CONFIG_SCREEN_LINK_DOCK_TYPE,
++        .read_battery_mv = NULL,   /* 底座还没上板：帧里不带这一项 */
++    };
++    screen_link_callbacks_t cb = {0};
++    cb.on_connected = on_connected;
++    cb.on_disconnected = on_disconnected;
++    cb.on_state = on_state;
++    cb.on_dialog = on_dialog;
++
++    esp_err_t err = screen_link_start(&cfg, &cb);
++    if (err != ESP_OK) {
++        ESP_LOGE(TAG, "screen_link_start: %s", esp_err_to_name(err));
++    }
++    vTaskDelete(NULL);
++}
++
++void carpet_link_start(void)
++{
++    if (s_gate) return;
++    /* 先建锁再建任务：链路回调和 UI 的 tick 都从这一把锁后面碰 s_state */
++    if (!s_lock) s_lock = xSemaphoreCreateMutex();
++    if (xTaskCreate(gate_task, "carpet_gate", 4096, NULL, 4, &s_gate) != pdPASS) {
++        s_gate = NULL;
++        ESP_LOGE(TAG, "gate task out of memory");
++    }
++}
++
++void carpet_link_view(carpet_link_view_t *out)
++{
++    out->wifi_up = muse_wifi_connected();
++    out->linked = s_linked;
++    out->negotiated = s_negotiated;
++    out->gap_s = screen_link_state_gap_s();
++}
++
++void carpet_link_dump(void)
++{
++    carpet_link_view_t v;
++    carpet_link_view(&v);
++    carpet_state_view_t s;
++    carpet_link_state(&s);
++
++    /* gap 换算成页面第一行那句中文的规则写在 carpet_page.c 的 tick 里：
++     * 没网=等网络、没连=未接入、gap 无穷=等首帧、>10s=掉线重连、>3s=卡N秒、否则=已接入。 */
++    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d\n",
++           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state);
++    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
++    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
++    printf("@carpet card=%s emotion=%s\n", s.card[0] ? s.card : "-",
++           s.emotion[0] ? s.emotion : "-");
++    printf("@carpet sos=%s\n", s.sos[0] ? s.sos : "-");
++    fflush(stdout);
++}
++
++#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
+new file mode 100644
+index 0000000..ffb4038
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_link.h
+@@ -0,0 +1,50 @@
++/*
++ * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
++ *
++ * Muse 的 UI 是拉取式的：LVGL 任务每帧自己去读状态（见 muse_ui.c 的
++ * update_chrome()），其它任务从不碰 LVGL。所以本文件只写状态，
++ * 画由 carpet_page.c 在 UI 任务里读。
++ *
++ * Wi-Fi 归 Home Link 管（手机配对后才能上网），这里不能自己连，
++ * 只能等 muse_wifi_connected() 真了再启链路。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Safe from any task. Starts the link once Wi-Fi is up; calling it twice does
++ * nothing. */
++void carpet_link_start(void);
++
++/* What the page draws. Snapshot so the UI task reads one consistent set. */
++typedef struct {
++    bool wifi_up;
++    bool linked;
++    int negotiated;          /* 谈下来的契约档；只有 >=2 才走得通对话 */
++    uint32_t gap_s;          /* 距上一帧 state 多少秒；没连上时是 UINT32_MAX */
++} carpet_link_view_t;
++
++void carpet_link_view(carpet_link_view_t *out);
++
++/*
++ * 页面上另外四行要的值，已经从契约的英文枚举翻成中文短串（屏上不许出现英文原值）。
++ * 每一项都只描述**最新那一帧**：帧里没带的字段不会留着上一帧的值，
++ * 所以这里不需要"清一清"的额外约定 —— 整棵树每帧换掉，缺的就是回落值。
++ */
++typedef struct {
++    bool has_state;          /* 这轮会话收到过 state 没有 */
++    char sat[40];            /* 卫星相位 + 下次过境倒计时 */
++    char card[24];           /* 手机上当前画在哪张卡 */
++    char emotion[24];        /* ui.emotion */
++    char sos[24];            /* sos.level */
++    char dialog[40];         /* 最近一句对话的方向和来源；超过 5 秒留空 */
++} carpet_state_view_t;
++
++/* 从任何任务读都行（里面有锁），但只在 UI 任务的 tick 里调用才有意义。 */
++bool carpet_link_state(carpet_state_view_t *out);
++
++/* Console readback (`>carpet`): prints the same numbers and strings the tile
++ * draws, one line each. Safe from any task, never touches LVGL. */
++void carpet_link_dump(void);
+diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
+new file mode 100644
+index 0000000..b433bee
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_page.c
+@@ -0,0 +1,167 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "carpet/carpet_page.h"
++
++#include "sdkconfig.h"
++#if CONFIG_MUSE_CARPET_CARDS
++
++#include <stdio.h>
++#include <string.h>
++
++#include "carpet/carpet_link.h"
++
++/* 页面上的字全是中文，字体由 CONFIG_MUSE_CARPET_CARDS select 出来（Kconfig 里），
++ * 所以这里照 muse_ui.c 同一套阶梯声明，不共用它的 static caption_font()。 */
++#if CONFIG_MUSE_CJK_FONT
++#if CONFIG_MUSE_CJK_FONT_NOTO
++LV_FONT_DECLARE(muse_font_cjk_noto_16)
++#define CJK_FONT muse_font_cjk_noto_16
++#else
++LV_FONT_DECLARE(muse_font_cjk_16)
++#define CJK_FONT muse_font_cjk_16
++#endif
++#endif
++
++static const lv_font_t *carpet_font(void)
++{
++#if CONFIG_MUSE_CJK_FONT
++    /* ASCII from unscii, CJK from the 16 px fallback — the same pairing the
++     * captions on the face use (muse_ui.c's caption_font()). */
++    static lv_font_t font;
++    if (!font.get_glyph_dsc) {
++        font = lv_font_unscii_16;
++        font.fallback = &CJK_FONT;
++    }
++    return &font;
++#else
++    return &lv_font_unscii_16;
++#endif
++}
++
++#define COLOR_TEXT   0xe6e6e6
++#define COLOR_DIM    0x8a8a8a
++#define COLOR_ON     0x64d4ff
++#define COLOR_OFF    0xff9a5c
++
++/* 圆屏上可读的最小中文字号就是 Muse 那份 16 px 的 CJK 字体；
++ * 我们旧固件用的 tiny_ttf 32 px 在这儿没有，先照 Muse 的字号排版。 */
++#define ROW_H 44
++#define COL_W 340
++
++typedef struct {
++    const char *name;
++    const char *idle_value;
++} carpet_row_t;
++
++/* 五张卡各占一行，值都由 carpet_link.c 从最新一帧 state / dialog 翻成中文后给过来。
++ * 这里的 idle_value 只是"这一帧什么都还没有"时的样子。 */
++static const carpet_row_t s_rows[] = {
++    { "链路", "未接入" },
++    { "卫星", "—" },
++    { "对话", "—" },
++    { "表情", "—" },
++    { "呼救", "—" },
++};
++#define ROW_COUNT ((int)(sizeof(s_rows) / sizeof(s_rows[0])))
++
++static lv_obj_t *s_value[ROW_COUNT];
++static char s_shown[ROW_COUNT][48];
++
++static void set_value(int row, const char *text, uint32_t color)
++{
++    if (!s_value[row]) return;
++    if (strcmp(text, s_shown[row]) == 0) return;   /* 拉取式：没变就不重画 */
++    snprintf(s_shown[row], sizeof(s_shown[row]), "%s", text);
++    lv_label_set_text(s_value[row], text);
++    lv_obj_set_style_text_color(s_value[row], lv_color_hex(color), 0);
++}
++
++void carpet_page_build(lv_obj_t *tile)
++{
++    if (!tile) return;
++
++    lv_obj_t *col = lv_obj_create(tile);
++    lv_obj_remove_style_all(col);
++    lv_obj_set_size(col, COL_W, LV_SIZE_CONTENT);
++    lv_obj_align(col, LV_ALIGN_CENTER, 0, 24);
++    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
++    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
++    lv_obj_set_style_pad_row(col, 6, 0);
++
++    const lv_font_t *font = carpet_font();
++
++    for (int i = 0; i < ROW_COUNT; i++) {
++        lv_obj_t *row = lv_obj_create(col);
++        lv_obj_remove_style_all(row);
++        lv_obj_set_size(row, LV_PCT(100), ROW_H);
++        lv_obj_set_style_bg_color(row, lv_color_hex(0x14161a), 0);
++        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
++        lv_obj_set_style_radius(row, 10, 0);
++
++        lv_obj_t *name = lv_label_create(row);
++        lv_label_set_text(name, s_rows[i].name);
++        lv_obj_set_style_text_font(name, font, 0);
++        lv_obj_set_style_text_color(name, lv_color_hex(COLOR_TEXT), 0);
++        lv_obj_align(name, LV_ALIGN_LEFT_MID, 14, 0);
++
++        s_value[i] = lv_label_create(row);
++        lv_label_set_text(s_value[i], s_rows[i].idle_value);
++        lv_obj_set_style_text_font(s_value[i], font, 0);
++        lv_obj_set_style_text_color(s_value[i], lv_color_hex(COLOR_DIM), 0);
++        lv_obj_align(s_value[i], LV_ALIGN_RIGHT_MID, -14, 0);
++        snprintf(s_shown[i], sizeof(s_shown[i]), "%s", s_rows[i].idle_value);
++    }
++}
++
++void carpet_page_tick(void)
++{
++    carpet_link_view_t v;
++    carpet_link_view(&v);
++
++    if (!v.wifi_up) {
++        set_value(0, "等网络", COLOR_OFF);
++    } else if (!v.linked) {
++        set_value(0, "未接入", COLOR_OFF);
++    } else if (v.gap_s == UINT32_MAX) {
++        /* hello 已经发出去了，但这一轮还没收到过 state */
++        set_value(0, "等首帧", COLOR_OFF);
++    } else if (v.gap_s > 10) {
++        /* 组件自己会断线重连，这里只把结果画出来 */
++        set_value(0, "掉线重连", COLOR_OFF);
++    } else if (v.gap_s > 3) {
++        char buf[40];
++        snprintf(buf, sizeof buf, "卡%lu秒", (unsigned long)v.gap_s);
++        set_value(0, buf, COLOR_OFF);
++    } else {
++        set_value(0, v.negotiated >= 2 ? "已接入 v2" : "已接入 v1", COLOR_ON);
++    }
++
++    /* 3 秒没帧 = 服务端还在但话说完了（或者热点断了），契约要求保留最后一帧，
++     * 所以四行不清屏，只统一转成灰。 */
++    carpet_state_view_t s;
++    carpet_link_state(&s);
++    const uint32_t color = (v.linked && v.gap_s <= 3) ? COLOR_TEXT : COLOR_DIM;
++
++    set_value(1, s.sat[0] ? s.sat : "—", color);
++    set_value(2, s.dialog[0] ? s.dialog : (s.card[0] ? s.card : "—"), color);
++    set_value(3, s.emotion[0] ? s.emotion : "—", color);
++    /* 呼救这一行不"正常"就是要让人看见，所以反过来用强调色 */
++    const bool calm = (s.sos[0] == '\0') || (strcmp(s.sos, "正常") == 0);
++    set_value(4, s.sos[0] ? s.sos : "—", calm ? color : COLOR_ON);
++}
++
++#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/carpet/carpet_page.h b/esp32/components/muse/carpet/carpet_page.h
+new file mode 100644
+index 0000000..9ac73c7
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_page.h
+@@ -0,0 +1,21 @@
++/*
++ * 车联页：上滑从脸进入的那一格 tile，把我们的功能挂进去。
++ *
++ * 只在 LVGL 任务里跑（muse_ui.c 的 frame_tick 调 carpet_page_tick），
++ * 数据一律从 carpet_link_view() 读，不在这里发起任何网络动作。
++ */
++
++#pragma once
++
++#include "sdkconfig.h"
++#if CONFIG_MUSE_CARPET_CARDS
++
++#include "lvgl.h"
++
++/* LVGL task only: builds the menu inside the tile muse_ui.c created. */
++void carpet_page_build(lv_obj_t *tile);
++
++/* LVGL task only: pulls the link state onto the labels, at the chrome tick. */
++void carpet_page_tick(void);
++
++#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
+index 7c579bb..bdf9313 100644
+--- a/esp32/components/muse/muse_input.c
++++ b/esp32/components/muse/muse_input.c
+@@ -48,6 +48,9 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_link.h"
++#endif
+ #if CONFIG_MUSE_VIDEO
+ #include "muse_video.h"
+ #endif
+@@ -892,6 +895,14 @@ static bool console_command(char *line, bool whole)
+         }
+         return true;
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    /* Readback for the car-link tile: what the five rows are drawing right now.
++     * Not under LV_USE_SNAPSHOT, because the plain build has no pixel capture. */
++    if (!strcmp(line, "carpet")) {
++        carpet_link_dump();
++        return true;
++    }
++#endif
+     bool reset = !strcmp(line, "power.reset");
+     if (reset || !strcmp(line, "power")) {
+         if (reset) {
+@@ -926,6 +937,12 @@ static bool console_command(char *line, bool whole)
+         muse_ui_bench_page(!strcmp(line, "ui=settings"));
+         return true;
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    if (!strcmp(line, "ui=carpet")) {
++        muse_ui_bench_carpet();
++        return true;
++    }
++#endif
+     if (!strncmp(line, "ui.settings=", 12)) {
+         if (muse_settings_ui_bench_open(line + 12)) {
+             muse_ui_bench_page(true);
+diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
+index 4a98f64..b9f0848 100644
+--- a/esp32/components/muse/muse_ui.c
++++ b/esp32/components/muse/muse_ui.c
+@@ -43,6 +43,9 @@
+ #include "muse_pixel.h"
+ #include "muse_settings.h"
+ #include "muse_settings_ui.h"
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_page.h"
++#endif
+ #include "muse_state.h"
+ #include "muse_text.h"
+ #include "muse_wifi.h"
+@@ -133,7 +136,24 @@ bool muse_ui_face_active(void)
+     return s_face_active;
+ }
+ static lv_obj_t *s_settings;
+-static lv_obj_t *s_dots[2];
++#if CONFIG_MUSE_CARPET_CARDS
++static lv_obj_t *s_carpet;        /* the tile at row 1: below the face, reached by swiping up */
++#define DOT_COUNT 3
++#else
++#define DOT_COUNT 2
++#endif
++static lv_obj_t *s_dots[DOT_COUNT];
++/* Which tile is showing, as the page dots number them. */
++static int page_index(void)
++{
++    if (!s_tv) return 0;
++    lv_obj_t *active = lv_tileview_get_tile_active(s_tv);
++    if (active == s_settings) return 1;
++#if CONFIG_MUSE_CARPET_CARDS
++    if (active == s_carpet) return 2;
++#endif
++    return 0;
++}
+ static lv_obj_t *s_wifi_icon;
+ static lv_obj_t *s_ble_icon;
+ static lv_obj_t *s_cover;
+@@ -1000,12 +1020,19 @@ static void build_screen(void)
+ 
+     lv_obj_t *face = scr;
+     if (muse_board->touch) {
+-        /* Swipe left from Muse for settings. */
++        /* Swipe left from Muse for settings, up for the car-link page. */
+         s_tv = lv_tileview_create(scr);
+         lv_obj_set_style_bg_color(s_tv, lv_color_black(), 0);
+         lv_obj_set_style_bg_opa(s_tv, LV_OPA_COVER, 0);
+         lv_obj_set_scrollbar_mode(s_tv, LV_SCROLLBAR_MODE_OFF);
++        /* The tileview takes its own scroll directions from the tile it lands
++         * on, and seeds them from this (0,0) one, so the face has to name both
++         * exits itself. */
++#if CONFIG_MUSE_CARPET_CARDS
++        s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT | LV_DIR_BOTTOM);
++#else
+         s_face = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
++#endif
+         /* It never scrolls, but LVGL would size its scrollbars from all its
+          * children every time it draws any part of it. */
+         lv_obj_set_scrollbar_mode(s_face, LV_SCROLLBAR_MODE_OFF);
+@@ -1014,6 +1041,14 @@ static void build_screen(void)
+         lv_obj_set_style_bg_color(s_face, lv_color_black(), 0);
+         lv_obj_set_style_bg_opa(s_face, LV_OPA_COVER, 0);
+         s_settings = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_LEFT);
++#if CONFIG_MUSE_CARPET_CARDS
++        /* row 1 is below the face on screen: reach it by swiping the content up.
++         * TOP only: from here settings is behind the face, not beside it. */
++        s_carpet = lv_tileview_add_tile(s_tv, 0, 1, LV_DIR_TOP);
++        lv_obj_set_scrollbar_mode(s_carpet, LV_SCROLLBAR_MODE_OFF);
++        lv_obj_set_style_bg_color(s_carpet, lv_color_black(), 0);
++        lv_obj_set_style_bg_opa(s_carpet, LV_OPA_COVER, 0);
++#endif
+         lv_obj_add_event_cb(s_tv, tile_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+         face = s_face;
+     }
+@@ -1313,10 +1348,10 @@ static void update_control_hints(muse_mode_t mode)
+ {
+     if (!s_ptt_hint) return;
+     /* Don't obscure settings rows/keyboards with floating physical icons. */
+-    bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
+-    lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, settings);
+-    lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, settings);
+-    lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, settings);
++    bool off_face = page_index() != 0;
++    lv_obj_set_flag(s_ptt_hint, LV_OBJ_FLAG_HIDDEN, off_face);
++    lv_obj_set_flag(s_spk_hint, LV_OBJ_FLAG_HIDDEN, off_face);
++    lv_obj_set_flag(s_pwr_hint, LV_OBJ_FLAG_HIDDEN, off_face);
+     static int last_mode = -1;
+     if ((int)mode != last_mode) {
+         color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
+@@ -1335,7 +1370,7 @@ static void build_overlays(void)
+     lv_obj_t *scr = lv_screen_active();
+ 
+     /* Page dots. */
+-    for (int i = 0; i < 2 && s_tv; i++) {
++    for (int i = 0; i < DOT_COUNT && s_tv; i++) {
+         lv_obj_t *d = lv_obj_create(scr);
+         lv_obj_remove_style_all(d);
+         lv_obj_set_size(d, 8, 8);
+@@ -1343,7 +1378,7 @@ static void build_overlays(void)
+         lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+         lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_DOT_OFF), 0);
+         lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
+-        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
++        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (i * 2 - (DOT_COUNT - 1)) * 8, -14);
+         s_dots[i] = d;
+     }
+ 
+@@ -1514,19 +1549,23 @@ static void update_chrome(float now)
+     s_next_settings_tick = now + SETTINGS_TICK_S;
+ 
+     if (s_tv) {
+-        int page = lv_tileview_get_tile_active(s_tv) == s_settings;
++        int page = page_index();
++        bool settings = page == 1;
+         bool subpage = muse_settings_ui_in_subpage();
+-        s_swipe_enabled = !page || !subpage;
++        s_swipe_enabled = !settings || !subpage;
+         update_tileview_swipe();
+         int shown = page * 2 + subpage;
+         if (shown != s_shown_page) {
+-            for (int i = 0; i < 2; i++) {
++            for (int i = 0; i < DOT_COUNT; i++) {
+                 lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
+-                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
++                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, settings && subpage);
+             }
+             s_shown_page = shown;
+         }
+         muse_settings_ui_tick(lv_obj_get_scroll_x(s_tv) > 0);
++#if CONFIG_MUSE_CARPET_CARDS
++        carpet_page_tick();
++#endif
+     }
+ 
+     /* Joining, the icon blinks: the compact layout has no state label. */
+@@ -1680,7 +1719,7 @@ static void update_status(muse_mode_t mode, float now)
+     if (s_talk_hint_lbl) {
+         /* Hidden over the settings rows, as the rim icons are, and once the
+          * call is ending (an empty hint). */
+-        bool show = hint && hint[0] && !(s_tv && lv_tileview_get_tile_active(s_tv) == s_settings);
++        bool show = hint && hint[0] && page_index() == 0;
+         lv_obj_set_flag(s_talk_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
+         lv_obj_set_flag(s_end_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
+         if (show && strcmp(lv_label_get_text(s_talk_hint_lbl), hint)) {
+@@ -1838,6 +1877,14 @@ void muse_ui_bench_page(bool settings)
+ {
+     s_bench_page = settings ? 1 : 0;   /* applied in the LVGL task */
+ }
++#if CONFIG_MUSE_CARPET_CARDS
++/* 'ui=face' and 'ui=settings' can't reach the third tile, and a bench run has
++ * no finger for the swipe up: this is the serial way onto the car-link page. */
++void muse_ui_bench_carpet(void)
++{
++    s_bench_page = 2;
++}
++#endif
+ #endif
+ 
+ /* Streams the screen over the USB cable as base64 RGB565 (bench testing; needs
+@@ -1887,9 +1934,17 @@ static void frame_tick(lv_timer_t *timer)
+ {
+ #if LV_USE_SNAPSHOT
+     if (s_bench_page >= 0) {
+-        bool settings = s_bench_page != 0;
++        int page = s_bench_page;
+         s_bench_page = -1;
+-        if (s_tv) lv_tileview_set_tile(s_tv, settings ? s_settings : s_face, LV_ANIM_OFF);
++        if (s_tv) {
++            lv_obj_t *tile = page == 1 ? s_settings : s_face;
++#if CONFIG_MUSE_CARPET_CARDS
++            if (page == 2 && s_carpet) {
++                tile = s_carpet;
++            }
++#endif
++            lv_tileview_set_tile(s_tv, tile, LV_ANIM_OFF);
++        }
+     }
+ #endif
+     update_control_hints(muse_state_mode(NULL));
+@@ -1928,9 +1983,16 @@ static void frame_tick(lv_timer_t *timer)
+     if (s_image_dsc.data) {
+         return;   /* the image covers the face */
+     }
+-    if (s_tv && lv_obj_get_scroll_x(s_tv) != 0) {
+-        /* Off screen, or sliding to or from settings: hold still so the
+-         * slide gets the whole frame time. */
++    /* s_tv stays NULL on a board without touch, where neither tile exists. */
++    bool off_screen = s_tv && (lv_obj_get_scroll_x(s_tv) != 0
++#if CONFIG_MUSE_CARPET_CARDS
++                              || lv_obj_get_scroll_y(s_tv) != 0
++#endif
++                              );
++    if (off_screen) {
++        /* Off screen, or sliding to or from settings (sideways) or the
++         * car-link page (up): hold still so the slide gets the whole frame
++         * time. */
+         return;
+     }
+ 
+@@ -2004,6 +2066,11 @@ esp_err_t muse_ui_start(void)
+     } else {
+         muse_menu_build(lv_screen_active(), s_w, s_h);
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    if (s_carpet) {
++        carpet_page_build(s_carpet);
++    }
++#endif
+     build_overlays();
+     lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
+     s_ready = true;
+diff --git a/esp32/components/muse/muse_ui.h b/esp32/components/muse/muse_ui.h
+index a671bbc..6cacb16 100644
+--- a/esp32/components/muse/muse_ui.h
++++ b/esp32/components/muse/muse_ui.h
+@@ -64,6 +64,11 @@ void muse_ui_request_snapshot(void);
+ /* Bench-only, from any task: select the touch tile without pretending a/s
+  * are touch-menu navigation. No effect on non-touch boards. */
+ void muse_ui_bench_page(bool settings);
++#if CONFIG_MUSE_CARPET_CARDS
++/* Bench-only: the third tile (the car-link page) is above the face, so no
++ * existing key reaches it. */
++void muse_ui_bench_carpet(void);
++#endif
+ /* Display-only demo name for privacy-safe screenshots; no provisioning changes. */
+ void muse_ui_bench_demo(bool enabled);
+ #endif
+diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
+new file mode 100644
+index 0000000..16508f6
+--- /dev/null
++++ b/esp32/devices/sdkconfig.carpet
+@@ -0,0 +1,20 @@
++# 车联（Screen-Link）覆盖层：叠在 devices/sdkconfig.muse-waveshare-s3-175 之后。
++#
++# 打开它就有的两件事：
++#   1. 上滑进车联页（muse_ui.c 里 CONFIG_MUSE_CARPET_CARDS 包住的那一格 tile）。
++#      中文字体不用在这儿写 —— Kconfig 里 MUSE_CARPET_CARDS 自己 select 了
++#      MUSE_CJK_FONT 和 MUSE_CJK_FONT_NOTO（910 KB flash 那份，覆盖 GB2312 的 6763 字）。
++#   2. Screen-Link 的接入点 —— 手机是服务端，下面这几个值现场一定要能改。
++#
++# 整层不叠（构建参数里没有 devices/sdkconfig.carpet）出来的东西和上游一致，
++# 我们的改动一行都不进二进制。
++
++CONFIG_MUSE_CARPET_CARDS=y
++
++# 手机开热点时它自己是 192.168.43.1；连同一个路由器时改成分给手机的地址。
++# 端口固定 8443，而且是明文 ws —— 写成 wss 连不上。
++CONFIG_SCREEN_LINK_URL="ws://192.168.43.1:8443"
++# 必须和 App 白名单里那条一致，不在白名单 App 直接 close(1000, "unknown screen")。
++CONFIG_SCREEN_LINK_ID="WS175B-A3F7"
++CONFIG_SCREEN_LINK_FW="muse-0.1.0"
++CONFIG_SCREEN_LINK_DOCK_TYPE="desk_stand"
+diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
+index 0c74b08..050cad6 100644
+--- a/esp32/main/muse_glue.c
++++ b/esp32/main/muse_glue.c
+@@ -40,6 +40,10 @@
+ 
+ #include "muse_ble.h"
+ #include "muse_board.h"
++#include "sdkconfig.h"   /* the #if below must not depend on include order */
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_link.h"
++#endif
+ #include "muse_input.h"
+ #include "muse_link.h"
+ #include "muse_mem.h"
+@@ -663,6 +667,11 @@ void muse_glue_start(void) {
+         || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
+         ESP_LOGE(TAG, "failed to start Muse tasks");
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    // Home Link joins Wi-Fi only after the phone pairs this gadget, so this
++    // waits for a network itself instead of starting a link that can't resolve.
++    carpet_link_start();
++#endif
+ }
+ 
+ void muse_glue_storage_ready(void) {
