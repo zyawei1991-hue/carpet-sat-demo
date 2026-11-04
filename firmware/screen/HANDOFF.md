@@ -736,3 +736,76 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=256   # IDF 原文：小于这个数的 mall
 `<IDF venv python> tools/gesture_log.py capture --port COM9 --seconds 45 --out D:/dev/tmp/serial-raw.bin`
 （**只写原始字节**，Windows 控制台会把 UTF-8 中文重编码成 GBK，管道给 grep 就静默零输出——上一轮就是这么"什么都没抓到"的），
 然后在屏上左右滑、上滑下滑、按、长按各来几下；抓完 `... gesture_log.py report --raw 同一个文件` 出表。
+
+## 11. 手机端给屏侧的活（2026-11-04，`838615e` 之后照做即可，不用再讨论分权）
+
+分权已经定死并进了 `DECISIONS D10` + `protocol/screen-link.md`「页面归屏、内容归手机」：
+**哪一页归屏（触摸直接切，不等手机往返），这一页里说什么归手机（还是 1Hz 那帧的 `ui.card`/`ui.emotion`）**。
+下面四步按顺序做，每步都给了"过了才算过"的判据。
+
+**第 0 步：半开链路看门狗，排在所有重构前面。** 这条是你发现的，我认：`state` 之外的帧不算数、
+把看门狗饿住，就是"按了没反应"的真因。它比页面树重要，因为它是现场最容易演砸的那件事。
+
+### 1. `page_report`：翻页处加一行，建链后补一次
+
+组件那道闸（`screen_link.c` 的 `ALLOWED`）**我这边已经放行 `page_report`**，固件不用改闸，只要发。
+
+```c
+/* 页名表：和 core 的 ScreenPage 一字不差。SchemaDriftTest 会读这张表比对，
+   名字定死 PAGE_NAMES —— 改了名那条守卫会静默失效 */
+static const char *const PAGE_NAMES[] = { "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery" };
+
+/* 翻页处（page_index() 变了那一刻）：通报，不是申请。手机不许驳回，也不该被你去等回执 */
+cJSON *a = cJSON_CreateObject();
+cJSON_AddStringToObject(a, "page", PAGE_NAMES[idx]);
+screen_link_send_command("page_report", a);   /* args 所有权被组件吃掉，不要重复 delete */
+```
+
+**`hello` 发出去之后必须补报一次当前页。** 少了这一条，重连之后手机上那一格会一直空着
+（写的是「屏没报它在哪一页」），直到下一次真的翻页才复明 —— 那不是 bug，但看起来像 bug。
+
+三条不要：
+
+- **不要报 L3**。手机上只有场景这一层，报得越深，两侧各自说话的机会越多。
+- **不要复用 `set_demo_mode` 报场景**。那个名字在手机上已经是 Tab4 那个「演示模式」开关，
+  而且它在 `handleScreenCommand` 里没有分支。我这边加了断言，契约里出现 `page_set` 也会被拦。
+- **不要按 `state.ui.page` 切页**。那个字段是**回声** —— 手机把你报的原样写回来，
+  用途只有两个：让 App 那块镜像说真话，和让你能看出两侧不一致。按它切页就把刚拿到的翻页权又交回去了。
+
+**判据**：手机首页「圆屏」那张卡下面那行，从「屏没报它在哪一页」变成「屏上现在 · 亲子」。
+不接真手机也能验：`node fake-phone.mjs` 那侧能看到 `command{cmd:"page_report",args:{page:...}}`。
+
+### 2. `event` 那层的全屏抢占（这是唯一让服务端动屏的一档）
+
+`SOS 确认 / 平台回执 / 越界` 三类要能盖住屏当前所在的任何一页。手机端那几条 `EventKind`
+（`sos_acked` / `sos_failed` / `fence_exit` …）**早就在发了**，缺的是屏侧 `on_event` 没有接线 ——
+所以现在这一层**不存在**，文档和对外话术里都别按"已实现"讲。
+
+做的时候守两条：
+
+- 抢占只给这三类。别的（过境窗口、守望动静、答句）都走 `ui.card`，别在屏上加第四种自己盖自己的东西。
+- 抢占层**不吞 ack**。契约规定 `event` 必须回 `ack`（带 `for_event_id`），否则服务端 3s 重发、再 3s 放弃并记一条「展示端没收到」。
+
+### 3. `dialog.action`：只认下行、只切页、别的什么都不做
+
+```
+家长在屏上说"给孩子放首歌" → dialog{dir:up, source:muse_cloud}
+  → 手机答题 → dialog{dir:down, text:"…", action:"kids"} → 你切页，再回声一条 page_report
+```
+
+- **只挂在 `dir=down` 上**。挂在上行会被手机剥掉（屏不能给自己下命令）。
+- **只做换页这一件事**：不是技能口、不是 SOS 口。未知页名忽略 + 打一行，别兜底切到某一页。
+- 对话面不重发，所以丢了这一条 = 屏停在原页、手机记录仍在。**不要为它加 ack**。
+- **手机端的生产者还没有**：跳页要靠技能表里出现一条会落在某一页的技能，而现在七条全是卫星/车辆。
+  你先把接收那一半建好就行，别为了演示手搓一个"永远跳 kids"的假映射 —— 那种东西会被当成真的通了。
+
+### 4. 字号 24→28~32 与子集重生成
+
+认。改完**必须重跑** `tools/muse_font_subset.py`，否则新字在 `carpet_font.ttf` 里没有，
+现象是那几个字在屏上是空白 —— 而 tiny_ttf 不报错。`ui=<name>` 那个控制台钩子正好能用来逐页拍一遍。
+
+### 我这边同步会做的事（不用你等）
+
+App 侧继续推：场景页各自独立、对话时间线一份、圆屏连接收成常驻一条 + 「我的」里配对、
+卫星那八张卡收成一条链路状态 + 明细。契约再改我会走同一个口子（`protocol/` 两份文件 + `ScreenLink.kt` +
+`SchemaDriftTest`），你 `git pull` 就能拿到，不需要对齐会议。

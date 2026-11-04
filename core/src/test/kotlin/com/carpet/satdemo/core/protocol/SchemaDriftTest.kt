@@ -262,6 +262,18 @@ class SchemaDriftTest {
         val gated = cStringTable(componentSource(), "ALLOWED").toSet()
         assertTrue(screenSends.all { it in gated }, "组件那道闸挡掉了屏要发的指令：${screenSends - gated}")
         assertTrue("card_set" !in cmd, "契约里不该出现让屏直接定卡的取值")
+        assertTrue("page_set" !in cmd, "契约里不该出现让手机直接定页的取值（定页权已经交给屏，见 DECISIONS D10）")
+
+        // 屏侧那张页表**现在还不存在**，所以这里不能 assumeTrue 跳过（多一条常年 skip 等于没有守卫，
+        // 而且交接文档里"至多 N 条 skip"那条判据会被它拖脏）。写法是：它一旦出现就必须一模一样。
+        // 表名定死 `PAGE_NAMES` —— 交接手册里给的就是这个名字，改了名这条会静默失效，所以顺手钉一下
+        val table = Regex("static const char \\*const PAGE_NAMES\\[[^\\]]*]\\s*=\\s*\\{(.*?)};", RegexOption.DOT_MATCHES_ALL)
+            .find(patch)
+        if (table != null) {
+            val pages = Regex("\"([^\"]*)\"").findAll(table.groupValues[1]).map { it.groupValues[1] }.toSet()
+            val want = ScreenPage.entries.map { it.name }.toSet()
+            assertEquals(want, pages, "屏侧 PAGE_NAMES 和 ScreenPage 对不上：多的是 ${pages - want}，缺的是 ${want - pages}")
+        }
     }
 
     @Test
