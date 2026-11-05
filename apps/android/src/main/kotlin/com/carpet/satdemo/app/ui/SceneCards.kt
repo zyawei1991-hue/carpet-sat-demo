@@ -1,24 +1,54 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.app.MaintStore
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.devices.DeviceLink
+import com.carpet.satdemo.core.maint.Severity
+import com.carpet.satdemo.core.maint.Suggestion
+import com.carpet.satdemo.core.maint.WorkOrderCodec
+import com.carpet.satdemo.core.vehicle.ReadingBoard
+import com.carpet.satdemo.core.vehicle.ReadingKey
+import com.carpet.satdemo.core.vehicle.TIRE_KEYS
 import com.carpet.satdemo.core.devices.Tone as CoreTone
 import com.carpet.satdemo.core.screen.ScreenLinkServer
+import kotlin.math.roundToInt
 
 /**
  * 用车养车 / 亲子 / 健康 / 数字分身 四个场景包的卡片。
@@ -26,20 +56,45 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
  * **这一整份文件里的数字都不是测出来的**，是场景壳的占位。之所以现在就画出来：
  * 前装车到底开放哪些数据还没定（§9 的外部依赖），而"卡片长什么样、要哪几个字段"
  * 是我们可以先定下来的东西 —— 等答复的时候改的是取数，不是版式。
- * 每张卡都靠 [InkCard.mock] 打上「示意数据」，观众不会把桩读成实测。
+ *
+ * 改的就是取数 —— 这是字面意思。车辆那几张卡现在读的是 [CardScope.board] 那一帧读数，
+ * 每条目带着它自己的来源档，「示意」那个标是读数自己说出来的（[InkCard.mock]），
+ * 不是卡片画上去的。接上 OBD/TPMS 那天，桩自己消失，版式一行不动。
  */
 
 @Composable
 fun VehicleStatusCard(s: CardScope) {
+    val b = s.board()
     val parked = s.status.snapshot?.sentinel?.armed == true
-    InkCard(icon = MIcons.vehicle, mock = s.mock(Capability.VehicleBus)) {
+    val keys = listOf(ReadingKey.RangeKm, ReadingKey.FuelFraction, ReadingKey.OdometerKm) + TIRE_KEYS
+    // 打不打标由这一组读数的来源决定：掺了桩就标，全真就自己把标摘掉
+    InkCard(icon = MIcons.vehicle, mock = b.badge(keys) != null) {
         CardTitle("整车状态", trailing = if (parked) "哨兵布防中" else "熄火停车")
-        ValueRow("剩余续航", "412 km")
-        ValueRow("油量", "3/4 箱")
-        ValueRow("胎压", "2.4 / 2.4 / 2.3 / 2.5 bar")
-        ValueRow("累计里程", "23,417 km")
+        ValueRow("剩余续航", b.text(ReadingKey.RangeKm, "%.0f km"))
+        ValueRow("油量", b.of(ReadingKey.FuelFraction)?.let { fuelLine(it.value) })
+        ValueRow("胎压", b.tireLine())
+        // `%.0f` 不是笔误：读数是 Double，`%,d` 会在运行时抛 IllegalFormatConversionException，
+        // 而这一行只在**有数**的时候才走到 —— 空态截图永远拍不到它
+        ValueRow("累计里程", b.text(ReadingKey.OdometerKm, "%,.0f km"))
     }
 }
+
+/** 油量说成四分之几，不说 0.75 —— 车主在加油站对的是表针刻度，不是小数 */
+private fun fuelLine(fraction: Double): String {
+    val n = (fraction * 4).roundToInt().coerceIn(0, 4)
+    return if (n == 4) "满箱" else if (n == 0) "见底" else "$n/4 箱"
+}
+
+/** 四轮胎压一行报完。分开四行会让这张卡只剩下胎压这一件事 */
+private fun ReadingBoard.tireLine(): String? {
+    val ts = TIRE_KEYS.mapNotNull { of(it) }
+    if (ts.isEmpty()) return null
+    return ts.joinToString(" / ") { "%.1f".format(it.value) } + if (ts.size == 4) " bar" else " bar（缺 ${4 - ts.size} 只）"
+}
+
+/** 一条读数按格式念出来。没有就是没有，不补一个看起来像数的 0 */
+private fun ReadingBoard.text(key: ReadingKey, fmt: String): String? =
+    of(key)?.let { fmt.format(it.value) }
 
 /** 寻车：最后已知位置是**真**的（来自手机 GNSS），只有"车位记忆"那部分是桩 */
 @Composable
@@ -67,24 +122,241 @@ fun VehicleFindCard(s: CardScope) {
     }
 }
 
+/**
+ * 「该做的事」。**这不是推荐流**：每一条都说得出自己是哪两条读数算出来的、判据是谁定的。
+ *
+ * 三行一行都不能少，因为它们各回答一个不同的问题：
+ *  第一行 = 做什么；第二行 = 为什么现在（读数 + 判据）；第三行 = 这两样各是真是假。
+ * 少第二行它退回成一句广告，少第三行就等于我们把桩数据摆成实测。
+ *
+ * **缺读数的规则整条不出现**（[ReadingBoard] 那条），所以这里没有「数据不足」那种占位行：
+ * 一条说不准的建议会把同屏真建议的信任一起拉下去，而少一行只是少一行。
+ */
 @Composable
 fun VehicleServiceCard(s: CardScope) {
-    InkCard(icon = MIcons.ticket, mock = s.mock(Capability.VehicleBus)) {
-        CardTitle("养车工单")
-        RowWork("保养", "还有 830 km", Tone.Wait)
-        RowWork("轮胎换位", "已逾期 12 天", Tone.Alert)
-        RowWork("年检", "明年 3 月", Tone.Neutral)
+    val maint = s.app.maint
+    val scene by s.app.scene.collectAsState()
+    val selected by maint.selected.collectAsState()
+    val mine = run {
+        val all = maint.suggest(s.board())
+        // 视图按页（D11）：车辆页是全集，亲子页只留挂着孩子那一条
+        if (scene == Scene.Kids) all.filter { it.sceneKey == "kids" } else all
+    }
+    val picked = mine.filter { selected.contains(it.code) }
+    val tone = when (mine.firstOrNull()?.severity) {
+        Severity.Due -> Tone.Alert
+        Severity.Soon -> Tone.Wait
+        else -> Tone.Neutral
+    }
+
+    InkCard(icon = MIcons.task, tone = tone, mock = mine.any { it.badge != null }) {
+        CardTitle("该做的事", trailing = if (mine.isEmpty()) null else "${mine.size} 项")
+        if (mine.isEmpty()) {
+            Text(
+                if (scene == Scene.Kids) "还没有轮到孩子的那几项。把「车上有孩子」打开，空调滤芯会提前提醒"
+                else "现在没有到点的事。判据还没接手册，所以这句话只说明读数没越线",
+                style = Type.Caption,
+                color = Ink.TextLow,
+            )
+        }
+        mine.forEach { sg ->
+            SuggestionRow(sg, selected.contains(sg.code)) { maint.toggle(sg.code) }
+        }
+
+        MaintFold(
+            "生成工单",
+            if (picked.isEmpty()) "勾中的才进工单" else "已勾 ${picked.size} 项",
+        ) { OrderSection(s, maint, picked) }
+
+        MaintFold("判据是谁定的", maint.criteria.badge ?: "判据已接手册") {
+            TextInputRow(
+                placeholder = "上次保养时里程 · 现在 %,d km".format(maint.lastServiceKm()),
+            ) { v -> maint.setLastServiceKm(v); s.app.say("记下了：上次保养在 %,d km".format(v)) }
+            TextInputRow(
+                placeholder = "上次保养距今 · 现在 %d 天".format(maint.lastServiceDays()),
+            ) { v -> maint.setLastServiceDays(v); s.app.say("记下了：上次保养是 $v 天前") }
+            TextInputRow(
+                placeholder = "上次换空调滤芯 · 现在 %d 天".format(maint.filterDays()),
+            ) { v -> maint.setFilterDays(v); s.app.say("记下了：滤芯是 $v 天前换的") }
+            ToggleBoolRow("车上有急救包", maint.hasKit()) {
+                maint.setHasKit(it)
+                s.app.say(if (it) "记下了：车上有应急包" else "记下了：车上没有应急包")
+            }
+            ToggleBoolRow("车上有孩子", maint.hasChild()) {
+                maint.setHasChild(it)
+                s.app.say(if (it) "记下了：车上有孩子，滤芯那条会提前提醒" else "记下了：车里不带孩子")
+            }
+            Text(
+                "间隔和标定胎压还等手册（保养 10,000 km / 12 个月、标定 2.5 bar），所以这几条判据现在都带着标",
+                style = Type.Caption,
+                color = Ink.Wait,
+            )
+        }
     }
 }
 
 @Composable
-private fun RowWork(name: String, state: String, tone: Tone) {
+private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestion>) {
+    if (picked.isEmpty()) {
+        Text("勾上面的行，勾中的才进工单", style = Type.Caption, color = Ink.TextLow)
+        return
+    }
+    val order = maint.order(picked)
+    val bytes = WorkOrderCodec.encode(order)
+    val clip = LocalClipboardManager.current
+    Text(
+        WorkOrderCodec.describe(WorkOrderCodec.decode(bytes)),
+        style = Type.Mono,
+        color = Ink.TextMid,
+    )
+    Text(
+        "%d 字节 · %s".format(bytes.size, if (WorkOrderCodec.fits(s.app.usage().budget)) "一帧装得下" else "装不进一帧"),
+        style = Type.Caption,
+        color = Ink.TextLow,
+    )
+    // 两句实话：车架号得接上 OBD 才读得到；上行是 M2，还没接，所以这一帧现在只在手机里
+    if (!maint.vinReal) Text("车架号是编的：接上 OBD 盒子才读得到后 6 位", style = Type.Caption, color = Ink.Wait)
+    val base by s.app.scene.collectAsState()
+    val choice by s.app.privacyChoice.collectAsState()
+    Text(
+        if (maint.canSendOut(base.profile.basePrivacy, choice)) {
+            "卫星上行还没接。这一帧现在只在手机里，复制出去对码"
+        } else {
+            "生效隐私档是本地留存：工单只存手机，不上行"
+        },
+        style = Type.Caption,
+        color = Ink.TextLow,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
+        GhostAction("复制全文") {
+            clip.setText(AnnotatedString(WorkOrderCodec.describe(WorkOrderCodec.decode(bytes))))
+            s.app.say("工单复制好了")
+        }
+        GhostAction("清空勾选") { maint.clearSelected() }
+    }
+}
+
+@Composable
+private fun SuggestionRow(sg: Suggestion, checked: Boolean, onToggle: () -> Unit) {
+    val tone = when (sg.severity) {
+        Severity.Due -> Tone.Alert
+        Severity.Soon -> Tone.Wait
+        Severity.Note -> Tone.Neutral
+    }
+    // 整行可点：勾选框只有 40dp，让人在手机上瞄准一个小方块点十次是设计者的失败
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .defaultMinSize(minHeight = 48.dp),
+        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(name, style = Type.Body)
-        Text(state, style = Type.Caption.copy(color = if (tone === Tone.Neutral) Ink.TextMid else tone.color))
+        Checkbox(checked = checked, onCheckedChange = { onToggle() })
+        // weight(1f) 不是好看：没有它，右边那枚「到点」按自身宽度量，长说明会直接压在它上面
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
+            // chip 与标题同一行、顶部对齐：居中压在四行小字旁边，字号 1.3 时它像属于第二行
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(sg.headline, style = Type.Body, color = Ink.TextHigh, modifier = Modifier.weight(1f))
+                Badge(sg.severity.label, tone)
+            }
+            Text("${sg.detail} · 判据 ${sg.judgement.text}", style = Type.Caption, color = Ink.TextMid)
+            // 两个标一行一个：并成一句在 1.3 字号下必然断在「未接 / 手册」中间，把出处拆成半句
+            listOfNotNull(sg.badge, sg.judgement.source.badge).distinct().forEach { mark ->
+                Text(mark, style = Type.Overline, color = Ink.Wait)
+            }
+        }
+    }
+}
+
+/** 卡片内的折叠区。和 [CollapsableNote] 同一个形状，区别是里面装的是控件不是一段话 */
+@Composable
+private fun MaintFold(label: String, hint: String, content: @Composable ColumnScope.() -> Unit) {
+    val reduce = LocalReduceMotion.current
+    var open by rememberSaveable(label) { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .defaultMinSize(minHeight = 48.dp),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (open) MIcons.collapse else MIcons.expand,
+                contentDescription = null,
+                tint = Ink.TextLow,
+                modifier = Modifier.size(14.dp),
+            )
+            Text(label, style = Type.Caption.copy(color = Ink.Sat))
+            Text(hint, style = Type.Caption, color = Ink.TextLow, modifier = Modifier.weight(1f))
+        }
+        AnimatedVisibility(visible = open, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
+            Column(
+                modifier = Modifier.padding(top = Grid.x8),
+                verticalArrangement = Arrangement.spacedBy(Grid.x8),
+                content = content,
+            )
+        }
+    }
+}
+
+/**
+ * 车主填一个数。**框内实心底、不描边**：卡片已经是一个框，框里再套一个框就是"乱"的来处
+ * （和首页那条发问栏同一条理由）。当前生效值写在占位里，所以不用再配一行标签。
+ */
+@Composable
+private fun TextInputRow(placeholder: String, onCommit: (Int) -> Unit) {
+    var draft by rememberSaveable(placeholder) { mutableStateOf("") }
+    val commit = {
+        val v = draft.filter { it.isDigit() }
+        if (v.isNotEmpty()) onCommit(v.toInt())
+        draft = ""
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Ink.Sunk, RoundedCornerShape(Round.Chip)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BasicTextField(
+            value = draft,
+            onValueChange = { d -> if (d.all { it.isDigit() } && d.length <= 7) draft = d },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            textStyle = Type.Body.copy(color = Ink.TextHigh),
+            cursorBrush = SolidColor(Ink.Sat),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { commit() }),
+            decorationBox = { inner ->
+                Box(modifier = Modifier.padding(horizontal = Grid.x12, vertical = Grid.x8)) {
+                    if (draft.isEmpty()) Text(placeholder, style = Type.Body, color = Ink.TextLow)
+                    inner()
+                }
+            },
+        )
+        GhostAction("记", onClick = commit)
+    }
+}
+
+/** 开关量。「车上有孩子」这一条会改掉一条判据，所以它得是个能核对的开关，不是卡片角落的一颗芯片 */
+@Composable
+private fun ToggleBoolRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChange(!checked) }
+            .defaultMinSize(minHeight = 48.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = Type.Body, modifier = Modifier.weight(1f).padding(end = Grid.x12))
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -159,6 +431,18 @@ fun HealthVitalsCard(s: CardScope) {
             style = Type.Caption,
             color = Ink.Wait,
         )
+    }
+}
+
+/** 名称 + 状态的一行。打卡和养车那几张示意卡共用这个形状 */
+@Composable
+private fun RowWork(name: String, state: String, tone: Tone) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(name, style = Type.Body)
+        Text(state, style = Type.Caption.copy(color = if (tone === Tone.Neutral) Ink.TextMid else tone.color))
     }
 }
 

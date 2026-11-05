@@ -52,7 +52,7 @@ object Cards {
             // 用车养车
             CardDescriptor("vehicle.status", "整车状态", CardGroup.Vehicle, setOf(Capability.VehicleBus), hero = true) { VehicleStatusCard(it) },
             CardDescriptor("vehicle.find", "寻车", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleFindCard(it) },
-            CardDescriptor("vehicle.service", "养车工单", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleServiceCard(it) },
+            CardDescriptor("vehicle.service", "该做的事", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleServiceCard(it) },
             CardDescriptor("vehicle.energy", "能耗", CardGroup.Vehicle, setOf(Capability.VehicleBus)) { VehicleEnergyCard(it) },
 
             // 亲子

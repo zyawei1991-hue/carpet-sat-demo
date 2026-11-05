@@ -3,6 +3,7 @@ package com.carpet.satdemo.app.ui
 import androidx.compose.runtime.Composable
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.runtime.DemoRuntime
+import com.carpet.satdemo.core.vehicle.ReadingBoard
 
 /**
  * 一件事有没有真数据源。§5.3 硬要求 #3 的三档说法：
@@ -74,7 +75,8 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
             // usage 也从这一串里拿掉了 —— 它在「我的」里已经画了一次，一页两张同名重卡是最直接的"乱"。
             // position 同理：它报的是"手机现在在哪"，而车辆页要的是"车在哪"，那是寻车那张卡的事；
             // 原始经纬度和 HDOP 留在「户外无网」那一串里，徒步的人才需要自己核对坐标
-            cards = listOf("sos", "link", "vehicle.status", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue"),
+            // service 紧跟 status：车主看完"车现在怎么样"，下一句要的是"所以现在该做什么"
+            cards = listOf("sos", "link", "vehicle.status", "vehicle.service", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue"),
             actions = listOf("寻车", "远程熄火", "上报车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
@@ -100,7 +102,9 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         "AI 育儿 · 安全围栏",
         SceneProfile(
             headline = "fence",
-            cards = listOf("fence", "kids.control", "kids.growth", "kids.ai", "position", "dock", "sos"),
+            // vehicle.service 在这一页只出挂着孩子那一条（滤芯）。同一张卡、同一份规则，
+            // 换一页换一个视图 —— 见 docs/DECISIONS.md D11，卡片不认场景，只认自己那条 sceneKey
+            cards = listOf("fence", "kids.control", "kids.growth", "vehicle.service", "kids.ai", "position", "dock", "sos"),
             actions = listOf("设围栏", "限时", "呼叫家长"),
             input = InputMode.DockSideKey,
             basePrivacy = PrivacyTier.Strict,
@@ -152,6 +156,15 @@ class CardScope(val app: AppRuntime, val status: DemoRuntime.Status) {
 
     /** 卡片直接用它决定要不要打「示意数据」那个徽标 */
     fun mock(c: Capability): Boolean = avail(c) == Availability.Mocked
+
+    /**
+     * 这一帧车况读数。车辆那几张卡读同一份，**不在卡片里各编各的数** ——
+     * 一旦每张卡自己写字符串，"整车主页 412 km、该做的事那条说 380 km"就是迟早的事。
+     */
+    fun board(): ReadingBoard {
+        val u = app.usage()
+        return app.maint.board(u.waiting, u.capacity.takeIf { it > 0 }, app.maint.quotaReal)
+    }
 }
 
 /**

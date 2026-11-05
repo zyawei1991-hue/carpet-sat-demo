@@ -69,6 +69,9 @@ class AppRuntime(private val host: Application) {
 
     private val prefs = host.getSharedPreferences("demo", 0)
 
+    /** 车况养护推荐的那份状态。判据、勾选、录入都在这，规则本身在 `:core` */
+    val maint = MaintStore(prefs)
+
     /** 星历替身。开关切到厂商 SDK 后它就退场，但「模拟未过顶」那个开关还得能改口，所以留着引用 */
     private var simEph: SimulatedEphemerisSource? = null
     private var ephSource: EphemerisSource? = null
