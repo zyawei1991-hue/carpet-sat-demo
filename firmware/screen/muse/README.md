@@ -3,7 +3,7 @@
 这份是给**另一台电脑**看的。你要研究的是"功能整合进我们自己的 App"，所以正文在第 5 节；
 前面几节只到"能把这一版重出来、能刷上板"为止。
 
-基准：本文件与 `muse-carpet.patch` 记的是 2026-11-04 的状态。
+基准：本文件与 `muse-carpet.patch` 记的是 2026-11-05 的状态。
 
 ---
 
@@ -25,15 +25,16 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 12 个文件、1487 行新增 / 20 行删，外加一份 154,528 字节的字库
-  （`muse-carpet.patch`，3,907 行，`git diff --binary` 打的，字库在里面是 base85 段）：
+- 我们的全部改动 = 12 个文件、1586 行新增 / 20 行删，外加一份 154,528 字节的字库
+  （`muse-carpet.patch`，4,006 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  17 +-   (+embed 那行)
   esp32/components/muse/Kconfig              |  14 +
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
   esp32/components/muse/carpet/carpet_link.c | 383 +   (新，链路 + 上行命令队列 + page_report)
   esp32/components/muse/carpet/carpet_link.h |  77 +   (新)
-  esp32/components/muse/carpet/carpet_page.c | 746 +   (新，场景选择页 + 五个场景页 + 明细页)
+  esp32/components/muse/carpet/carpet_page.c | 845 +   (新，第 1 层宫格 + 五个场景页 + 明细页)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
   esp32/components/muse/muse_input.c         |  29 +   (>carpet / >page 回读 + bench 命令 ui=carpet)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
@@ -43,9 +44,12 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，12 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮改完重打过一次，
-  并且在 baseline 干净树上重打**验过 `PAGE_NAMES` 解得出来**（漂移测试靠这一个符号，
-  补丁里没有它就是静默不比，绿灯是假的）。重打命令（**`components/screen_link` 必须排除**，
+  每次改动都重打并在干净树上验一遍，记两笔：
+  - 2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮 —— 验过 `PAGE_NAMES`
+    解得出来（漂移测试靠这一个符号，补丁里没有它就是静默不比，绿灯是假的）。
+  - 2026-11-05 宫格那轮 —— `carpet_page.c` 解出来 845 行、`carpet_font.ttf` 154,528 字节、
+    `PAGE_NAMES` 在。
+  重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
@@ -130,11 +134,21 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 车联格里面是**三层**，都在这块玻璃上自己走完，不需要手机参与（2026-11-04 深夜那一轮改的）：
 
 ```
-第 1 层 场景选择   车载 / 亲子 / 数字分身 / 时钟 / 图片播放   （点一条 = 进第 2 层）
+第 1 层 场景选择   五个场景摆成宫格（一行三张、116 的方卡、卡里一颗字 + 场景名）
+                  车载 / 亲子 / 数字分身 / 时钟 / 图片播放   （点一张 = 进第 2 层）
 第 2 层 场景页     这个场景里现在说什么 + 页底那排按钮 + 每条可点进第 3 层
 第 3 层 明细       一条一个字段的大字读数，只回一层
 返回有两条：每页左上角那颗「返回」，和**从左边缘向右滑**（≥60 px，阈值还没实测，见 §9.4）
 ```
+
+第 1 层 2026-11-05 从"五行列表"改成宫格（他点名要"像 app 那样"）。两条值得记的：
+卡片里那颗字**用的是场景名的第一个字**（车/亲/分/钟/图），不是图标 —— LVGL 自带那 32 个
+FontAwesome 符号里没有汽车、没有人、也没有钟，硬凑只会印出一个对不上号的图；而字取自己名字里
+的第一个，子集里一定会有（名字本身就要画）。宫格一行只摆得下三个，所以第二行是
+**时钟 + 图片播放**，右边那一格空着 —— 这是手机 app 的流式排法，不是漏摆。
+每格一颗色，全部取自 Muse 自己用过的色号（见 §5.6）；图片播放那一格整格压暗，
+它这一版没接上，不该长得和其他四格一样能用。
+**这一层一个值都不显示**：条目右边跟着帧变会让人以为手机在报这个数，那条红线从列表那版就有。
 
 第 3 层不设"层数上限"这种说法：它是明细，不是新的一屏功能。**图片播放这一版是明着的空页**
 （屏上不放假数据，进去只有一句"这一版还没接上"），别当已通去讲。
@@ -276,10 +290,12 @@ cp D:/dev/tmp/carpet-muse.ttf firmware/screen/muse/font/carpet_font.ttf
 2. 那工具是**扫源码里的非 ASCII**，连注释一起扫（所以词表比页面真正画的字多，
    这一版扫到 685 个码位、子集里真的收下 683 个，缺的 `⇒` 和 `・` 只出现在注释和 EXTRA 里、不会上屏）。
    想再压尺寸就得不扫注释，但那会漏掉查表翻出来的中文，别省这一步。
-3. 字号阶梯只有两档：28 px（页面标题、条目名）和 22 px（值、副行、按钮）。
-   再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下"六个入口 / 五行加一排按钮"：
-   300 宽的一列最高只能 356 px（半宽 150、半径 233 算出来的），实测第一层 330 px、
-   最满的场景页 338 px。算式写在 `carpet_page.c` 开头那几行注释里。
+3. 字号阶梯三档：**30 px** 只给宫格那颗字（视觉锚点，不承担读）、**28 px** 页面标题与条目名、
+   22 px 值/副行/按钮/场景名。再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下：
+   300 宽的一列最高只能 356 px（半宽 150、半径 233 算出来的），实测最满的场景页 338 px。
+   宫格那一层不走这条：它是定宽定高的盒子 + 绝对坐标，116 的方卡一行三张，
+   每卡的四个角都按半径 233 逐角称过（最紧的一张外角 223 < 233）。
+   两处算式都写在 `carpet_page.c` 开头那几行注释里，改尺寸前先复算那里。
 
 `devices/sdkconfig.carpet` 里因此有三条，**第三条不是调优，是压 bug**：
 
@@ -290,14 +306,19 @@ CONFIG_LV_TINY_TTF_CACHE_KERNING_CNT=0     # 不为 0 会画坏字（LVGL 的跨
 ```
 
 字模缓存落在 PSRAM：Muse 把 LVGL 的分配器接到了 PSRAM（`muse_lv_mem.c`），
-所以这两档缓存不会来抢内部 RAM。开机判据就一行：
+所以这三档缓存不会来抢内部 RAM。开机判据就一行：
 
 ```
-I (2679) carpet_page: tiny_ttf 123804 字节 → 24/20px
+I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 ```
 
-镜像尺寸这笔账要盯着：app 分区 4M，这一版 `muse-gadget.bin` 是 **3,280,896 字节，余 913,408（22%）**。
-字库那份 123,804 是直接从整片 Noto 里裁出来的；**整片子集（2.18MB）这条路是走不通的**，
+**"内部 RAM"这四个字在这台板子上是硬约束**，2026-11-05 就是它把链路饿死的：Muse 这一版跑起来之后
+整块内部 RAM 只剩 12~13K、最大连续块 4K，而 `esp_websocket_client` 那个任务的栈要从内部 RAM
+要一整块连续的 —— 我们原来给它 8192，真机上直接 `Error create websocket task`。
+处理见 §9.5，别把它当成"调调参数就好了"的事：**新加一个用内部 RAM 的东西之前，先算这一本账**。
+
+镜像尺寸这笔账要盯着：app 分区 4M，这一版 `muse-gadget.bin` 是 **3,346,432 字节，余 831,484（20%）**。
+字库那份 154,528 是直接从整片 Noto 里裁出来的；**整片子集（2.18MB）这条路是走不通的**，
 装不进这个分区，所以才要工具。
 
 ## 6. 现场怎么连（拓扑与地址）
@@ -613,12 +634,16 @@ D:/dev/jdk/jdk-17.0.20.1+1/bin/java.exe -cp "$JW;/d/dev/tmp/halfopen;$SL" HalfOp
 
 **还没验的，别当已验**：
 
-1. **`page_report` 真的上线**。屏里烧的 URL 是 `ws://192.168.43.1:8443`（手机开热点时它自己），
-   而这台机器上的彩排台在 `192.168.43.161:8443`，`@status` 里那块屏连的是热点、ping 得通，
-   但 Windows 默认挡入站 —— 现在这台机器上**没有**任何放行 8443 的规则（`netsh ... show rule` 查过，空）。
-   要走 PC 当服务端就得：跑一次 `../tools/firewall-allow-8443.cmd`（管理员，装完永久，
-   还原命令写在那份 .cmd 里）→ 改 `build-muse-s3-175-carpet/sdkconfig`（未跟踪那份）的 URL → 重编 → `app-flash`。
-   判据是**彩排台日志**出现 `cmd      page_report  args={"page":"kids"}`，而屏上 `>carpet` 变 `reported=1`。
+1. **`page_report` 真的上线**。屏里烧的**就是 PC 的地址** —— `ws://192.168.43.161:8443`
+   （`build-muse-s3-175-carpet/sdkconfig` 2026-11-04 19:44 改的，22:08 编进 build #14；
+   这条我是从 `muse-gadget-unsigned.bin` 里把 `ws://…` 那个字符串抓出来认的，
+   不是从 `devices/sdkconfig.carpet` 推的 —— 那份跟踪文件里的手机地址**根本没进这版二进制**，
+   我按它推过一次，错了）。彩排台确实在 `0.0.0.0:8443` 听着（PID 12968），
+   这台机器上却**没有任何放行 8443 的入站规则**（`netsh … show rule` 查过，空），所以 `linked` 一直是 0。
+   要走通就一件事：跑一次 `../tools/firewall-allow-8443.cmd`（管理员，装完永久，
+   还原命令写在那份 .cmd 里）——**不用改 URL、不用重编重刷**。
+   判据是**彩排台日志**出现 `cmd      page_report  args={"page":"kids"}`（`DemoDriver.kt:191`），
+   而屏上 `>carpet` 变 `reported=1`。
 2. **手指走一遍三层**：入口点得进、场景页点得进明细、返回两条（左上角那颗 + 左边缘右滑）都回得去。
    串口只能替我翻页，替不了"点得到"。
 3. **28 / 22 的字有没有掉到 16 px 那份 fallback**。这轮把字库重跑过一次
@@ -631,3 +656,53 @@ D:/dev/jdk/jdk-17.0.20.1+1/bin/java.exe -cp "$JW;/d/dev/tmp/halfopen;$SL" HalfOp
 `SchemaDriftTest` 里那条"它一旦出现就必须和 `ScreenPage` 一模一样"从此**真的在比**
 （以前是 `table == null` 静不比，等于没有守卫）；补丁在 baseline `cdc169d` 干净树上
 `git apply` 打过一次，12 个文件、字库解出来 154,528 字节一致。
+
+### 9.5 第二天（11-05）：宫格上了板，而"连不上"的真身不是防火墙
+
+他点名"场景选择做得有点 low，最好像 app 选择那样"→ 第 1 层从五行列表改成宫格（形状见 §5.1，
+尺寸算式见 §5.6）。同一天把 `linked=0` 查到底，结论**推翻了我前一天写在 §9.4 第 1 条的判断**：
+
+```
+E (7039) websocket_client: Error create websocket task        ← 真凶，前一天没人看这一行
+I (…) link.heartbeat: … ws=down … int=13K/4K min=6K           ← 内部 RAM：剩 13K，最大连续块 4K
+```
+
+两件事叠在一起才表现为"永远连不上"：
+
+1. **ws 任务的栈开不出来**。`esp_websocket_client` 那个任务的栈要从**内部 RAM** 要一整块连续的，
+   我们给了 8192；Muse 这一版跑起来后内部 RAM 最大连续块只有 4K ⇒ `xTaskCreate` 失败。
+   这一版那个组件里**没有** `task_stack_in_psram` 这个配置项（贴到源码看过），躲不开，只能少要。
+2. **失败之后它再也不试**。`link_task` 里 `esp_websocket_client_start()` 的返回值没人看，
+   任务没建起来 ⇒ `BIT_UP`/`BIT_DOWN` 再没人置 ⇒ 下面那句 `portMAX_DELAY` 死等。
+   退避阶梯一次都没跑过。所以屏的"未接入"不是"还在等"，是**已经躺平了**。
+
+改了三处（都在 `components/screen_link/screen_link.c`，仓库那份是源头，Muse 树那份是 `cp -r` 的产物）：
+栈 8192→4096（就是组件自己的默认档 `WEBSOCKET_TASK_STACK`，明文 ws:// 没有 TLS 吃栈）、
+攒帧那 4KB 从 `.bss` 挪去 PSRAM（`.bss` 每字节都是从内部 RAM 挖的，挪走还给堆一个整块）、
+`start()` 失败走**和断线同一条**退避阶梯。重复 `start()` 是安全的：`create_transport` 进来先销毁上一轮的
+`transport_list`（组件源码里读到的，不是猜的）。
+
+顺手补了两条日志（CONNECTED 一条、DISCONNECTED/ERROR 各一条）。为什么补：连不上时组件**一个字都不打**
+（`abort_connection` 只派事件不记日志），串口里 40 秒静默，分不清"任务活着但在撞防火墙"和
+"任务压根没建起来"——前一天就是把这份静默当成了"只差防火墙"。改完实测：
+
+```
+W (17063) screen_link: ws 断开/未接通，下一次按退避阶梯再来
+W (55207) screen_link: ws 断开/未接通，下一次按退避阶梯再来      ← 间隔跟着阶梯走，重试是真的在跑
+```
+
+**于是 §9.4 第 1 条剩下的那半才是真的**：现在是**超时**（`ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT`）
+而不是拒绝 —— 拒绝说明到了但没人听，超时说明包被静默丢掉，这台机器上确实没有放行 8443 的入站规则。
+`../tools/firewall-allow-8443.cmd` 那份要管理员跑一次。**它前一天没生效过一次**：那份 .cmd 是 LF 结尾，
+cmd.exe 解析括号块会跑偏（`'----' 不是内部或外部命令`），整段静默什么都不做；现在文件是 CRLF，
+而且 `.gitattributes` 里加了 `*.cmd text eol=crlf` —— 仓库那条 `* eol=lf` 会在对端机器把它签回 LF，
+这个坑就会原样复发。每次运行都往 `D:\dev\tmp\fw-run.log` 记一行（`RUN …` / `NOT_ADMIN` / `ADD_EXIT=…`），
+跑没跑成有据可查，别再靠"我点了"判断。这轮的 13:00 那条是我自己以非管理员跑通的语法验证（`RUN` + `NOT_ADMIN`
+两行都在，脚本终于走到判断那一步了），规则仍未落地。
+规则落地后的判据不变：彩排台日志出现
+`cmd      page_report  args={"page":"kids"}`，同时屏上 `>carpet` 从 `reported=0` 变 `reported=1`。
+
+§2 那份 `muse-carpet.patch` 这轮重打过（**4,006 行**），`SchemaDriftTest` 实跑 5 条全 PASSED。
+宫格这版**还没有肉眼确认**：正式构建 `CONFIG_LV_USE_SNAPSHOT` 是关的，抓不到像素，
+所以"三个一行 + 第二行两张、右边空着"这个排法、以及每格那颗字，都得他在屏前看一眼才算数。
+

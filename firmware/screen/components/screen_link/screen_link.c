@@ -16,6 +16,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
@@ -78,8 +79,11 @@ static volatile int64_t s_state_ts_ms = 0;
 static portMUX_TYPE s_ts_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool s_stopping = false;
 
-/* 攒分片用的缓冲：只在 ws 回调线程里碰，所以不用锁 */
-static char s_asm[SCREEN_LINK_MAX_FRAME];
+/* 攒分片用的缓冲：只在 ws 回调线程里碰，所以不用锁。
+ * 这 4KB 明确要 PSRAM，不留在 .bss：.bss 的每一字节都是从内部 RAM 里挖的，而 Muse
+ * 这一版的内部 RAM 只剩十几 KB、最大连续块 4K —— esp_websocket_client 那个任务的栈
+ * 就是从内部 RAM 要的连续块，2026-11-05 真机就是因为这个开不出来（见 link_task 的注释）。 */
+static char *s_asm;
 static int s_asm_len = 0;
 
 static char s_seen[DEDUP_RING][EVENT_ID_MAX];
@@ -418,13 +422,23 @@ static void ws_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
 
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "ws 接入 %s", s_cfg.url);
         s_asm_len = 0;
         s_up = true;
         xEventGroupSetBits(s_eg, BIT_UP);
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
+        /* 连不上时也走这一条：组件里 abort_connection 先派 DISCONNECTED（它自己不打日志），
+         * ERROR 只在有错误正文时才有。2026-11-05 就是被这条日志缺失坑的 —— 串口里 40 秒
+         * 一个字没有，分不清"任务活着但在撞防火墙"和"任务压根没建起来"。 */
+        ESP_LOGW(TAG, "ws 断开/未接通，下一次按退避阶梯再来");
         s_up = false;
         xEventGroupSetBits(s_eg, BIT_DOWN);
+        break;
+    case WEBSOCKET_EVENT_ERROR:
+        if (evt->data_len > 0 && evt->data_ptr != NULL) {
+            ESP_LOGW(TAG, "ws 错误：%.*s", (int)evt->data_len, (char *)evt->data_ptr);
+        }
         break;
     case WEBSOCKET_EVENT_DATA: {
         if (evt->data_len <= 0) break;
@@ -498,7 +512,18 @@ static void link_task(void *arg)
     for (;;) {
         if (s_stopping) break;
 
-        esp_websocket_client_start(s_ws);
+        /* start() 自己建那个 ws 任务，而它的栈要从**内部 RAM** 要一块连续的 —— 组件没有
+         * 把栈放 PSRAM 的开关（这个版本的 config 里就没有 task_stack_in_psram 这一项）。
+         * 2026-11-05 真机抓到 "Error create websocket task"：那会儿内部 RAM 最大连续块
+         * 只剩 4K。以前这里不看返回值，失败后直接撞进下面那个 portMAX_DELAY 死等，
+         * UP/DOWN 两个位再没人置过，退避阶梯一次都没跑 —— 表现是"永远连不上，且再也不试"。
+         * 重复 start() 是安全的：create_transport 进来先把上一轮的 transport_list 销毁。 */
+        if (esp_websocket_client_start(s_ws) != ESP_OK) {
+            if (s_stopping) break;
+            sleep_backoff(BACKOFF_S[step]);
+            if (step < BACKOFF_STEPS - 1) step++;
+            continue;
+        }
         EventBits_t bits = xEventGroupWaitBits(s_eg, BIT_UP | BIT_DOWN | BIT_STOP, pdTRUE, pdFALSE,
                                                portMAX_DELAY);
         if (bits & BIT_STOP) break;
@@ -586,10 +611,18 @@ esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_call
     s_rx_q = xQueueCreate(8, sizeof(rx_item_t));
     if (s_eg == NULL || s_rx_q == NULL) return ESP_ERR_NO_MEM;
 
+    /* 攒分片那 4KB 从 PSRAM 要（理由见上面 s_asm 的注释）。要不到就明确失败，
+     * 不悄悄退回 .bss —— 那正是这次把链路饿死的形状。 */
+    s_asm = heap_caps_malloc(SCREEN_LINK_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_asm == NULL) return ESP_ERR_NO_MEM;
+
     esp_websocket_client_config_t ws_cfg = {0};
     ws_cfg.uri = s_cfg.url;
     ws_cfg.buffer_size = SCREEN_LINK_MAX_FRAME;
-    ws_cfg.task_stack = 8192;
+    /* 4096 = 组件自己在 task_stack 不给时的默认档（esp_websocket_client.c 里
+     * WEBSOCKET_TASK_STACK）。这里原来是 8192：内部 RAM 要一整块 8K，真机上开不出来。
+     * 走的是明文 ws://，没有 TLS 握手要吃栈，4K 这一档就是它设计的用途。 */
+    ws_cfg.task_stack = 4096;
     /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
      * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
      * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
@@ -615,6 +648,9 @@ esp_err_t screen_link_stop(void)
     for (int i = 0; i < 40 && s_task != NULL; i++) vTaskDelay(pdMS_TO_TICKS(50));
     esp_websocket_client_destroy(s_ws);
     s_ws = NULL;
+    free(s_asm);
+    s_asm = NULL;
+    s_asm_len = 0;
     s_up = false;
     s_stopping = false;
     return ESP_OK;

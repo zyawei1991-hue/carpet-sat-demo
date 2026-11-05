@@ -1,4 +1,8 @@
 * text=auto eol=lf
+# cmd.exe needs CRLF: an LF-only .bat/.cmd mis-parses `if (...)` blocks and can
+# run as a silent no-op (2026-11-05, firewall-allow-8443.cmd).
+*.cmd text eol=crlf
+*.bat text eol=crlf
 *.png binary
 *.jpg binary
 *.aar binary

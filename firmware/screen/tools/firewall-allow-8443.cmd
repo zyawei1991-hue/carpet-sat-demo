@@ -15,17 +15,30 @@ rem  (231 inbound allow rules already present).  One elevated run here and the P
 rem  becomes a usable server; on that other box it never will be.
 rem ---------------------------------------------------------------------------
 
+rem Each run rewrites D:\dev\tmp\fw-run.log with what it actually did, so a
+rem "I ran it and nothing happened" report can be checked against evidence
+rem instead of guessed.  (2026-11-05: the LF-only version of this file silently
+rem did NOTHING when double-clicked - cmd.exe mis-parses the if-block without CRLF.)
+if not exist D:\dev\tmp mkdir D:\dev\tmp
+echo RUN %date% %time% > D:\dev\tmp\fw-run.log
+
 net session >nul 2>&1
 if %errorlevel% neq 0 (
+  echo NOT_ADMIN >> D:\dev\tmp\fw-run.log
   echo NOT ADMIN. Right-click -^> Run as administrator.
   exit /b 1
 )
 
-netsh advfirewall firewall add rule name="carpet-sat-screen-link-8443" dir=in action=allow protocol=TCP localport=8443,8444 enable=yes profile=any
+netsh advfirewall firewall add rule name="carpet-sat-screen-link-8443" dir=in action=allow protocol=TCP localport=8443,8444 enable=yes profile=any >> D:\dev\tmp\fw-run.log 2>&1
+echo ADD_EXIT=%errorlevel% >> D:\dev\tmp\fw-run.log
 
 echo.
-echo Added. Verify it is really there:
-netsh advfirewall firewall show rule name="carpet-sat-screen-link-8443" | findstr /i "规则名 Name 本地端口 LocalPort 启用 Enabled"
+echo Now read the rule back - do not trust the word "Ok":
+rem Dump the whole rule instead of grepping it: a Chinese pattern in this file
+rem would be decoded with the console codepage and match nothing, which looks
+rem exactly like a missing rule.
+netsh advfirewall firewall show rule name="carpet-sat-screen-link-8443" >> D:\dev\tmp\fw-run.log 2>&1
+netsh advfirewall firewall show rule name="carpet-sat-screen-link-8443"
 
 echo.
 echo To undo later:

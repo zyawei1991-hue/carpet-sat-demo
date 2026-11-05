@@ -2689,10 +2689,10 @@ index 0000000..784708e
 +void carpet_link_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..cd3ea13
+index 0000000..2b6ae19
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,746 @@
+@@ -0,0 +1,845 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2745,8 +2745,9 @@ index 0000000..cd3ea13
 +#define FALLBACK NULL
 +#endif
 +
-+#define FONT_BIG   28   /* 场景名、条目名、详情的值：圆屏隔着两米读的那一档 */
-+#define FONT_SMALL 22   /* 提示、按钮、副行：和 Muse 正文同档，比条目名矮一级 */
++#define FONT_BIG    28   /* 场景名、条目名、详情的值：圆屏隔着两米读的那一档 */
++#define FONT_SMALL  22   /* 提示、按钮、副行：和 Muse 正文同档，比条目名矮一级 */
++#define FONT_GLYPH  30   /* 宫格卡片里那一颗字：只做视觉锚点，不承担读 */
 +
 +#if CONFIG_LV_USE_TINY_TTF
 +/* carpet_font.ttf 由本组件 CMakeLists 的 EMBED_FILES 进 rodata，符号名只取文件名 */
@@ -2756,6 +2757,7 @@ index 0000000..cd3ea13
 +
 +static lv_font_t *s_big;
 +static lv_font_t *s_small;
++static lv_font_t *s_glyph;
 +
 +/* 只在 LVGL 任务里调（build 由 muse_ui 的初始化发起）：create 会动 LVGL 的分配器。 */
 +static void fonts_init(void)
@@ -2767,7 +2769,13 @@ index 0000000..cd3ea13
 +    if (s_big && s_small) {
 +        s_big->fallback   = FALLBACK;
 +        s_small->fallback = FALLBACK;
-+        ESP_LOGI(TAG, "tiny_ttf %u 字节 → %d/%dpx", (unsigned)n, FONT_BIG, FONT_SMALL);
++        /* 宫格那颗字是同一份子集里已有的汉字（场景名的第一个字），只是再开一号。
++         * 开不出来就用 28 那档：字在，矮一点，不影响点。 */
++        s_glyph = lv_tiny_ttf_create_data(carpet_font_ttf_start, n, FONT_GLYPH);
++        if (!s_glyph) s_glyph = s_big;
++        s_glyph->fallback = FALLBACK;
++        ESP_LOGI(TAG, "tiny_ttf %u 字节 → %d/%d/%dpx",
++                 (unsigned)n, FONT_BIG, FONT_SMALL, FONT_GLYPH);
 +        return;
 +    }
 +    ESP_LOGE(TAG, "tiny_ttf 打不开这份子集，整页退回 16px");
@@ -2782,6 +2790,7 @@ index 0000000..cd3ea13
 +    }
 +    if (!s_big) s_big = &small16;
 +    if (!s_small) s_small = &small16;
++    if (!s_glyph) s_glyph = &small16;
 +}
 +
 +/* ---------- Muse 那套配色与卡片 ---------- */
@@ -2794,18 +2803,36 @@ index 0000000..cd3ea13
 +#define COLOR_ACCENT        0xa77dff
 +#define COLOR_OFF           0xff9a5c   /* 链路不健康：占的是 Muse COLOR_WARN 的位置 */
 +
++/* 宫格每格一颗色，全部取自 Muse 自己用过的色号（muse_ui.c 的 0x70baff / 0xffd060、
++ * muse_settings_ui.c 的 COLOR_OK）—— 这一页不能看起来比右滑那页更像外来户。 */
++#define COLOR_HUE_BLUE      0x70baff
++#define COLOR_HUE_MINT      0x6ff0bf
++#define COLOR_HUE_AMBER     0xffd060
++
 +/* 466 的圆里，宽 300 的一列上下各能让到多少：屏半径 233、半宽 150，
-+ * sqrt(233^2-150^2)=178 ⇒ 整列最高 356 px。下面每页都按这条上限排过：
-+ * L1 是 26+44+5*46+5*6=330，场景页最满的一页 44+34+3*52+26+44+5*6=338，
-+ * 都没顶到 356，最外那张的圆角不会被裁。 */
++ * sqrt(233^2-150^2)=178 ⇒ 整列最高 356 px。场景页都按这条上限排过：
++ * 最满的一页 44+34+3*52+26+44+5*6=338，没顶到 356，最外那张的圆角不会被裁。 */
 +#define COL_W      300
 +#define ROW_H      52
-+#define ROW_H_PICK 46
 +#define BTN_H      44
 +#define BTN_W      92   /* 三个并一排 276，余 24 分给两道间隙 */
 +#define TITLE_H    34
 +#define SUB_H      26
 +#define GAP        6
++
++/* L1 宫格。容器 364×380 居中 ⇒ 占 x 51..415、y 43..423，圆屏半径 233，逐角称过：
++ * 第一行卡片外角 (51,104) → sqrt(182²+129²)=223 ✓
++ * 第二行卡片外角 (51,344) → sqrt(182²+111²)=213 ✓
++ * 底部回脸条（宽 300）下角 (83,397) → sqrt(150²+164²)=222 ✓
++ * 顶部状态行那一带（y 43..71）可用宽只有 269，所以那句必须居中，不能贴左：
++ * 居中后最长的一句"掉线重连"（88px）离圆边还有 60 以上。 */
++#define GRID_CELL   116                 /* 一张场景卡：3 个一行 + 两道 8px 间隙 = 364 */
++#define GRID_GAP      8
++#define GRID_W     (3 * GRID_CELL + 2 * GRID_GAP)
++#define GRID_H    380
++#define GRID_ROUND  56                  /* 那颗字的圆底托 */
++#define GRID_ROWS_Y  61                 /* 第一行卡片在容器里的 y（往下是 61+124） */
++#define GRID_BACK_Y 310                 /* 回脸条：贴底会掉到圆外，这是称过的最后一档 */
 +
 +/* ---------- 页名：和契约的 ScreenPage 一字不差 ---------- */
 +
@@ -2821,45 +2848,54 @@ index 0000000..cd3ea13
 +
 +/* ---------- 条目表 ---------- */
 +
-+/* 右边的值从契约的哪一项来。F_TITLE = 场景入口（右边那句是静态提示，不是数据）；
-+ * F_NONE = 这一版还没接上的那一页 —— 不许拿旧值或占位数字糊上去。 */
-+enum { F_SAT, F_DIALOG, F_SOS, F_CARD, F_EMOTION, F_TITLE, F_NONE };
++/* 右边的值从契约的哪一项来。F_NONE = 这一版还没接上的那一页 —— 不许拿旧值或占位数字糊上去。 */
++enum { F_SAT, F_DIALOG, F_SOS, F_CARD, F_EMOTION, F_NONE };
 +
 +typedef struct {
 +    const char *name;
 +    int8_t field;
 +    int8_t target;    /* >=0 = 跳这一页（L1 的入口）；-1 = 进功能详情（L3） */
-+    const char *hint; /* 只给 F_TITLE：右边那一列的静态字 */
 +} row_def_t;
 +
 +#define PG_NONE (-1)
 +
-+static const row_def_t PICKER_ROWS[] = {
-+    { "车载",     F_TITLE, PG_VEHICLE, "卫星 对话 呼救" },
-+    { "亲子",     F_TITLE, PG_KIDS,    "对话 过境 安全" },
-+    { "数字分身", F_TITLE, PG_AVATAR,  "答句 情绪" },
-+    { "时钟",     F_TITLE, PG_CLOCK,   "手机在画哪张" },
-+    { "图片播放", F_TITLE, PG_GALLERY, "还没接" },
++/* L1 的格子：一颗字 + 一个场景名。那颗字取场景名的第一个字 —— 子集里一定有它，
++ * 因为场景名本身就要画。不拿 LVGL 自带的 32 个 FontAwesome 符号假装有车、有人、有钟：
++ * 那套符号里汽车/人/钟都没有，硬凑只会印出一个对不上号的图。 */
++typedef struct {
++    const char *name;
++    const char *glyph;
++    uint32_t hue;
++    int8_t target;
++    bool dim;       /* 这一版还没接上的那一格：整格压暗，不装作能用 */
++} cell_def_t;
++
++static const cell_def_t PICKER_CELLS[] = {
++    { "车载",     "车", COLOR_HUE_BLUE,  PG_VEHICLE, false },
++    { "亲子",     "亲", COLOR_HUE_MINT,  PG_KIDS,    false },
++    { "数字分身", "分", COLOR_ACCENT,    PG_AVATAR,  false },
++    { "时钟",     "钟", COLOR_HUE_AMBER, PG_CLOCK,   false },
++    { "图片播放", "图", COLOR_DIM,       PG_GALLERY, true  },
 +};
 +static const row_def_t VEHICLE_ROWS[] = {
-+    { "卫星", F_SAT,    PG_NONE, NULL },
-+    { "对话", F_DIALOG, PG_NONE, NULL },
-+    { "呼救", F_SOS,    PG_NONE, NULL },
++    { "卫星", F_SAT,    PG_NONE },
++    { "对话", F_DIALOG, PG_NONE },
++    { "呼救", F_SOS,    PG_NONE },
 +};
 +static const row_def_t KIDS_ROWS[] = {
-+    { "对话", F_DIALOG, PG_NONE, NULL },
-+    { "过境", F_SAT,    PG_NONE, NULL },
-+    { "安全", F_SOS,    PG_NONE, NULL },
++    { "对话", F_DIALOG, PG_NONE },
++    { "过境", F_SAT,    PG_NONE },
++    { "安全", F_SOS,    PG_NONE },
 +};
 +static const row_def_t AVATAR_ROWS[] = {
-+    { "答句", F_DIALOG,  PG_NONE, NULL },
-+    { "情绪", F_EMOTION, PG_NONE, NULL },
++    { "答句", F_DIALOG,  PG_NONE },
++    { "情绪", F_EMOTION, PG_NONE },
 +};
 +static const row_def_t CLOCK_ROWS[] = {
-+    { "钟面", F_CARD, PG_NONE, NULL },
++    { "钟面", F_CARD, PG_NONE },
 +};
 +static const row_def_t GALLERY_ROWS[] = {
-+    { "图片", F_NONE, PG_NONE, NULL },
++    { "图片", F_NONE, PG_NONE },
 +};
 +
 +#define ARRAY_LEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -2868,6 +2904,7 @@ index 0000000..cd3ea13
 +/* 每页的结构：标题（L1 没有）+ 条目 + 一条副行。副行有三种身份，见下面 sub_* 的注释。 */
 +#define PF_CARD_BAR   0x01   /* 底部那三个按钮：动的是手机上的卡片 */
 +#define PF_SUB_STATIC 0x02   /* 副行是写死的一句话，不参与每帧更新 */
++#define PF_GRID       0x04   /* L1：画的是场景宫格，不是条目列表（rows 用不上） */
 +
 +typedef struct {
 +    const char *title;      /* NULL = L1：这一层的名字就是"选一个场景"，写在屏上是占一行说废话 */
@@ -2878,7 +2915,7 @@ index 0000000..cd3ea13
 +
 +/* 下标按 PG_* 写死：这张表里 0 号是 face，它没有列（脸是 tileview 那一格，不归这里画）。 */
 +static const page_def_t PAGE_DEFS[PG_COUNT] = {
-+    [PG_PICKER]  = { NULL,       PICKER_ROWS,  ARRAY_LEN(PICKER_ROWS),  0 },
++    [PG_PICKER]  = { NULL,       NULL,         0,                     PF_GRID },
 +    [PG_VEHICLE] = { "车载",     VEHICLE_ROWS, ARRAY_LEN(VEHICLE_ROWS), PF_CARD_BAR },
 +    [PG_KIDS]    = { "亲子",     KIDS_ROWS,    ARRAY_LEN(KIDS_ROWS),    PF_CARD_BAR },
 +    [PG_AVATAR]  = { "数字分身", AVATAR_ROWS,  ARRAY_LEN(AVATAR_ROWS),  0 },
@@ -3005,6 +3042,18 @@ index 0000000..cd3ea13
 +    lv_obj_set_style_pad_row(col, GAP, 0);
 +    lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
 +    return col;
++}
++
++/* 定宽定高的盒子，孩子用绝对坐标摆：宫格要的是"第几行第几列"，
++ * 上面那条 flex 列只会按内容往下堆，摆不出网格。 */
++static lv_obj_t *make_box(lv_obj_t *tile, int w, int h)
++{
++    lv_obj_t *o = lv_obj_create(tile);
++    lv_obj_remove_style_all(o);
++    lv_obj_set_size(o, w, h);
++    lv_obj_align(o, LV_ALIGN_CENTER, 0, 0);
++    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
++    return o;
 +}
 +
 +static lv_obj_t *make_pill(lv_obj_t *parent, int w, int h, const char *text,
@@ -3259,20 +3308,72 @@ index 0000000..cd3ea13
 +
 +static void build_rows(lv_obj_t *col, const page_def_t *d, page_lines_t *pl)
 +{
-+    const int row_h = d->title ? ROW_H : ROW_H_PICK;
 +    for (int i = 0; i < d->n_rows; i++) {
 +        const row_def_t *def = &d->rows[i];
-+        lv_obj_t *c = make_card(col, true, row_h);
++        lv_obj_t *c = make_card(col, true, ROW_H);
 +        make_label(c, s_big, COLOR_TEXT, def->name);
-+        if (def->field == F_TITLE) {
-+            /* 场景入口右边那列是"这一页里有哪几项"，是静态的字，不是数据 ——
-+             * 让它跟着帧变会让人以为手机在报这个数。 */
-+            make_label(c, s_small, COLOR_DIM, def->hint ? def->hint : "");
-+        } else {
-+            make_value(c, &pl->rows[i]);
-+        }
++        make_value(c, &pl->rows[i]);
 +        lv_obj_add_event_cb(c, on_row_clicked, LV_EVENT_CLICKED, (void *)def);
 +    }
++}
++
++static void on_cell_clicked(lv_event_t *e)
++{
++    const cell_def_t *c = lv_event_get_user_data(e);
++    if (c) nav_to(c->target);
++}
++
++/* L1：场景宫格。一行三个、116 的方卡、卡片里"一颗字 + 场景名"，按下换色 ——
++ * 这是手机 app 选功能的那套形状，不是把五条列表项拉长。
++ * 每一格只做一件事：跳到它自己的场景页。值一个都不显示 —— L1 跟着帧变会让人以为
++ * 手机在报这个数，那条红线从上一版就有，这版照留。 */
++static lv_obj_t *build_picker(lv_obj_t *tile, page_lines_t *pl)
++{
++    lv_obj_t *box = make_box(tile, GRID_W, GRID_H);
++
++    lv_obj_t *band = make_band(box, SUB_H);
++    pl->sub.label = make_label(band, s_small, COLOR_DIM, "未接入");
++    snprintf(pl->sub.shown, sizeof pl->sub.shown, "未接入");
++    lv_obj_center(pl->sub.label);   /* 顶部那一带圆屏只剩 269 的宽，靠左边摆会被裁 */
++
++    for (int i = 0; i < ARRAY_LEN(PICKER_CELLS); i++) {
++        const cell_def_t *c = &PICKER_CELLS[i];
++        lv_obj_t *card = lv_button_create(box);
++        lv_obj_remove_style_all(card);
++        lv_obj_set_size(card, GRID_CELL, GRID_CELL);
++        lv_obj_set_pos(card, (i % 3) * (GRID_CELL + GRID_GAP),
++                       GRID_ROWS_Y + (i / 3) * (GRID_CELL + GRID_GAP));
++        lv_obj_set_style_radius(card, 26, 0);
++        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
++        lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD), 0);
++        lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
++        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
++
++        /* 底托只有颜色是 20% 的透明度，字是实的：AMOLED 上黑底 + 淡色块，
++         * 比给字描边便宜，也不会让 30px 的笔画糊成一团。 */
++        lv_obj_t *disc = lv_obj_create(card);
++        lv_obj_remove_style_all(disc);
++        lv_obj_set_size(disc, GRID_ROUND, GRID_ROUND);
++        lv_obj_align(disc, LV_ALIGN_TOP_MID, 0, 12);
++        lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
++        lv_obj_set_style_bg_opa(disc, c->dim ? LV_OPA_10 : LV_OPA_20, 0);
++        lv_obj_set_style_bg_color(disc, lv_color_hex(c->hue), 0);
++        lv_obj_remove_flag(disc, LV_OBJ_FLAG_SCROLLABLE);
++        lv_obj_center(make_label(disc, s_glyph, c->hue, c->glyph));
++
++        lv_obj_t *nm = make_label(card, s_small, c->dim ? COLOR_DIM : COLOR_TEXT, c->name);
++        lv_obj_set_width(nm, GRID_CELL);
++        lv_obj_set_style_text_align(nm, LV_TEXT_ALIGN_CENTER, 0);
++        lv_obj_align(nm, LV_ALIGN_TOP_MID, 0, 78);
++
++        lv_obj_add_event_cb(card, on_cell_clicked, LV_EVENT_CLICKED, (void *)c);
++    }
++
++    lv_obj_t *back = make_pill(box, COL_W, BTN_H, "回到那张脸", on_back_clicked, NULL);
++    lv_obj_set_pos(back, (GRID_W - COL_W) / 2, GRID_BACK_Y);
++
++    lv_obj_set_flag(box, LV_OBJ_FLAG_HIDDEN, true);
++    return box;
 +}
 +
 +/* 卡片那一排按钮：只有真的会动手机卡片的页才有。 */
@@ -3299,21 +3400,15 @@ index 0000000..cd3ea13
 +    }
 +}
 +
-+/* 每页从上到下：L1 = 状态、回到那张脸、五个场景；
-+ * 场景页 = 返回、标题、条目、（要的话）"手机在画 X"+ 三个按钮。 */
++/* 场景页（L2）从上到下：返回、标题、条目、（要的话）"手机在画 X"+ 三个按钮。
++ * L1 不走这里，它有自己的宫格。 */
 +static void build_page(int pg, lv_obj_t *col)
 +{
 +    const page_def_t *d = &PAGE_DEFS[pg];
 +    page_lines_t *pl = &s_lines[pg];
 +
-+    if (!d->title) {
-+        pl->sub.label = make_label(make_band(col, SUB_H), s_small, COLOR_DIM, "未接入");
-+        snprintf(pl->sub.shown, sizeof pl->sub.shown, "未接入");
-+    }
-+    make_pill(col, COL_W, BTN_H, d->title ? "返回" : "回到那张脸", on_back_clicked, NULL);
-+    if (d->title) {
-+        make_label(make_band(col, TITLE_H), s_big, COLOR_TEXT, d->title);
-+    }
++    make_pill(col, COL_W, BTN_H, "返回", on_back_clicked, NULL);
++    make_label(make_band(col, TITLE_H), s_big, COLOR_TEXT, d->title);
 +    build_rows(col, d, pl);
 +    if (d->flags & PF_CARD_BAR) {
 +        /* 这一行是那三个按钮的上下文：它们切的是手机上那张卡，不是这一页。 */
@@ -3333,6 +3428,10 @@ index 0000000..cd3ea13
 +    fonts_init();
 +
 +    for (int i = PG_PICKER; i < PG_COUNT; i++) {
++        if (PAGE_DEFS[i].flags & PF_GRID) {
++            s_col[i] = build_picker(tile, &s_lines[i]);
++            continue;
++        }
 +        s_col[i] = make_col(tile);
 +        build_page(i, s_col[i]);
 +    }
@@ -3429,8 +3528,8 @@ index 0000000..cd3ea13
 +    }
 +    /* 剩下那页（图片播放）的副行是写死的一句话，帧里没有对应的东西，不碰。 */
 +
-+    /* 条目行的值。L1 那五行是 F_TITLE，建页时压根没留 slot，set_line 见空就返，
-+     * 所以这一条对 L1 是空转 —— 换来的是"入口不许跟着帧变"这条红线写在结构里。 */
++    /* 条目行的值。L1 在表里 n_rows=0（宫格不走 rows），所以这一条对 L1 压根不跑 ——
++     * 换来的是"入口不许跟着帧变"这条红线写在结构里。 */
 +    char buf[72];
 +    for (int i = 0; i < d->n_rows; i++) {
 +        set_line(&pl->rows[i], field_text(d->rows[i].field, &s, buf, sizeof buf),
