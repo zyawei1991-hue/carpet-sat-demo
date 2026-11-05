@@ -739,3 +739,56 @@ cmd.exe 解析括号块会跑偏（`'----' 不是内部或外部命令`），整
 这轮的板子实况（`sercmd.py COM8 ">carpet" 12`）：`nav=face reported=0 sent=0 wifi=0`，
 烧写 `Hash of data verified`、编译 0 error —— 宫格 + 精简文案已经在这块板上跑着。
 
+### 9.7 11-05 傍晚：不靠热点了，板子直接连 `aa123` —— 上报第一次跑通
+
+他换了热点、让我们把圆屏也挪到电脑现在那张网（`aa123`，通道 11 = 2.4G，S3 连得上）。
+**板子换网的正路不是 BLE 配网，是 Muse 自己留的那个开发覆盖**（`main/Kconfig.projbuild` 里的
+`HOMEHUB_WIFI_SSID` / `HOMEHUB_WIFI_PASSWORD`，`main/app.c:2819` 那段就是它）：SSID 非空时
+Link 直接join这个网、keeper 也不再去动 Wi-Fi，而且它**明确不写 NVS**。所以三条值都改在本机的
+`build-muse-s3-175-carpet/sdkconfig`（gitignored）里，`idf.py build` 会继承它们、四层 defaults 不会盖掉：
+
+```
+CONFIG_HOMEHUB_WIFI_SSID="aa123"
+CONFIG_HOMEHUB_WIFI_PASSWORD="……"        ← 密码只在这台机器上，任何情况下不进仓库、不进文档
+CONFIG_SCREEN_LINK_URL="ws://10.50.174.165:8443"
+```
+
+⚠ 这条覆盖会**盖掉手机 App 的 8 位码配网**：这台机器上的板子从此开机就直连 `aa123`。
+要回到配网那条路，把 SSID 改回 `""` 重编重刷一次。
+
+改完 app-flash（`Hash of data verified`），串口一次就通：
+
+```
+I (5374) wifi:connected with aa123, aid = 2, channel 11, BW20
+I (5677) link.wifi: got IP 10.50.174.29
+I (7216) screen_link: ws 接入 ws://10.50.174.165:8443      ← §9.5 补的那条日志，第一次派上用场
+I (7221) carpet: linked, contract v2
+I (7330) carpet: sent page_report                          ← hello 之后的补报，不是等翻页才报
+```
+
+然后拿 `serseq.py`（**不复位**那份，能连着发好几条）在串口上驱了两次翻页，屏侧和服务端两侧读数一起对上：
+
+| 动作 | 屏 `>carpet` | 彩排台日志 |
+|-|-|-|
+| 开机 | `nav=face reported=1 last=face` | `cmd page_report args={"page":"face"}` |
+| `>page kids` | `nav=kids reported=2 last=kids` | `… {"page":"kids"}` |
+| `>page vehicle` | `nav=vehicle reported=3 last=vehicle` | `… {"page":"vehicle"}` |
+
+`reported` 是一个单调涨的计数器（每发一条 +1），所以这三行本身就证明**不是补报那一次**、
+是真的每次翻页都在报。链路那行也第一次变成 `wifi=1 linked=1 contract=v2 gap_s=0 has_state=1 wd=0`，
+彩排台那头同步显示 `展示端 1 台`。
+
+**§11 步骤 1 到这里才是过了判据**（HANDOFF 那边同步改了）。之前三轮都卡在同一件事上，
+但每轮卡的原因都不一样：11-04 是 ws 任务的栈开不出来（§9.5），11-05 中午是入站规则（§9.6 前半），
+傍晚是网络根本不在一处（§9.6 后半）。这条链条值得记住的地方是：**上一轮的"只差 X"从来不是判据，
+称过的读数才是。**
+
+顺带两件：
+- `dialog=手机在说`、`card=对话卡`、`emotion=担心` 这些值是帧里真来的，屏上那行"在画 X"跟着服务端
+  的策略在换 —— 宫格 + 场景页 + 实时值这一套，现在是**接上服务端在跑**的状态，不是空页演示。
+- 彩排台（`DemoDriver`）我重启过一次，并且**先把旧 JVM 的命令行存进 `D:\dev\tmp\driver-cmdline-1105.txt`**；
+  现在它的日志落在 `D:\dev\tmp\driver-1105.log`，以后要认服务端那半边的证据就读这份文件。
+  启动前记得 `gradle :simulator:installDist`：这台机器上 `install/lib` 里的 core jar 曾经是**旧的**
+  （两个 sha1 不一样），直接用 `.bat` 会跑到旧契约上。
+
+
