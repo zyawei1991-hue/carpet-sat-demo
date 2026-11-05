@@ -17,6 +17,8 @@
 | `protocol/sos_frame.py` | SOS 帧的参考实现 + 自检，两端照它对齐 |
 | `protocol/link-policy.md` | 4G/卫星切换状态机。文档里只有「> 阈值」，阈值在这里定死 |
 | `docs/DECISIONS.md` | 决策记录。为什么这么选、什么条件下要推翻 |
+| `docs/AVATAR.md` | 「小轨」形象规格：几何、色表、七档情绪姿势。**两台机器照同一份做**，不是各画各的 |
+| `docs/MAINTENANCE.md` | 车况养护推荐的整体设计。跨手机/圆屏/GT1005 三份分工都在这一份里，含工单那 21 字节的编码表 |
 | `tools/validate_protocol.py` | 契约校验，CI 入口 |
 | `apps/android/` | Gradle `:app`。手机 App 薄壳（定位、蜂窝探测、展示端服务、按钮） |
 | `core/` | Gradle `:core`。纯 Kotlin JVM，协议 / 链路状态机 / SatelliteModem / DemoEngine |
