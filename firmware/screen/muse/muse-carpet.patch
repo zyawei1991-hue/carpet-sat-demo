@@ -2689,7 +2689,7 @@ index 0000000..784708e
 +void carpet_link_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..2b6ae19
+index 0000000..abe71db
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
 @@ -0,0 +1,845 @@
@@ -2924,7 +2924,7 @@ index 0000000..2b6ae19
 +};
 +
 +/* 建页时按这一条给"还没接"那一页写死副行，其余页的副行是活的。 */
-+static const char *const GALLERY_NOTE = "这一版还没接上：屏上不放假数据";
++static const char *const GALLERY_NOTE = "还没接上 · 不放假数据";
 +
 +/* ---------- 导航状态 ---------- */
 +
@@ -3018,8 +3018,8 @@ index 0000000..2b6ae19
 +    return o;
 +}
 +
-+/* 值那一列：吃掉剩下的宽度并右对齐。中文比拉丁密，一句"手机在说 · 语音"就超一行的宽，
-+ * 所以用 grow + DOTS —— 长是省略号，不会把条目名挤走。 */
++/* 值那一列：吃掉剩下的宽度并右对齐。中文比拉丁密，长值吃不满一整行会被挤走条目名，
++ * 所以用 grow + DOTS —— 长就省略号。 */
 +static void make_value(lv_obj_t *parent, line_t *slot)
 +{
 +    lv_obj_t *v = make_label(parent, s_small, COLOR_DIM, "");
@@ -3174,7 +3174,7 @@ index 0000000..2b6ae19
 +    set_line(&s_detail_title, s_detail_name, COLOR_TEXT);
 +    set_line(&s_detail_value, field_text(s_detail_field, &s, buf, sizeof buf),
 +             live ? COLOR_TEXT : COLOR_DIM);
-+    set_line(&s_detail_hint, live ? "这一行是最新一帧里的值" : "链路 3 秒没帧：留着上一帧",
++    set_line(&s_detail_hint, live ? "最新一帧的值" : "3 秒没帧 · 是旧值",
 +             live ? COLOR_DIM : COLOR_OFF);
 +}
 +
@@ -3369,7 +3369,7 @@ index 0000000..2b6ae19
 +        lv_obj_add_event_cb(card, on_cell_clicked, LV_EVENT_CLICKED, (void *)c);
 +    }
 +
-+    lv_obj_t *back = make_pill(box, COL_W, BTN_H, "回到那张脸", on_back_clicked, NULL);
++    lv_obj_t *back = make_pill(box, COL_W, BTN_H, "返回", on_back_clicked, NULL);
 +    lv_obj_set_pos(back, (GRID_W - COL_W) / 2, GRID_BACK_Y);
 +
 +    lv_obj_set_flag(box, LV_OBJ_FLAG_HIDDEN, true);
@@ -3400,7 +3400,7 @@ index 0000000..2b6ae19
 +    }
 +}
 +
-+/* 场景页（L2）从上到下：返回、标题、条目、（要的话）"手机在画 X"+ 三个按钮。
++/* 场景页（L2）从上到下：返回、标题、条目、（要的话）"在画 X"+ 三个按钮。
 + * L1 不走这里，它有自己的宫格。 */
 +static void build_page(int pg, lv_obj_t *col)
 +{
@@ -3412,8 +3412,8 @@ index 0000000..2b6ae19
 +    build_rows(col, d, pl);
 +    if (d->flags & PF_CARD_BAR) {
 +        /* 这一行是那三个按钮的上下文：它们切的是手机上那张卡，不是这一页。 */
-+        pl->sub.label = make_label(make_band(col, SUB_H), s_small, COLOR_DIM, "手机在画 —");
-+        snprintf(pl->sub.shown, sizeof pl->sub.shown, "手机在画 —");
++        pl->sub.label = make_label(make_band(col, SUB_H), s_small, COLOR_DIM, "在画 —");
++        snprintf(pl->sub.shown, sizeof pl->sub.shown, "在画 —");
 +        build_card_bar(col);
 +    } else if (d->flags & PF_SUB_STATIC) {
 +        pl->sub.label = make_label(make_band(col, SUB_H), s_small, COLOR_DIM, GALLERY_NOTE);
@@ -3518,12 +3518,12 @@ index 0000000..2b6ae19
 +            snprintf(buf, sizeof buf, "卡%lu秒", (unsigned long)v.gap_s);
 +            set_line(&pl->sub, buf, COLOR_OFF);
 +        } else {
-+            set_line(&pl->sub, v.negotiated >= 2 ? "已接入 v2" : "已接入 v1", COLOR_ACCENT);
++            set_line(&pl->sub, "已接入", COLOR_ACCENT);   /* 契约号只在串口日志里（carpet_link 的 linked 那行） */
 +        }
 +    } else if (d->flags & PF_CARD_BAR) {
 +        /* 这一行是那三个按钮的上下文：它们切的是手机上那张卡，不是这一页。 */
 +        char card[48];
-+        snprintf(card, sizeof card, "手机在画 %s", s.card[0] ? s.card : "—");
++        snprintf(card, sizeof card, "在画 %s", s.card[0] ? s.card : "—");
 +        set_line(&pl->sub, card, live ? COLOR_TEXT : COLOR_DIM);
 +    }
 +    /* 剩下那页（图片播放）的副行是写死的一句话，帧里没有对应的东西，不碰。 */
