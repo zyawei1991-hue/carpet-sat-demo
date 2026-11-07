@@ -25,18 +25,18 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 14 个文件、2503 行新增 / 20 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，4,935 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的）：
+- 我们的全部改动 = 14 个文件、2594 行新增 / 20 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，5,026 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-07 重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  17 +-   (+carpet_audio.c 那行 + embed 那行)
   esp32/components/muse/Kconfig              |  14 +
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
-  esp32/components/muse/carpet/carpet_audio.c | 368 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段)
+  esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
-  esp32/components/muse/carpet/carpet_link.c | 804 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置)
-  esp32/components/muse/carpet/carpet_link.h | 114 +   (新)
-  esp32/components/muse/carpet/carpet_page.c | 849 +   (新，第 1 层宫格 + 五个场景页 + 明细页)
+  esp32/components/muse/carpet/carpet_link.c | 845 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路)
+  esp32/components/muse/carpet/carpet_link.h | 118 +   (新)
+  esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
   esp32/components/muse/muse_input.c         |  62 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
@@ -46,6 +46,8 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，14 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  2026-11-07 这次重打之后同一条路又走了一遍（`git apply --check` 过、worktree 已删），
+  `SchemaDriftTest` 13 条、`:core:test` 284 条实跑全 PASSED。
   每次改动都重打并在干净树上验一遍，一轮记一笔：
   - 2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮 —— 验过 `PAGE_NAMES`
     解得出来（漂移测试靠这一个符号，补丁里没有它就是静默不比，绿灯是假的）。
