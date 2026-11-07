@@ -1,5 +1,5 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..96eac0d 100644
+index b478d5e..bdc20f0 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -46,6 +46,17 @@ if(CONFIG_MUSE_ENABLED)
@@ -8,7 +8,7 @@ index b478d5e..96eac0d 100644
      endif()
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
-+        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c")
++        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c")
 +        # 24/20px Chinese for that page: a ~120KB subset, sized by tiny_ttf at run
 +        # time (Muse's own CJK bitmap font only comes in 16px). It is NOT tracked in
 +        # the fork -- copy it in from our repo (firmware/screen/muse/font/) before
@@ -58,6 +58,455 @@ index 588d7c6..75c4bf6 100644
      config MUSE_LATIN_FONT
          bool "Show Vietnamese and other accented letters in captions"
          depends on MUSE_ENABLED && !MUSE_UI_FREEINK
+diff --git a/esp32/components/muse/carpet/carpet_audio.c b/esp32/components/muse/carpet/carpet_audio.c
+new file mode 100644
+index 0000000..a237347
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_audio.c
+@@ -0,0 +1,383 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "carpet_audio.h"
++
++#include "sdkconfig.h"
++#if CONFIG_MUSE_CARPET_CARDS
++
++#include <math.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/semphr.h"
++#include "freertos/task.h"
++#include "mbedtls/base64.h"
++#include "muse_audio.h"
++#include "muse_state.h"
++
++static const char *TAG = "carpet_audio";
++
++/*
++ * 一条**线性缓冲**，不是环形：生产者是链路任务（只在尾巴往后追加），
++ * 消费者是播放任务（只在头部往前读，永远读不到还没写的那一段）。
++ * 两端都不绕回，所以省掉环形那套头尾取模 —— 少一处能写错的地方。
++ *
++ * 容量 2 MB = 64 秒 16k/单声道/s16le，和 core 那份 `AudioChunks.MAX_TOTAL_BYTES`
++ * 同一个数（超了那边整段不发，这边也就永远不会溢出）。
++ * 2026-11-06 从 512 KB 提上来：真模型一句 32 字的答句实测 7.5 秒，16 秒那一档
++ * 一句话就能撞穿，而撞穿在观众眼里是"屏上写了整句话、喇叭一声不出"。
++ * 板上 PSRAM 开机日志称到的是 8 MB（`octal_psram ... density 0x03 = 64 Mbit`），
++ * 拿掉 2 MB 还剩 6 MB 给界面和字库；真拿不到时下面那句 ESP_LOGE 会当场说清楚，
++ * 语音这条路整个不接、文字照旧 —— 不靠任何人去猜屏上还剩多少内存。
++ * **不放内部 RAM**：内部剩下的连续小块是 ws 任务栈要找的地方，从它身上切走一块
++ * 是拿整条链路换一个音频缓冲。
++ */
++#define AUDIO_CAP        (2 * 1024 * 1024)
++#define AUDIO_RATE       16000
++#define CHUNK_BYTES      (MUSE_AUDIO_CHUNK * 2)   /* 640 字节 = 正好 20 毫秒 */
++#define MAX_BLOCK_BYTES  2560                     /* 契约里一块 = 80 毫秒，也是发送侧那个数 */
++#define PREBUFFER_BYTES  6400                     /* 先攒 200 毫秒再开口，免得一句里断三截 */
++#define UNDERRUN_MS      1500                     /* 空了这么久还没新块 = 这段断了，别拖着放杂音 */
++
++static char *s_buf;
++static SemaphoreHandle_t s_lock;
++static TaskHandle_t s_player;
++static int16_t s_scratch[MUSE_AUDIO_CHUNK];   /* 640 字节，静态：3584 字节栈那条任务压不下 */
++static uint8_t s_bench[MAX_BLOCK_BYTES];
++
++/* 下面这些只在锁里改。跨任务单读一个数是原子的（32 位对齐），
++ * 读到旧值最多让口型慢 20 毫秒，不会读到半个样本。 */
++static char s_turn[40];
++static size_t s_wrote;        /* 已进缓冲的字节 */
++static size_t s_total;        /* 整段字节数，每帧都带；0 = 还不知道 */
++static size_t s_played;       /* 已交给 codec 的字节 */
++static unsigned s_expect_seq; /* 下一块该有的 seq，不连续就整段丢 */
++static bool s_live;           /* 播放任务认为还有声音要放 */
++static volatile float s_level;
++static uint32_t s_frames, s_drops;
++static const char *s_last_drop = "-";   /* 最近一次为什么丢，给串口回读 */
++
++static void reset_locked(void);
++static void drop_locked(const char *why);
++static void player_task(void *arg);
++
++static void reset_locked(void)
++{
++    s_turn[0] = '\0';
++    s_wrote = s_total = s_played = 0;
++    s_expect_seq = 0;
++    s_live = false;
++    s_level = 0;
++}
++
++static void drop_locked(const char *why)
++{
++    s_drops++;
++    s_last_drop = why;
++    ESP_LOGW(TAG, "这段语音丢掉（%s），文字不受影响", why);
++    reset_locked();
++}
++
++static bool buf_get(void)
++{
++    if (!s_lock) s_lock = xSemaphoreCreateMutex();
++    if (s_buf) return true;
++    s_buf = heap_caps_malloc(AUDIO_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!s_buf) {
++        ESP_LOGE(TAG, "PSRAM 里拿不到 %d KB，语音这条路整个不接（文字照旧）", AUDIO_CAP / 1024);
++        return false;
++    }
++    return true;
++}
++
++/*
++ * 一帧解码好的 PCM 进缓冲。校验全在这儿：换轮、seq 跳号、整段超限、块超长 ——
++ * 任何一种都**整段丢掉**，不放"能放的那半句"。半句有声音半句没，
++ * 比整段没声音更难解释，而文字答句走的是另一条帧，不受这里影响。
++ */
++static bool feed(const char *turn, unsigned seq, size_t total, const uint8_t *pcm, size_t n)
++{
++    if (!turn || !*turn || n == 0 || (n & 1)) return false;
++    if (!buf_get()) return false;
++
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (s_turn[0] && strcmp(s_turn, turn) != 0) reset_locked();  /* 换了一轮：旧那段不要了 */
++    if (total == 0 || total > AUDIO_CAP) {
++        drop_locked("整段字节数不合规");
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    if (seq != s_expect_seq) {
++        drop_locked("seq 不连续");
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    if (n > MAX_BLOCK_BYTES || s_wrote + n > AUDIO_CAP) {
++        drop_locked("这一块装不下");
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    memcpy(s_buf + s_wrote, pcm, n);
++    s_wrote += n;
++    s_total = total;
++    s_expect_seq = seq + 1;
++    snprintf(s_turn, sizeof s_turn, "%s", turn);
++    s_live = true;
++    s_frames++;
++    xSemaphoreGive(s_lock);
++
++    if (!s_player) {
++        if (xTaskCreate(player_task, "carpet_audio", 4096, NULL, 5, &s_player) != pdPASS) {
++            s_player = NULL;
++            xSemaphoreTake(s_lock, portMAX_DELAY);
++            drop_locked("播放任务起不来");
++            xSemaphoreGive(s_lock);
++            return false;
++        }
++    }
++    return true;
++}
++
++/*
++ * 播放任务。**它自己就是节拍**：`muse_audio_write` 是阻塞的，一块 640 字节正好占住
++ * 20 毫秒，所以不需要定时器，也不会越放越快（2026-11-06 的 `>audio` 探针量过：
++ * 250 次写、每次 20 毫秒的名义时长，一秒实测 0.92~1.00 秒）。
++ *
++ * 两件事在锁外做：`muse_audio_write`（要占 20 毫秒，攥着锁会把链路任务的入块一起堵死）
++ * 和 `muse_state_set_level`（口型的来源，每 20 毫秒一次真电平 —— 不再是按 tick 摆的假值）。
++ */
++static void player_task(void *arg)
++{
++    (void)arg;
++    int64_t empty_since = 0;
++
++    for (;;) {
++        size_t take_bytes = 0;
++        bool finished = false;
++        bool stalled = false;
++
++        xSemaphoreTake(s_lock, portMAX_DELAY);
++        if (!s_live || !s_buf) {
++            empty_since = 0;
++            xSemaphoreGive(s_lock);
++            vTaskDelay(pdMS_TO_TICKS(40));
++            continue;
++        }
++        size_t avail = s_wrote - s_played;
++        bool complete = s_total > 0 && s_wrote >= s_total;
++
++        if (avail == 0 && complete) {
++            finished = true;
++        } else if (avail == 0) {
++            /* 半中间没数据了：先等。等过头就把这段判死 ——
++             * 一句里断三截比整段没声音更难解释，也更难怀疑到我们自己头上。 */
++            int64_t now = esp_timer_get_time();
++            if (!empty_since) empty_since = now;
++            if ((now - empty_since) / 1000 > UNDERRUN_MS) {
++                drop_locked("断了 1.5 秒没新块");
++                stalled = true;
++            }
++            xSemaphoreGive(s_lock);
++            if (stalled) muse_state_set_level(0);
++            vTaskDelay(pdMS_TO_TICKS(10));
++            continue;
++        } else if (avail < PREBUFFER_BYTES && !complete) {
++            xSemaphoreGive(s_lock);        /* 还没攒够 200 毫秒，别开口 */
++            vTaskDelay(pdMS_TO_TICKS(20));
++            continue;
++        }
++        empty_since = 0;
++
++        if (!finished) {
++            size_t n = avail >= CHUNK_BYTES ? CHUNK_BYTES : (avail & ~(size_t)1);
++            memcpy(s_scratch, s_buf + s_played, n);
++            s_played += n;
++            take_bytes = n;
++        }
++        xSemaphoreGive(s_lock);
++
++        if (finished) {
++            s_level = 0;
++            muse_state_set_level(0);
++            printf("@audio 放完 %u 字节 / %.1f 秒\n", (unsigned)s_played,
++                   (float)s_played / (AUDIO_RATE * 2));
++            fflush(stdout);
++            xSemaphoreTake(s_lock, portMAX_DELAY);
++            reset_locked();
++            xSemaphoreGive(s_lock);
++            continue;
++        }
++
++        if (muse_audio_write(s_scratch, take_bytes / 2) != ESP_OK) {
++            xSemaphoreTake(s_lock, portMAX_DELAY);
++            drop_locked("muse_audio_write 报错");
++            xSemaphoreGive(s_lock);
++            muse_state_set_level(0);
++            continue;
++        }
++        float lv = muse_audio_level(s_scratch, take_bytes / 2);
++        s_level = lv;
++        muse_state_set_level(lv);
++        if ((s_played % (AUDIO_RATE * 2)) < take_bytes) {   /* 每秒一行，能对着听 */
++            printf("@audio at %u/%u level %.2f\n", (unsigned)s_played, (unsigned)s_total, (double)lv);
++            fflush(stdout);
++        }
++    }
++}
++
++bool carpet_audio_on_chunk(const cJSON *args)
++{
++    if (!cJSON_IsObject(args)) return false;
++    const cJSON *jt = cJSON_GetObjectItemCaseSensitive(args, "turn_id");
++    const cJSON *js = cJSON_GetObjectItemCaseSensitive(args, "seq");
++    const cJSON *jn = cJSON_GetObjectItemCaseSensitive(args, "total");
++    const cJSON *jr = cJSON_GetObjectItemCaseSensitive(args, "rate");
++    const cJSON *jb = cJSON_GetObjectItemCaseSensitive(args, "b64");
++    if (!cJSON_IsString(jt) || !jt->valuestring || !cJSON_IsNumber(js) ||
++        !cJSON_IsNumber(jn) || !cJSON_IsString(jb) || !jb->valuestring) {
++        return false;
++    }
++    /* rate 缺了就按 16k 待（契约里它必填，缺了是发送方的错，但这一帧还是那些字节）；
++     * 明着不是 16k 才丢 —— 按错的采样率播出来是一段变调，比没声音更让人怀疑屏坏了。 */
++    int rate = cJSON_IsNumber(jr) ? jr->valueint : AUDIO_RATE;
++    if (rate != AUDIO_RATE) {
++        ESP_LOGW(TAG, "采样率 %d，本端只吃 %d，这段不接", rate, AUDIO_RATE);
++        return false;
++    }
++
++    static uint8_t decoded[MAX_BLOCK_BYTES + 4];
++    size_t olen = 0;
++    if (mbedtls_base64_decode(decoded, sizeof decoded, &olen,
++                              (const unsigned char *)jb->valuestring, strlen(jb->valuestring)) != 0) {
++        ESP_LOGW(TAG, "base64 解不开这一帧");
++        return false;
++    }
++    return feed(jt->valuestring, (unsigned)js->valueint, (size_t)jn->valueint, decoded, olen);
++}
++
++void carpet_audio_abort(const char *why)
++{
++    if (!s_lock) return;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    bool was = s_live;
++    reset_locked();
++    xSemaphoreGive(s_lock);
++    if (was) {
++        s_level = 0;
++        muse_state_set_level(0);
++        ESP_LOGI(TAG, "语音清空：%s", why);
++    }
++}
++
++bool carpet_audio_state(const char *turn_id, size_t *played, size_t *total, bool *live, float *level)
++{
++    if (!turn_id || !*turn_id || !s_lock) return false;
++    bool hit;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    hit = s_turn[0] && strcmp(s_turn, turn_id) == 0 && s_total > 0;
++    if (hit) {
++        if (played) *played = s_played;
++        if (total) *total = s_total;
++        if (live) *live = s_live;
++        if (level) *level = s_level;
++    }
++    xSemaphoreGive(s_lock);
++    return hit;
++}
++
++/* ---------------- 开发口 ---------------- */
++
++/*
++ * `>audtest [秒]`：本机造一段"有词有停顿"的语音（440 Hz 音节 + 静音交替），
++ * 走和线上一模一样的缓冲与播放任务。网络、模型、服务端全不接，也能把
++ * 「环收得进 / 节拍按 16k 走 / 口型跟着真实电平动 / 念稿跟着播放位置翻页」称清楚。
++ *
++ * 静音那几段是重点：口型要是全程不动，说明喂给 muse_state 的不是真电平。
++ * 发送节拍刻意贴着实时（80 毫秒一块），测的是"边到边放顺不顺"，不是"缓冲能装多少"。
++ */
++void carpet_audio_bench(int seconds)
++{
++    if (seconds < 1) seconds = 3;
++    if (seconds > 15) seconds = 15;
++    size_t total = (size_t)seconds * AUDIO_RATE * 2;
++    unsigned seq = 0;
++    int64_t t0 = esp_timer_get_time();
++
++    for (size_t at = 0; at < total; at += MAX_BLOCK_BYTES) {
++        size_t n = (total - at) >= MAX_BLOCK_BYTES ? MAX_BLOCK_BYTES : (total - at);
++        int16_t *s = (int16_t *)s_bench;
++        for (size_t i = 0; i < n / 2; i++) {
++            size_t g = (at + i * 2) / 2;                 /* 全局样本号 */
++            size_t pos = g % (AUDIO_RATE * 38 / 100);    /* 380 毫秒一个"词" */
++            bool voiced = pos < (size_t)(AUDIO_RATE * 30 / 100);
++            s[i] = voiced ? (int16_t)(0.28f * 32767.0f
++                       * sinf(2.0f * (float)M_PI * 440.0f * (float)g / AUDIO_RATE)) : 0;
++        }
++        if (!feed("audtest", seq, total, s_bench, n)) {
++            printf("@audtest 第 %u 块被拒，停在这\n", seq);
++            break;
++        }
++        seq++;
++        vTaskDelay(pdMS_TO_TICKS(80));
++    }
++    printf("@audtest 发了 %u 块 / %u 字节，喂了 %.2f 秒（音频 %.1f 秒）\n",
++           seq, (unsigned)total, (float)(esp_timer_get_time() - t0) / 1e6f, (float)seconds);
++    fflush(stdout);
++}
++
++void carpet_audio_dump(void)
++{
++    /* 缓冲给多大、PSRAM 还剩多少 —— 把 AUDIO_CAP 提到 2 MB 之后，这是唯一能当场称的办法。
++     * 只报总量会骗人：要的是一整块连续的，所以要一起看最大那块。
++     * 秒数直接算出来给读的人，不用他自己拿 32000 去除。
++     * **打在最早、且在"没收到过语音帧"那条 return 之前**：那条一 return 这行就永远看不到，
++     * 而这一行要的判据（那块 2 MB 到底拿没拿到）恰恰只在还没收到语音时最需要称。 */
++    printf("@audio cap=%u psram_free=%u psram_max=%u 装得下 %.1f 秒\n",
++           (unsigned)AUDIO_CAP,
++           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
++           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
++           (double)AUDIO_CAP / (double)(AUDIO_RATE * 2));
++    if (!s_lock) {
++        printf("@audio 没收到过语音帧\n");
++        fflush(stdout);
++        return;
++    }
++    char turn[40] = "-";
++    size_t wrote = 0, total = 0, played = 0;
++    int live = 0;
++    float level = 0;
++    uint32_t frames = 0, drops = 0;
++    const char *why = "-";
++
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (s_turn[0]) snprintf(turn, sizeof turn, "%s", s_turn);
++    wrote = s_wrote; total = s_total; played = s_played;
++    live = (int)s_live; level = s_level;
++    frames = s_frames; drops = s_drops; why = s_last_drop;
++    xSemaphoreGive(s_lock);
++
++    printf("@audio turn=%s wrote=%u total=%u played=%u live=%d level=%.2f frames=%u drops=%u last=%s\n",
++           turn, (unsigned)wrote, (unsigned)total, (unsigned)played, live,
++           (double)level, (unsigned)frames, (unsigned)drops, why);
++    fflush(stdout);
++}
++
++#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/carpet/carpet_audio.h b/esp32/components/muse/carpet/carpet_audio.h
+new file mode 100644
+index 0000000..f1ee8d7
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_audio.h
+@@ -0,0 +1,54 @@
++/*
++ * 契约 v3 的语音通道：`command{cmd:"audio_chunk"}` 进来的 PCM 字节 → 喇叭。
++ *
++ * 为什么住在 carpet 而不是塞进 carpet_link.c：这一份有一段自己的节拍（播放任务
++ * 按 20 毫秒一块往外送），而链路那份文件里全是"谁在说话、这句话念第几页"。
++ * 两边只靠两个数对上：这一轮的 turn_id 和已播放的字节数。
++ *
++ * 为什么不是"另开一条 UDP"：短答句一段几秒、几十 KB，走已有的那条 ws 一次就够，
++ * 少一个端口、少一套 NAT/防火墙故事、少一套心跳（远端那份架构 A.4 #5 自己写的
++ * "一条链路一套心跳"就是这个意思）。真正的语音通话（ASR 上行 + 流式下行）
++ * 才需要那条口，那一档这里明确不做。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#include "cJSON.h"
++
++/*
++ * 收到一帧 audio_chunk。**在链路任务里调**（screen_link 的回调全在那儿跑），
++ * 所以这里不许阻塞、不许碰 LVGL：只做校验 + base64 解码 + 追加到缓冲。
++ * turn_id 从 args 里自己读 —— 契约说的那一整套 {turn_id, seq, total, rate, b64} 全在 args 里。
++ * 满、seq 不连续、采样率不是 16000 —— 一律丢掉这一整段并留一行日志，
++ * 但**绝不影响文字答句**：那条走的是 dialog 帧，跟这里没有依赖关系。
++ *
++ * 返回 false = 这一帧没用（解不开 / 参数不对）。调用方不 ack：
++ * 契约里音频是"放不响就别说"那一级，不是"必须执行成功"那一级。
++ */
++bool carpet_audio_on_chunk(const cJSON *args);
++
++/*
++ * 丢掉正在排/正在放的那一段。链路断了、或者开发口要自己造一段时用。
++ * 文字带子不受影响 —— 念稿继续按秒翻，只是嘴不再动。
++ */
++void carpet_audio_abort(const char *why);
++
++/*
++ * 这一轮的声音放到哪了。给首屏那条带用的两件事：
++ *   played/total —— 念稿第几页跟着**播放位置**走，不再按 2.5 秒一页估
++ *   live        —— 还在放就不许收回这句（否则话没念完脸就回 idle）
++ * 返回 false = 这一轮根本没有声音（老固件、老服务端、或者那段被丢了），
++ * 调用方按原来的"按秒推"那套走。level 是这一帧窗口的真实 RMS 电平 0..1。
++ */
++bool carpet_audio_state(const char *turn_id, size_t *played, size_t *total, bool *live, float *level);
++
++/* 开发口 `>audtest [秒]`：本机造一段语音（正弦包络的"词"）灌进同一条缓冲和同一个
++ * 播放任务 —— 网络、模型、TTS 全不接，也能证明环、节拍、口型、翻页这四件事。
++ * 只在串口那条任务里调；它只负责喂数据，播在播放任务里，所以不占串口。 */
++void carpet_audio_bench(int seconds);
++
++/* `>carpet` 回读里那一行：收了几个字节、总共说多少、放到哪、电平、丢过几次。 */
++void carpet_audio_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_font.ttf b/esp32/components/muse/carpet/carpet_font.ttf
 new file mode 100644
 index 0000000000000000000000000000000000000000..4404f5f486d302fe9327de1ce10abc76e3353531
@@ -2217,10 +2666,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..503e1f0
+index 0000000..7fa6c5e
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,845 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2242,16 +2691,26 @@ index 0000000..503e1f0
 +#include "sdkconfig.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +
++#include <math.h>
 +#include <stdio.h>
 +#include <string.h>
 +
 +#include "cJSON.h"
++#include "carpet/carpet_audio.h"
 +#include "carpet/carpet_page.h"
++#include "driver/gpio.h"
 +#include "esp_log.h"
++#include "esp_heap_caps.h"
++#include "esp_timer.h"
 +#include "freertos/FreeRTOS.h"
 +#include "freertos/queue.h"
 +#include "freertos/semphr.h"
 +#include "freertos/task.h"
++#include "muse_audio.h"
++#include "muse_board.h"      /* 屏幕几何：宽、高、是不是圆、有没有触摸、对角线 */
++#include "muse_chat_priv.h"   /* muse_hatch_caption_at()：按屏当前的 cols×lines 分页 */
++#include "muse_settings.h"
++#include "muse_state.h"
 +#include "muse_wifi.h"
 +#include "screen_link.h"
 +
@@ -2299,6 +2758,118 @@ index 0000000..503e1f0
 +static char s_dialog[40];
 +static uint32_t s_dialog_tick;
 +
++/* ---- 首屏那张脸的答句 ----
++ *
++ * 答句的**显示**全走 Muse 自己留的口：caption（那张脸下面那条带）、mode（听/想/说）、
++ * level（嘴开合）、progress（环上那点进度）。我们不改 muse_ui.c，也不往脸上叠控件。
++ *
++ * 分页是这里唯一自己拿主意的地方。Muse 云端那一路是**按播放的音频字节**推进念稿位置
++ * 的（`muse_hatch_caption_at(text, at, ...)` 给的就是"at 落在哪一页"），我们没有声音
++ * —— ASR/TTS 都在 Muse 云，这台网络到不了 —— 所以按秒推 at。一页停 2.5 秒是照中文
++ * 朗读速度估的，不是量出来的；上板看一眼就知道该不该改。
++ */
++#define FACE_PAGE_US 2500000   /* 一页停多久 */
++#define FACE_HOLD_US 6000000   /* 念完再挂 6 秒，然后清空、脸收回 idle */
++
++/* 整句 / 上一版已经写上屏的那页 / 正在生成的下一页。三份都在 PSRAM：内部那 12K
++ * 是 ws 任务栈要找连续块的地方，别从它身上再切 1.2K。
++ * **三次独立分配，不是一块切三段** —— 同一块里的两段互为 snprintf/memcpy 的源和目标，
++ * 编译器按同一个对象算，`-Werror=restrict` 当场拦下（2026-11-05 就是这么失败的）。 */
++static char *s_face_text;
++static char *s_face_shown;
++static char *s_face_fresh;
++
++static bool s_face_live;          /* 锁里改：还有句子在挂 */
++static bool s_face_speaking;      /* 最后进来的是答句（dir=down），不是问句 */
++static size_t s_face_at;          /* 念到第几个字节 */
++static int64_t s_face_next_us;    /* 下一次翻页 */
++static int64_t s_face_hold_us;    /* 该收回的时刻 */
++static float s_face_level;        /* 假电平：每个 tick 在 0.22 / 0.70 之间摆（这一轮没声音时才用） */
++/* 这一句属于哪一轮。v3 的语音帧带着同一个 turn_id，所以"这句有没有声音、放到哪了"
++ * 是拿它对出来的 —— 不是拿时间猜。空串 = 这一轮没有 id（`>say` 之外不该出现）。 */
++static char s_face_turn[40];
++
++/* 刚见过的轮次。契约里 turn_id 由起头那一方生成、问和答共用同一个，所以"这一轮我们
++ * 是不是已经见过一句"在这里问一句就知道 —— 见过的那一轮（也就是答句）能挤掉正在念的
++ * 那句，没见过的新轮次（主动播报）不能：彩排台的脚本每 6 秒推一条，420 毫秒就把刚落地
++ * 189 字节的答句顶掉了（2026-11-05 实测），而念到一半被换掉是这条带最不能接受的失败。
++ * dir=up 是屏自己在说，它永远可以挤 —— 那是人家正要问。
++ * 只留 4 格、30 秒内算数：轮次是短命的，别为一句话攒记忆。
++ * 屏自己起头的那轮（将来由 `screen_link_send_dialog_up()` 发出去）要在**发的那一刻**
++ * 也记一笔 —— 那一轮的问句不会回镜，不记的话答句就成了"没见过的新轮次"，被挡在门外。 */
++#define ROUND_SLOTS 4
++#define ROUND_WINDOW_US 30000000
++static char s_round_ids[ROUND_SLOTS][40];
++static int64_t s_round_at_us[ROUND_SLOTS];
++static unsigned s_round_next;
++
++/* 只在锁里调。 */
++static void face_round_note(const char *id){
++    if (!id || !*id) return;
++    unsigned i = s_round_next++ % ROUND_SLOTS;
++    snprintf(s_round_ids[i], sizeof s_round_ids[i], "%s", id);
++    s_round_at_us[i] = esp_timer_get_time();
++}
++
++static bool face_round_seen(const char *id)
++{
++    if (!id || !*id) return false;
++    int64_t now = esp_timer_get_time();
++    for (unsigned i = 0; i < ROUND_SLOTS; i++) {
++        if (s_round_at_us[i] && s_round_ids[i][0] && strcmp(s_round_ids[i], id) == 0 &&
++            now - s_round_at_us[i] < ROUND_WINDOW_US) {
++            return true;
++        }
++    }
++    return false;
++}
++
++/* 只在锁里调。 */
++static bool face_bufs_get(void)
++{
++    if (s_face_text && s_face_shown && s_face_fresh) return true;
++    char *a = heap_caps_malloc(MUSE_CAPTION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    char *b = heap_caps_malloc(MUSE_CAPTION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    char *c = heap_caps_malloc(MUSE_CAPTION_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!a || !b || !c) {
++        free(a); free(b); free(c);
++        return false;
++    }
++    s_face_text = a;
++    s_face_shown = b;
++    s_face_fresh = c;
++    return true;
++}
++
++/* 同一维度下的复制：两边都是 MUSE_CAPTION_MAX，截断交给长度 */
++static void face_put(char *dst, const char *src)
++{
++    size_t n = strlen(src);
++    if (n >= MUSE_CAPTION_MAX) n = MUSE_CAPTION_MAX - 1;
++    memcpy(dst, src, n);
++    dst[n] = '\0';
++}
++
++/* 只写 muse_state（它自己带锁），不碰任何 LVGL 对象 —— 所以链路任务和 UI 任务
++ * 都能调，不必挪进队列。 */
++static void face_set_mode(muse_mode_t want)
++{
++    muse_mode_t was = muse_state_mode(NULL);
++    if (was == MUSE_MODE_LISTENING) return;   /* 有人正按着说话，别把他打断 */
++    if (was == MUSE_MODE_OFF) muse_state_set_mode(MUSE_MODE_IDLE);   /* 只有 idle 能离开 off */
++    muse_state_set_mode(want);
++}
++
++/* 这张脸现在有没有主人。没人有事的两张（IDLE / THINKING）才归链路搬，
++ * 其余各有其主：SPEAKING 是一句正在念（我们的答句，或 Muse 自己那条云链路的 TTS），
++ * LISTENING 是有人正按着说话，ERROR 是报警，BOOT/OFF 轮不到链路。
++ * 只在锁里调（读的是 muse_state，它自己带锁，这里说的"锁"是别写坏对面）。 */
++static bool face_mode_takeable(void)
++{
++    muse_mode_t m = muse_state_mode(NULL);
++    return m == MUSE_MODE_IDLE || m == MUSE_MODE_THINKING;
++}
++
 +/* 契约里的英文枚举一律不许上屏（这是排版红线，不是风格），所以每个都查表；
 + * 认不出的值落"未知"而不是把原样印出去 —— 服务端加一个枚举值不该在屏上冒英文。 */
 +typedef struct {
@@ -2322,7 +2893,8 @@ index 0000000..503e1f0
 +};
 +static const kv_t UI_CARD[] = {
 +    { "status", "状态卡" },   { "sat", "卫星卡" },     { "dialog", "对话卡" },
-+    { "emotion", "表情卡" },  { "clock", "钟面" },     { NULL, NULL },
++    { "emotion", "表情卡" },  { "clock", "钟面" },     { "maint", "养车卡" },
++    { NULL, NULL },
 +};
 +static const kv_t EMOTION[] = {
 +    { "neutral", "中性" },    { "happy", "开心" },     { "excited", "兴奋" },
@@ -2345,6 +2917,19 @@ index 0000000..503e1f0
 +    return cJSON_IsString(item) ? item->valuestring : NULL;
 +}
 +
++/* 这一帧是不是"一条到点的养护"（手机那边算出 due/soon 才同时发这两个值；
++ * `note` 那档发的是中性，落不进这里，正好是它该要的"不抢脸"）。
++ * 不复用 fill_from_state：那个要往栈上放一个一百多字节的结构，而这里是链路任务的栈。 */
++static bool frame_maint_worried(const cJSON *st)
++{
++    const cJSON *ui = cJSON_GetObjectItemCaseSensitive(st, "ui");
++    if (!cJSON_IsObject(ui)) return false;
++    const char *card = str_of(ui, "card");
++    const char *emotion = str_of(ui, "emotion");
++    return card && emotion &&
++           strcmp(card, "maint") == 0 && strcmp(emotion, "worried") == 0;
++}
++
 +static void fill_from_state(const cJSON *st, carpet_state_view_t *out)
 +{
 +    const cJSON *sat = cJSON_GetObjectItemCaseSensitive(st, "sat");
@@ -2361,13 +2946,15 @@ index 0000000..503e1f0
 +
 +    const cJSON *ui = cJSON_GetObjectItemCaseSensitive(st, "ui");
 +    if (cJSON_IsObject(ui)) {
-+        snprintf(out->card, sizeof out->card, "%s",
-+                 kv_lookup(UI_CARD, str_of(ui, "card"), "—"));
++        const char *card = str_of(ui, "card");
++        snprintf(out->card, sizeof out->card, "%s", kv_lookup(UI_CARD, card, "—"));
 +        /* 契约里 emotion 可以是 null：那是"这一帧不带情绪"，落回中性，
 +         * 不是"保持上一帧"。这条在老固件上踩过一次（旧值一直挂着）。 */
 +        const char *emotion = str_of(ui, "emotion");
 +        snprintf(out->emotion, sizeof out->emotion, "%s",
 +                 emotion ? kv_lookup(EMOTION, emotion, "未知") : "中性");
++        out->maint_worried = card && emotion &&
++                             strcmp(card, "maint") == 0 && strcmp(emotion, "worried") == 0;
 +    } else {
 +        snprintf(out->emotion, sizeof out->emotion, "%s", "中性");
 +    }
@@ -2404,9 +2991,250 @@ index 0000000..503e1f0
 +    xSemaphoreTake(s_lock, portMAX_DELAY);
 +    cJSON *old = s_state;
 +    s_state = dup;
++    /* 到点的养护把脸换成"担心"（§5.4 建议 worried → THINKING，不给 ERROR：
++     * ERROR 是报警脸，观众读成"屏坏了"）。三道让路，一道都不能省：
++     * 　· 这句正挂在脸上（`s_face_live`）—— 语音还在播就把脸换走，嘴立刻不动，
++     *    而口型是这一轮的主功能；
++     * 　· 只有 IDLE/THINKING 这两张"没人有事"的脸可以由我们搬走，
++     *    SPEAKING/LISTENING/ERROR 各有各的主人（见 face_mode_takeable）；
++     * 　· 不担心了就搬回 IDLE —— 少了这一条，脸会一直"想"下去，
++     *    正是 §5.4 那条"帧里没带就得落回中性"的老坑（#34）。
++     * 每一帧都可以判：state 一秒一帧，不是 0.25 秒的轮询 —— §5.4 警告的是轮询那个频率，
++     * 每秒把正在播的口型脸拽回中性才是砸主功能。写在锁里：`s_face_live` 是 UI 任务写的，
++     * 出了锁再读就可能抢掉它刚接下的那一句；muse_state 自己那把自旋锁顺序仍是这把 → 它那把。 */
++    if (!s_face_live && face_mode_takeable()) {
++        face_set_mode(frame_maint_worried(dup) ? MUSE_MODE_THINKING : MUSE_MODE_IDLE);
++    }
 +    xSemaphoreGive(s_lock);
 +    /* 旧树在锁外删：摘出来之后 UI 已经碰不到它了 */
 +    if (old) cJSON_Delete(old);
++}
++
++/* 把一句对话交给首屏。answer=false 是回镜过来的问句（脸"在想"），
++ * true 是答句（脸"在说"）。第一页当场画出来，后面各页由 tick 翻 —— 答句晚
++ * 250 毫秒上屏是站在屏前看得出来的那种晚。
++ *
++ * 写上屏的那几笔都在锁里：三份缓冲跨了两个任务（这句在链路任务、翻页在 UI 任务），
++ * 出了锁再读 `s_face_shown` 就可能读到对面写了一半的那页。muse_state 自己那把是自旋锁，
++ * 顺序永远是我们这把 → 它那把，反过来的路径不存在，所以嵌套安全。 */
++static void face_offer(const char *text, bool answer, const char *turn_id)
++{
++    if (!text || !text[0] || !s_lock) return;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (!face_bufs_get()) {
++        xSemaphoreGive(s_lock);
++        ESP_LOGW(TAG, "no PSRAM for the face caption; this line stays on the scene page");
++        return;
++    }
++    /* 正在念的那句还没念完 —— 谁能挤掉它：屏自己说的那句（dir=up，问它的人正在等），
++     * 和同一轮里后到的那一句（答句，turn_id 在这儿见过）。主动播报让路，这句丢掉，
++     * 场景页那一行照样留痕。id 先记再判：这一句不念，下一句同轮的还要认得出它。 */
++    bool same_round = face_round_seen(turn_id);
++    face_round_note(turn_id);
++    if (s_face_live && s_face_at < strlen(s_face_text) && answer && !same_round) {
++        ESP_LOGI(TAG, "face busy at=%u/%u, 这句先不念: %s",
++                 (unsigned)s_face_at, (unsigned)strlen(s_face_text), text);
++        xSemaphoreGive(s_lock);
++        return;
++    }
++    face_put(s_face_text, text);
++    bool paged = muse_hatch_caption_at(s_face_text, 0, s_face_fresh, MUSE_CAPTION_MAX) &&
++                 s_face_fresh[0];
++    face_put(s_face_shown, paged ? s_face_fresh : s_face_text);
++    /* at=0：这一页就是"0 字节落在的那页"。别按页长往后加 —— 页和页重叠一行，
++     * 加了会把那行念两遍、还往后多吃一行（上板 at=231/174 就是这么冒的）。 */
++    s_face_at = 0;
++    s_face_speaking = answer;
++    snprintf(s_face_turn, sizeof s_face_turn, "%s", turn_id ? turn_id : "");
++    s_face_next_us = esp_timer_get_time() + FACE_PAGE_US;
++    s_face_hold_us = s_face_next_us + FACE_HOLD_US;
++    s_face_level = 0;
++    s_face_live = true;
++
++    muse_state_poke();   /* 屏打盹时这句得把它叫醒 */
++    muse_state_set_caption("%s", s_face_shown);
++    face_set_mode(answer ? MUSE_MODE_SPEAKING : MUSE_MODE_THINKING);
++    ESP_LOGI(TAG, "face page 0/%u: %s", (unsigned)strlen(s_face_text), s_face_shown);
++    xSemaphoreGive(s_lock);
++}
++
++/* LVGL 任务每 0.25 秒调一次（carpet_page_tick 在 `s_tile` 判断之前调用，
++ * 露的正是脸那一格时也得翻）。
++ * 已知边界：屏打盹时 muse_ui 的 UI 任务在 update_sleep() 那里就 return 了，这条 tick
++ * 跟着停 —— 那句答页冻在第一页不动（2026-11-05 上板实测：`>say` 之后 16 秒 at 一直 0，
++ * 发个 'w' 叫醒就接着翻）。poke 只延长时间、不叫醒打盹的屏，所以彩排时要么先戳一下屏，
++ * 要么让答句发生在有人正看着的时候。真要把答句叫醒屏幕，得动 muse_ui 的休眠那条路，
++ * 这份不改上游。 */
++void carpet_link_face_tick(void)
++{
++    if (!s_face_live || !s_lock) return;
++    int64_t now = esp_timer_get_time();
++
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (!s_face_live || !s_face_text) {       /* 刚被 face_offer 换掉 / 已收回 */
++        xSemaphoreGive(s_lock);
++        return;
++    }
++
++    /* v3：这一轮到底有没有声音、放到哪了。有 → 翻页跟着**播放位置**走；
++     * 没有（老服务端、合成失败、那段被丢了、或者这本来就是一句问话）→ 原样按秒推。
++     * 2.5 秒一页是照中文朗读速度估的，而 TTS 的快慢由发送方定、还跟着句子内容变 ——
++     * 声音来了之后再抱着估的数不放，就会出现"字比声音快半句"那种一眼假的东西。
++     *
++     * 锁的顺序是这把 → carpet_audio 那把，反过来的路径不存在（音频那份不认识对话）。 */
++    size_t a_played = 0, a_total = 0;
++    bool a_live = false;
++    bool audio = s_face_turn[0] &&
++                 carpet_audio_state(s_face_turn, &a_played, &a_total, &a_live, NULL) && a_total > 0;
++
++    /* 还在放就不许收回：一句 9 秒的话按原来的 hold 会在第 6 秒把脸收回 idle，
++     * 声音还在响、字已经没了 —— 那是"屏坏了"那一类现场印象。
++     * 只在 a_live 为真的时候续，声音一停就不再续，所以不会退化成"永远挂着"。 */
++    if (audio && a_live) s_face_hold_us = now + FACE_HOLD_US;
++
++    if (now >= s_face_hold_us) {
++        s_face_live = false;
++        muse_state_set_level(0);
++        muse_state_set_progress(0);
++        muse_state_set_caption("%s", "");
++        face_set_mode(MUSE_MODE_IDLE);
++        xSemaphoreGive(s_lock);
++        return;
++    }
++
++    size_t len = strlen(s_face_text);
++    /* 声音那一档：把已播放的比例折到文字字节上，越过当前页末尾就翻一页。
++     * 一次 tick 只翻一页 —— 4Hz 的 tick 跟得上正常语速，真落下了下一拍接着翻，
++     * 不会跳字（翻页点仍然是分页函数给的）。 */
++    size_t want = audio ? (size_t)((double)len * (double)a_played / (double)a_total) : 0;
++    if ((audio ? (a_live && want > s_face_at) : (now >= s_face_next_us)) && s_face_at < len) {
++        /* 下一页在哪个字节翻，由分页函数自己说了算：从 at+1 一路探，探到它给的页和
++         * 现在这张不一样，那个字节就是翻页点。重叠几行、一页几行都不在这儿假设，
++         * 所以既不重复也不跳字；一次只往前扫一页的量（几十字节）。 */
++        size_t probe = s_face_at + 1;
++        bool found = false;
++        while (probe <= len) {
++            if (muse_hatch_caption_at(s_face_text, probe, s_face_fresh, MUSE_CAPTION_MAX) &&
++                s_face_fresh[0] && strcmp(s_face_fresh, s_face_shown) != 0) {
++                found = true;
++                break;
++            }
++            probe++;
++        }
++        if (!found) {
++            /* 念到头了：环画满、翻页停住，**不许动 hold** —— 每次判到头都把收回时刻
++             * 往后推 6 秒，等于永远挂在那（2026-11-05 上板就这么看到的）。 */
++            s_face_at = len;
++            s_face_next_us = s_face_hold_us;
++        } else {
++            face_put(s_face_shown, s_face_fresh);
++            s_face_at = probe;
++            s_face_next_us = now + FACE_PAGE_US;
++            if (!audio) s_face_hold_us = s_face_next_us + FACE_HOLD_US;
++            muse_state_set_caption("%s", s_face_shown);
++            /* 每翻一页留一行：串口上能直接把整句按页拼回来。1 秒一次的串口采样
++             * 分辨不了"跳字"和"没采到"，这一行分得了。 */
++            ESP_LOGI(TAG, "face page at=%u/%u: %s", (unsigned)probe, (unsigned)len, s_face_shown);
++        }
++    }
++    /* 嘴：**有声音的这一轮这里一笔都不写** —— 播放任务每 20 毫秒喂一次真电平
++     * （muse_audio_level 出来的 RMS），比这个 4Hz 的假摆动灵敏 50 倍。
++     * 剩下这条只服务"没声音的那一轮"：那时候嘴还是得动，否则答句看着像没在念。
++     * 别把这条假摆动当成"屏在放声音"，它从来不是。 */
++    if (s_face_speaking && !audio) {
++        s_face_level = s_face_level > 0.5f ? 0.22f : 0.70f;
++        muse_state_set_level(s_face_level);
++        muse_state_set_progress(len ? (float)s_face_at / (float)len : 1.0f);
++    } else if (audio) {
++        /* 进度环直接给音频位置：它就是"这句话还剩多少"的真答案 */
++        muse_state_set_progress((float)a_played / (float)a_total);
++    }
++    xSemaphoreGive(s_lock);
++}
++
++/* 开发口进来的整句都当答句：问句该由手机回镜，这里造一条出来只为验分页。
++ * 同一条 id 记两遍（note 一次、offer 里再判一次）就是为了让第二条 `>say` 也被认成
++ * "同一轮的后半句"，不然那句"新轮次不许挤正在念的"会把开发口的换句也一起挡掉。 */
++void carpet_link_bench_say(const char *text)
++{
++    if (!s_lock) return;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    face_round_note("bench");
++    xSemaphoreGive(s_lock);
++    face_offer(text, true, "bench");
++}
++
++/* ---- 音频探针：把"样本写进去了"和"喇叭响了"这两件事分开证 ---- */
++
++/*
++ * 微雪 1.75 上 ES8311 只做 DAC，真正推喇叭的是板上那颗 NS4150B 功放；它的使能脚
++ * 是 GPIO46（BSP_POWER_AMP_IO，pa_reverted=false ⇒ 高电平开）。codec 驱动把这一脚
++ * 配成 GPIO_MODE_OUTPUT，输出态的脚默认读不回输入通路，所以先 gpio_input_enable()
++ * 只把输入通路打开（不动输出驱动）—— 微雪自己的诊断也是这么读的。
++ * 这一版固件只跑这一整块屏，所以脚号写死；换板要跟着 BSP 改。
++ */
++#define PROBE_PA_GPIO 46
++#define PROBE_CHUNKS  50      /* 50 × 20 ms = 正好一秒 */
++
++/* 只这一个开发口用，所以放静态：串口那条任务只有 3584 字节栈，压不下 640 字节的块。 */
++static int16_t s_probe_tone[MUSE_AUDIO_CHUNK];
++
++/*
++ * 为什么只有放音、没有"用麦克风听自己"：那条本来是想客观判喇叭响没响的，实测走不通 ——
++ * 开机 5.7 秒 Muse 自己的 muse_audio_selftest 读麦克风是好的（-51 dBFS 那两条），
++ * 但过了一会儿所有 muse_audio_read 都立刻失败在
++ * `i2s_common: i2s_channel_read(1410): The channel is not enabled`（RX 通道被谁关了，
++ * 而 s_open 还是 true，所以 muse_audio_power(true) 原地返回）；先 power(false) 再
++ * power(true) 强重开之后，它改成不返回了：日志停在
++ * `I2S_IF: Pending out channel for in channel running`，串口任务从此再也读不到命令。
++ * 麦克风不带超时，卡住就把开发口整条焊死，所以这里不碰它。
++ *
++ * 那这条还剩什么用：它把"写进去 ESP_OK + 节拍是不是真按 16k 走"这一半称清楚。
++ * 节拍准 = 样本真的在往 codec 送（DMA 在吃），不是软件层的空转；
++ * 功放脚电平、speaker_on、音量一起印出来，剩下的就是它管不着的那一段：
++ * 功放供电、MX1.25 喇叭座、喇叭本身 —— 那三段只能听或量。
++ */
++void carpet_link_bench_audio(int seconds)
++{
++    if (seconds < 1) {
++        seconds = 3;
++    }
++    if (seconds > 30) {
++        seconds = 30;
++    }
++    /* 1 kHz、约 -10 dBFS。一个 20 ms 块正好 20 个整周期，所以每块从相位 0 重算也是
++     * 连续的，不用在块之间留状态，也不会听出咔哒。 */
++    for (int i = 0; i < MUSE_AUDIO_CHUNK; i++) {
++        s_probe_tone[i] = (int16_t)(0.316f * 32767.0f
++            * sinf(2.0f * (float)M_PI * 1000.0f * (float)i / MUSE_AUDIO_RATE));
++    }
++    (void)gpio_input_enable(PROBE_PA_GPIO);
++    printf("@audio cfg spk_on=%d vol=%d mic=%ddB PA%d=%d\n",
++           muse_settings_speaker_on(), muse_settings_volume(), muse_settings_mic_gain(),
++           PROBE_PA_GPIO, gpio_get_level(PROBE_PA_GPIO));
++    fflush(stdout);
++
++    long wrote = 0, werr = 0;
++    int64_t t0 = esp_timer_get_time();
++    for (int s = 0; s < seconds; s++) {
++        int64_t s0 = esp_timer_get_time();
++        for (int i = 0; i < PROBE_CHUNKS; i++) {
++            if (muse_audio_write(s_probe_tone, MUSE_AUDIO_CHUNK) != ESP_OK) {
++                werr++;
++            }
++            wrote++;
++        }
++        /* 每秒一行、带这一秒的实际耗时：写不报错但节拍飞掉 = DMA 没在吃 = 没真送出去。 */
++        printf("@audio %d/%d wrote=%ld err=%ld 一秒实测 %.3f 秒 PA%d=%d\n",
++               s + 1, seconds, wrote, werr,
++               (float)(esp_timer_get_time() - s0) / 1e6f,
++               PROBE_PA_GPIO, gpio_get_level(PROBE_PA_GPIO));
++        fflush(stdout);
++    }
++    printf("@audio verdict 送样本这条路 ESP_OK、总耗时 %.3f 秒（放音 %d 秒）；"
++           "听见 ⇒ 之前是接插件/喇叭那边，听不见 ⇒ 功放供电或喇叭座\n",
++           (float)(esp_timer_get_time() - t0) / 1e6f, seconds);
++    fflush(stdout);
 +}
 +
 +static void on_dialog(const cJSON *dialog)
@@ -2424,6 +3252,12 @@ index 0000000..503e1f0
 +    s_dialog_tick = xTaskGetTickCount();
 +    xSemaphoreGive(s_lock);
 +
++    /* 首屏那句整话。场景页那一行只说"谁在说、哪来的"（40 字放不下整句），
++     * 整句给脸下面那条带 —— 契约里问和答都要回镜，所以两边都会走到这里。
++     * 轮次由 face_offer 自己认（它要拿这个决定能不能挤），这里只把 dir 翻译成"是不是答句"。 */
++    const char *turn = str_of(dialog, "turn_id");
++    face_offer(str_of(dialog, "text"), dir && strcmp(dir, "down") == 0, turn);
++
 +    /* 答话顺带把屏挪过去。只有 dir=down 才可能有这一项（上行带了会被手机剥掉），
 +     * 但它只做换页：认不出的名字忽略 + 一条日志，不 ack。
 +     * carpet_page_goto 自己挪到 UI 任务里落地，这里不碰 LVGL。 */
@@ -2431,6 +3265,21 @@ index 0000000..503e1f0
 +        const char *action = str_of(dialog, "action");
 +        if (action) carpet_page_goto(action);
 +    }
++}
++
++/* v3 的下行指令。`t=command` 这一列里只有 audio_chunk 是**手机→屏**的，
++ * 其余（card_next / poke / page_report …）全是屏→手机的请求，不会从这条回调进来。
++ *
++ * 认不出的 cmd 只记一行日志、不断线：组件对"解不开的帧类型"是直接关连接，
++ * 对"不认识的 cmd"才是静默忽略 —— 我们要的是后一种失败方式（现场永远把掉线怀疑成 Wi-Fi 抖）。 */
++static void on_command(const char *cmd, const cJSON *args)
++{
++    if (cmd && strcmp(cmd, "audio_chunk") == 0) {
++        /* 为什么这段不要，carpet_audio 自己会留一行（采样率 / seq / 容量 / 解码） */
++        carpet_audio_on_chunk(args);
++        return;
++    }
++    ESP_LOGW(TAG, "没听过这条下行指令：%s", cmd ? cmd : "(空)");
 +}
 +
 +static void on_connected(int negotiated)
@@ -2448,6 +3297,9 @@ index 0000000..503e1f0
 +{
 +    s_linked = false;
 +    s_negotiated = 0;
++    /* 半截语音留着，重连之后新答句一开口就会撞上旧缓冲（seq 从 0 起，旧那段还没放完）。
++     * 文字那句不清：断线时念到一半的那句本来就该继续念完。 */
++    carpet_audio_abort("链路断了");
 +}
 +
 +static void cmd_task(void *arg)
@@ -2520,6 +3372,21 @@ index 0000000..503e1f0
 +    }
 +}
 +
++/* v3 的 hello.screen：从 Muse 的板级描述里取，不在这里写死 466 —— 换一块板（或官方
++ * 改了这块的参数）报出去的还是真的那一块。ppi 由对角线折算，不是第二个来源。
++ * 手机拿这一项只做一件事：定字号和一页几行。它不许猜，猜错了就是圆屏上少半个字那种事。
++ * 同一个函数也给 `>carpet` 回读用 —— 报出去的数和看到的数必须是一个来源，
++ * 否则这条回读只是在复述我自己的假设。 */
++static void screen_geom(int *w, int *h, bool *round, bool *touch, int *ppi)
++{
++    *w = muse_board ? muse_board->width : 0;
++    *h = muse_board ? muse_board->height : 0;
++    *round = muse_board ? muse_board->round : false;
++    *touch = muse_board ? muse_board->touch : false;
++    *ppi = (muse_board && muse_board->diagonal_in > 0.1f)
++         ? (int)(hypotf((float)*w, (float)*h) / muse_board->diagonal_in + 0.5f) : 0;
++}
++
 +static void gate_task(void *arg)
 +{
 +    (void)arg;
@@ -2529,18 +3396,28 @@ index 0000000..503e1f0
 +        vTaskDelay(pdMS_TO_TICKS(2000));
 +    }
 +
++    int gw, gh, gppi;
++    bool gr, gt;
++    screen_geom(&gw, &gh, &gr, &gt, &gppi);
++
 +    screen_link_cfg_t cfg = {
 +        .url = CONFIG_SCREEN_LINK_URL,
 +        .screen_id = CONFIG_SCREEN_LINK_ID,
 +        .fw = CONFIG_SCREEN_LINK_FW,
 +        .dock_type = CONFIG_SCREEN_LINK_DOCK_TYPE,
 +        .read_battery_mv = NULL,   /* 底座还没上板：帧里不带这一项 */
++        .screen_w = gw,
++        .screen_h = gh,
++        .screen_round = gr,
++        .screen_touch = gt,
++        .screen_ppi = gppi,
 +    };
 +    screen_link_callbacks_t cb = {0};
 +    cb.on_connected = on_connected;
 +    cb.on_disconnected = on_disconnected;
 +    cb.on_state = on_state;
 +    cb.on_dialog = on_dialog;
++    cb.on_command = on_command;
 +
 +    esp_err_t err = screen_link_start(&cfg, &cb);
 +    if (err != ESP_OK) {
@@ -2573,6 +3450,20 @@ index 0000000..503e1f0
 +    out->gap_s = screen_link_state_gap_s();
 +}
 +
++/* 开发口：文字和声音一起来。turn_id 两边都用 "audtest" —— 这条的目的就是让
++ * 首屏那句去查"这一轮有没有声音、放到哪了"，id 不一样就查不到，翻页会退回按秒估，
++ * 那正好把要看的两件事都藏起来。先记一轮再交句，同 `>say` 那两条一样的写法。 */
++void carpet_link_bench_say_audio(const char *text, int seconds)
++{
++    if (s_lock && text && *text) {
++        xSemaphoreTake(s_lock, portMAX_DELAY);
++        face_round_note("audtest");
++        xSemaphoreGive(s_lock);
++        face_offer(text, true, "audtest");
++    }
++    carpet_audio_bench(seconds);
++}
++
 +void carpet_link_dump(void)
 +{
 +    carpet_link_view_t v;
@@ -2587,8 +3478,21 @@ index 0000000..503e1f0
 +           (unsigned long)screen_link_watchdog_fires());
 +    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
 +    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
-+    printf("@carpet card=%s emotion=%s\n", s.card[0] ? s.card : "-",
-+           s.emotion[0] ? s.emotion : "-");
++    /* 首屏那条带上的整句：live=还有话挂着，mode=脸现在哪个状态
++     * （1 idle / 3 thinking / 4 speaking），at/len=念到第几个字节。
++     * 站在屏前看不出"是没收到还是收到没画"，这一行分得清。 */
++    printf("@carpet face=%d mode=%d at=%u/%u\n", (int)s_face_live,
++           (int)muse_state_mode(NULL), (unsigned)s_face_at,
++           (unsigned)(s_face_text ? strlen(s_face_text) : 0));
++    /* 带上现在实际画的那一页（不是整句）—— "收到没"和"画的是哪页"是两件事，
++     * 光看 at/len 分不出分页分得对不对。 */
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    printf("@carpet band=%s\n", s_face_live && s_face_shown ? s_face_shown : "-");
++    xSemaphoreGive(s_lock);
++    /* maint_worried 是那个布尔记号本身（不是屏上的中文串）：#73 的判据是
++     * "这一帧到底到没到"，跟着中文走就成了自己对自己打勾。 */
++    printf("@carpet card=%s emotion=%s maint_worried=%d\n", s.card[0] ? s.card : "-",
++           s.emotion[0] ? s.emotion : "-", (int)s.maint_worried);
 +    printf("@carpet sos=%s\n", s.sos[0] ? s.sos : "-");
 +    /* 三个按钮发出去几条、最后一条是哪个 —— 站在那块屏前按了才知道有没有通路，
 +     * 这一行是"按了真的发出去了"的唯一凭据。 */
@@ -2600,16 +3504,23 @@ index 0000000..503e1f0
 +     * 三个数对不上就是这一行说的，不用猜。 */
 +    printf("@carpet nav=%s reported=%d last=%s\n", carpet_page_current_name(),
 +           (int)s_pages_sent, s_last_page[0] ? (const char *)s_last_page : "-");
++    /* hello 里那一串屏幕参数（v3）。手机端定字号靠它，报错了整屏排版跟着错，
++     * 所以这里给的是**和发出去同一个来源**的数，不是"应该是 466"。 */
++    int gw, gh, gppi;
++    bool gr, gt;
++    screen_geom(&gw, &gh, &gr, &gt, &gppi);
++    printf("@carpet screen=%dx%d round=%d touch=%d ppi=%d\n", gw, gh, (int)gr, (int)gt, gppi);
++    carpet_audio_dump();
 +    fflush(stdout);
 +}
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..784708e
+index 0000000..7b0ab86
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,118 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -2652,6 +3563,10 @@ index 0000000..784708e
 +    char emotion[24];        /* ui.emotion */
 +    char sos[24];            /* sos.level */
 +    char dialog[40];         /* 最近一句对话的方向和来源；超过 5 秒留空 */
++    /* `ui.card=maint` 且 `ui.emotion=worried` 同时成立：那就是"一条到点的养护"。
++     * 判在解码这一层（这里还拿着契约的英文原值），页面只认这个布尔 ——
++     * 让页面去比"养车卡""担心"这种中文串，等于把改措辞的成本摊到排版那边。 */
++    bool maint_worried;
 +} carpet_state_view_t;
 +
 +/* 从任何任务读都行（里面有锁），但只在 UI 任务的 tick 里调用才有意义。 */
@@ -2684,15 +3599,52 @@ index 0000000..784708e
 + * "按下去真的上线了"）。sent=成功发出的条数。 */
 +const char *carpet_link_last_sent(int *sent);
 +
++/*
++ * 首屏那张脸的答句：**只写 Muse 自己留的三个口**（caption / mode / level / progress），
++ * 不改它的 UI、不叠我们的控件。所以脸还是那张脸，只是话是我们服务端给的。
++ *
++ * 翻页的钟得有人拨。Muse 云端那一路是按**播放的音频**推进念稿位置的，我们不出声音，
++ * 就自己按"念稿"的速度推 —— 挂在这里，由 carpet_page_tick() 每 0.25 秒调一次。
++ * 露的是脸那一格也必须跑，所以调用点在 `s_tile` 判断**之前**。
++ *
++ * 只在 LVGL 任务里调；`on_dialog` 那边（链路任务）负责把整句交进来并画第一页。
++ */
++void carpet_link_face_tick(void);
++
 +/* Console readback (`>carpet`): prints the same numbers and strings the tile
 + * draws, one line each. Safe from any task, never touches LVGL. */
 +void carpet_link_dump(void);
++
++/*
++ * 开发口：把一句话直接塞进首屏那条带，当它是答句（脸进 speaking、按 2.5 秒一页翻）。
++ * 验分页只用得着这个 —— 不接模型也能看出第二页从哪起、一页装几个字。
++ * `>say 一二三…` 走 muse_input 那条线；只入内存不上网。
++ */
++void carpet_link_bench_say(const char *text);
++
++/*
++ * 开发口：放 N 秒 1 kHz 纯音，同时把 speaker_on / 音量 / 功放使能脚电平 / 每笔写的
++ * 返回和每秒实际耗时印出来 —— 用来把"样本真的按 16k 节拍送出去了"和"喇叭响了"分开证。
++ * `>audio [秒]`，默认 3 秒、最多 30 秒，期间占住串口任务。
++ * 不读麦克风：那条在这块板上要么立刻失败（RX 通道没使能）、要么不返回（等 paired 通道），
++ * 会把开发口整条卡死，实测细节见 carpet_link.c 里那段注释。
++ */
++void carpet_link_bench_audio(int seconds);
++
++/*
++ * 开发口 `>audtest [秒] [一句话]`：**一句文字 + 同 turn_id 的一段语音**一起放。
++ * 文字走首屏那条带（和真答句同一条 face_offer），语音走 carpet_audio 那条环和播放任务。
++ * 两个分开测只能各自看出"不动"，合在一起才看得出这两条：
++ * 念稿是不是跟着**播放位置**翻页（不是按 2.5 秒估），口型是不是跟着**真实电平**动。
++ * text 传空串就只放声音。
++ */
++void carpet_link_bench_say_audio(const char *text, int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..abe71db
+index 0000000..18e2537
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,880 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2819,6 +3771,7 @@ index 0000000..abe71db
 +#define TITLE_H    34
 +#define SUB_H      26
 +#define GAP        6
++#define DOT_D      12   /* 行首琥珀点的直径：条目名 22px、值 16px，12 既看得清也不顶行高 */
 +
 +/* L1 宫格。容器 364×380 居中 ⇒ 占 x 51..415、y 43..423，圆屏半径 233，逐角称过：
 + * 第一行卡片外角 (51,104) → sqrt(182²+129²)=223 ✓
@@ -2947,6 +3900,7 @@ index 0000000..abe71db
 +
 +typedef struct {
 +    line_t rows[MAX_ROWS];
++    lv_obj_t *dot[MAX_ROWS];   /* 行首那枚琥珀点：只在该行装的是"到点的养护"时亮 */
 +    line_t sub;
 +} page_lines_t;
 +static page_lines_t s_lines[PG_COUNT];
@@ -3028,6 +3982,26 @@ index 0000000..abe71db
 +    lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
 +    slot->label = v;
 +    slot->shown[0] = '\0';
++}
++
++/* 行首那枚琥珀点（12 px 圆，COLOR_HUE_AMBER）。养护提醒到点时点在"对话"和"情绪"
++ * 这两行前面 —— 那两行装的正是这一条：句子在对话那一行，担心在情绪那一行。
++ * 为什么要有它：答句占着首屏那条带的时候脸演不成"担心"（#73 那条优先序），
++ * 屏上就只剩颜色还能说"这一条是到点的养护"。
++ * 建的时候必须排在条目名之后、值之前：flex 按创建顺序排孩子。
++ * 摘掉 CLICKABLE 是必须的 —— 点了那点得等于点这一行（进详情），不能被孩子吞了。
++ * 藏起来用 HIDDEN：flex 里藏着的孩子不占位，所以不亮时版式和没有这个点一模一样。 */
++static lv_obj_t *make_dot(lv_obj_t *parent)
++{
++    lv_obj_t *d = lv_obj_create(parent);
++    lv_obj_remove_style_all(d);
++    lv_obj_set_size(d, DOT_D, DOT_D);
++    lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
++    lv_obj_set_style_bg_color(d, lv_color_hex(COLOR_HUE_AMBER), 0);
++    lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
++    lv_obj_set_flag(d, LV_OBJ_FLAG_HIDDEN, true);
++    return d;
 +}
 +
 +/* 一列：宽 300、按内容长、在 tile 里居中 —— 圆屏上居中才有最大可用高度。 */
@@ -3312,6 +4286,7 @@ index 0000000..abe71db
 +        const row_def_t *def = &d->rows[i];
 +        lv_obj_t *c = make_card(col, true, ROW_H);
 +        make_label(c, s_big, COLOR_TEXT, def->name);
++        pl->dot[i] = make_dot(c);
 +        make_value(c, &pl->rows[i]);
 +        lv_obj_add_event_cb(c, on_row_clicked, LV_EVENT_CLICKED, (void *)def);
 +    }
@@ -3465,6 +4440,10 @@ index 0000000..abe71db
 +
 +void carpet_page_tick(void)
 +{
++    /* 首屏的答句先翻 —— 露的正是脸那一格时下面那句 return 不会跑到，
++     * 而那一格才是这句答句该出现的地方。 */
++    carpet_link_face_tick();
++
 +    if (s_reshare) {
 +        s_reshare = false;
 +        s_reported[0] = '\0';
@@ -3532,8 +4511,16 @@ index 0000000..abe71db
 +     * 换来的是"入口不许跟着帧变"这条红线写在结构里。 */
 +    char buf[72];
 +    for (int i = 0; i < d->n_rows; i++) {
-+        set_line(&pl->rows[i], field_text(d->rows[i].field, &s, buf, sizeof buf),
-+                 field_color(d->rows[i].field, &s, live));
++        int field = d->rows[i].field;
++        set_line(&pl->rows[i], field_text(field, &s, buf, sizeof buf),
++                 field_color(field, &s, live));
++        /* 点的是"这一条是到点的养护"，不是"这一行有值"：别的卡、别的句子都不亮。
++         * 认的两行各有其道理 —— 对话那一行装的就是那句养护话（它走 dialog 帧上来），
++         * 情绪那一行直接写着"担心"。详情的 L3 不点数：那一页整页都在说这一条。 */
++        if (pl->dot[i]) {
++            bool mark = s.maint_worried && (field == F_DIALOG || field == F_EMOTION);
++            lv_obj_set_flag(pl->dot[i], LV_OBJ_FLAG_HIDDEN, !mark);
++        }
 +    }
 +}
 +
@@ -3591,7 +4578,7 @@ index 0000000..53f5a9a
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..ea7ad22 100644
+index 7c579bb..7c5ce92 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,10 @@
@@ -3605,7 +4592,7 @@ index 7c579bb..ea7ad22 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +896,25 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +896,58 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -3627,11 +4614,44 @@ index 7c579bb..ea7ad22 100644
 +        fflush(stdout);
 +        return true;
 +    }
++    /* 把一句话塞进首屏那条带，只为验分页：不接模型也要能看出第二页从哪个字起、
++     * 一页装几个字。答句在真链路里由手机回镜送来，这条是开发口造的替身。
++     * 整行 1024 字节能塞满，但那条带只吃 MUSE_CAPTION_MAX(400) —— 超长的那截
++     * 在 face_put 就被截掉，所以别指望这里能播完整篇长文。 */
++    if (!strncmp(line, "say", 3) && (line[3] == ' ' || line[3] == '=')) {
++        carpet_link_bench_say(line + 4);
++        printf("@say ok\n");
++        fflush(stdout);
++        return true;
++    }
++    /* 放一段 1 kHz 并把音量/功放使能脚/写入耗时印出来，把"样本出去了"和"喇叭响了"
++     * 分开证，见 carpet_link.h。这条会占住串口任务 N+ 秒，期间不读新行。 */
++    if (!strncmp(line, "audio", 5) && (line[5] == '\0' || line[5] == ' ')) {
++        carpet_link_bench_audio(line[5] == ' ' ? atoi(line + 6) : 3);
++        return true;
++    }
++    /* 一句文字 + 同 turn_id 的一段语音一起放：验"翻页跟着播放位置""口型跟着真电平"。
++     * `>audtest` / `>audtest 6` / `>audtest 6 卫星过境要三十七秒`。
++     * 声音是本机造的（音节+静音），不联网、不接模型，所以这块板在哪都能称这一条。 */
++    if (!strncmp(line, "audtest", 7) && (line[7] == '\0' || line[7] == ' ')) {
++        int sec = 3;
++        const char *rest = line + 7;
++        while (*rest == ' ') rest++;
++        char *endp = NULL;
++        long v = strtol(rest, &endp, 10);
++        if (endp != rest && v > 0) {
++            sec = (int)v;
++            rest = endp;
++        }
++        while (*rest == ' ') rest++;
++        carpet_link_bench_say_audio(*rest ? rest : "", sec);
++        return true;
++    }
 +#endif
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +949,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +982,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }

@@ -138,6 +138,31 @@ class SchemaDriftTest {
     }
 
     @Test
+    fun `v3 那三样必须两边同名：maint 卡、audio_chunk、hello_screen`() {
+        // 一条 v3 拆成三处，是为了让它能在**任何一处漏抄**时当场炸：
+        // maint 漏在固件那张表里 = 手机上点了没反应（屏默默落回 status），
+        // audio_chunk 漏在 CommandType = 手机解整帧失败、直接关掉这条连接，
+        // hello.screen 只在 schema 写了而 Kotlin 没这个字段 = 屏报了，手机看不见，等于没报
+        val cmd = enumValues(at(schema(), listOf("command"))!!["properties"]!!.jsonObject, "cmd")
+        assertTrue("audio_chunk" in cmd, "语音通道不在契约里，屏收到的就是野指令")
+        assertTrue(CommandType.entries.any { it.name == "audio_chunk" }, "CommandType 没有 audio_chunk")
+
+        val ui = at(schema(), listOf("state", "ui"))!!["properties"]!!.jsonObject
+        assertTrue("maint" in enumValues(ui, "card"), "schema 的 card 没有 maint，UiCard 多出来的那档没人认")
+
+        val hello = props(at(schema(), listOf("hello"))!!)
+        assertTrue("screen" in hello.keys, "hello 没申报屏幕几何，产品架构 §4 那条实现要求还挂着")
+        val screenRequired = at(schema(), listOf("hello", "screen"))!!["required"]!!
+            .jsonArray.map { it.jsonPrimitive.content }
+        for (key in screenRequired) {
+            assertTrue(key in props(at(schema(), listOf("hello", "screen"))!!).keys, "hello.screen 的 required 说了个不存在的字段：$key")
+        }
+        val desc = ScreenGeom.serializer().descriptor
+        val wireNames = (0 until desc.elementsCount).map { desc.getElementName(it) }
+        assertTrue(wireNames.containsAll(screenRequired), "ScreenGeom 少了解析 hello.screen 必填项的能力：$wireNames")
+    }
+
+    @Test
     fun `dialog 的必填项在 Kotlin 侧真的没有默认值`() {
         // turn_id / dir / text 缺任何一个，这条对话都钉不回那一轮：
         // 少 turn_id 去重失效（屏上按两下出两条回答），少 dir 分不清是问还是答
@@ -213,7 +238,15 @@ class SchemaDriftTest {
         )
         for ((table, want) in cases) {
             val got = cStringTable(src, table).toSet()
-            assertEquals(want, got, "$table 和 schema 对不上：固件多的是 ${got - want}，缺的是 ${want - got}")
+            if (table == "CARD_NAMES") {
+                // v3 之后这一张**允许少档**：契约新加的那档（maint）老固件本来就该画不出来，
+                // 而 v3 的规矩是"收到不认识的档退回 status" —— 少一档是设计，多一档才是漂移。
+                // 老树不在主线上了（板上跑的是 Muse），所以它不该按住整条守卫；
+                // **全表相等那一条挪到下面那条 Muse 的比里**，因为那才是现在上板的那份固件
+                assertTrue(got.all { it in want }, "CARD_NAMES 里有 schema 没有的档：${got - want}")
+            } else {
+                assertEquals(want, got, "$table 和 schema 对不上：固件多的是 ${got - want}，缺的是 ${want - got}")
+            }
         }
         // 中文那一列的条数必须和键名列一样：少一格就是有取值没配文案。
         // 那种漏法在屏上表现为"永远画兜底那句"，而固件一条日志都不报
@@ -273,6 +306,18 @@ class SchemaDriftTest {
             val pages = Regex("\"([^\"]*)\"").findAll(table.groupValues[1]).map { it.groupValues[1] }.toSet()
             val want = ScreenPage.entries.map { it.name }.toSet()
             assertEquals(want, pages, "屏侧 PAGE_NAMES 和 ScreenPage 对不上：多的是 ${pages - want}，缺的是 ${want - pages}")
+        }
+
+        // 板上跑的是这份补丁，所以**全表相等那一条在这儿**（老树那半边只要求"不多不少档"）：
+        // 少一格 maint 不会报错，只会让手机推来的那条建议永远落回状态总览 ——
+        // 现场看到的就是"手机上明明列了该补气，屏上一个字没提"
+        val cardTable = Regex("static const kv_t UI_CARD\\[\\][^=]*=\\s*\\{(.*?)};", RegexOption.DOT_MATCHES_ALL)
+            .find(patch)
+        if (cardTable != null) {
+            val keys = Regex("\\{\\s*\"([^\"]+)\"").findAll(cardTable.groupValues[1])
+                .map { it.groupValues[1] }.toSet() - "NULL"
+            val wantCards = enumValues(at(schema(), listOf("state", "ui"))!!["properties"]!!.jsonObject, "card")
+            assertEquals(wantCards, keys, "补丁里 UI_CARD 那张表和 schema 的 card 对不上：多的是 ${keys - wantCards}，缺的是 ${wantCards - keys}")
         }
     }
 

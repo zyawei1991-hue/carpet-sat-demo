@@ -1,5 +1,5 @@
 /**
- * Screen-Link 展示端客户端（契约 v2）。
+ * Screen-Link 展示端客户端（契约 v3）。
  *
  * 拓扑是反的：**手机是服务端，这块屏是客户端**。所以本组件不 listen，只 connect，
  * 并且首帧必须自己发 hello —— 手机那边在 hello 之前认不出你是谁，
@@ -27,10 +27,18 @@ extern "C" {
 /** 出厂默认 id。演示现场一定要能被 Kconfig 改掉：烧错了今天就没有展示端 */
 #define SCREEN_LINK_DEFAULT_SCREEN_ID "WS175B-A3F7"
 
-/** 本固件申报的最高契约档。v1→v2 只多一种 dialog 帧，其余一字节未变 */
-#define SCREEN_LINK_CONTRACT_MAX 2
+/** 本端能解析的最高契约档。
+ *  v1→v2 多一种 dialog 帧；v2→v3 多三样，全是**加法**，前两档的字段一字节没动：
+ *  `ui.card=maint`、`hello.screen`（屏幕几何）、下行 `command{cmd:"audio_chunk"}`。
+ *
+ *  音频刻意挂在 command 里而不是新开一种 `t`：本组件对**解不了的帧类型**的处理是关连接，
+ *  一条 `t:"audio"` 会让任何没升到 v3 的屏当场掉线；而认不出的 `cmd` 只是静默忽略。
+ *  省的是"升级顺序必须两端同步"这条隐性约束，代价是音频帧要走一遍 cmd 白名单。 */
+#define SCREEN_LINK_CONTRACT_MAX 3
 
-/** 一条 state 帧在 1Hz 下最大约 1.2KB，留 4 倍余量给以后加的字段 */
+/** 一条 state 帧在 1Hz 下最大约 1.2KB；v3 的音频帧是这里最紧的一条：
+ *  2560 字节 PCM → base64 3416 字符 → 整帧约 3.5KB，所以这个数不能往下调。
+ *  发送侧 core 有 `AudioChunks.JSON_LIMIT=3800` 逐帧断言，两边对着这一个数。 */
 #define SCREEN_LINK_MAX_FRAME 4096
 
 typedef struct {
@@ -46,6 +54,19 @@ typedef struct {
      * 建链时现读一次，所以链路断开重连后带的是新值 —— 中途换电池要等重连才报得出去。
      */
     int (*read_battery_mv)(void);
+    /**
+     * v3：这块屏长什么样（schema `hello.screen`）。手机拿它做的唯一一件事是
+     * "字该多大、一页装几行" —— 它自己不猜尺寸，猜错了就是圆屏上少半个字那种事。
+     *
+     * w/h 传 0 = 不申报这一整项（**别填一个看着像真的的数**，手机会照着排版）。
+     * ppi 传 0 = 这一项不进帧。round/touch 是布尔，没有"不知道"这一说，
+     * 所以它们只在 screen 对象真的进帧时才有意义。
+     */
+    int screen_w;
+    int screen_h;
+    bool screen_round;
+    bool screen_touch;
+    int screen_ppi;
 } screen_link_cfg_t;
 
 typedef struct {

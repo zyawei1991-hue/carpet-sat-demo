@@ -67,6 +67,9 @@ class AiGateway(
             result.fields.forEach { (k, v) -> append("· ").append(k).append("=").append(v).append('\n') }
         }
         val model = if (provider.live) provider.complete(facts + summarize(ctx), history.toList(), q) else null
+        // 真模型没答上来时这行是唯一说得清「屏上那句到底是谁写的」的痕迹。
+        // 不打出来的话，现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错。
+        if (provider.live && model == null) log("${provider.label} 这句没回来（超时/非 JSON/被拒），用技能自己的话术兜底")
         return record(
             AiReply(
                 text = model?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",

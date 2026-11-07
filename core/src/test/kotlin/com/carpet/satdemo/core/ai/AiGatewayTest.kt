@@ -127,6 +127,37 @@ class AiGatewayTest {
     }
 
     @org.junit.jupiter.api.Test
+    fun `真模型没答上来时日志要说实话`() = runBlocking {
+        val quiet = object : AiProvider {
+            override val label = "glm-test"
+            override val live = true
+            override suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String? = null
+        }
+        val lines = mutableListOf<String>()
+        val r = AiGateway(provider = quiet, log = { lines += it }).ask("链路", base)
+        assertTrue(r.source === ReplySource.LocalFallback, "实际来源：${r.source}")
+        // 这一条是 2026-11-06 现场称出来的：配了真模型、超时退成本机话术，界面上一个字都没变。
+        // 没有这行日志的话，只有屏上那句口吻不对能看出来，而没人听得出口吻
+        assertTrue(lines.any { it.contains("glm-test") && it.contains("没回来") }, "日志里没有兜底那一条：$lines")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `关掉思考那一项只有端点声明了才进请求体`() = runBlocking {
+        var sent = ""
+        val transport: (String, String, Map<String, String>) -> String = { _, body, _ ->
+            sent = body
+            """{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"""
+        }
+        OpenAiCompatProvider(AiEndpoint("https://x/v1", "k", "m", false), transport = transport).complete("f", emptyList(), "q")
+        assertTrue(!sent.contains("thinking"), "没声明也塞了非标准字段，别家网关会直接 400：$sent")
+        OpenAiCompatProvider(AiEndpoint("https://x/v1", "k", "m", true), transport = transport).complete("f", emptyList(), "q")
+        // 为什么值得钉住：这条非标准字段决定这趟等几秒 —— 同一个端点实测带着它 3~10 秒回，
+        // 不带的那趟 8.8 秒起步、还有一次擦着 12 秒超时线退成本机话术。少了这一条，
+        // "接了大模型"会静默变成本机话术，只有屏上那句口吻不对能看出来
+        assertContains(sent, """"thinking":{"type":"disabled"}""")
+    }
+
+    @org.junit.jupiter.api.Test
     fun `线格式解析兼容两种返回`() {
         val withMessage = """{"choices":[{"message":{"role":"assistant","content":"你好"}}]}"""
         val withText = """{"choices":[{"text":"直接给"}]}"""

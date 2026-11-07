@@ -3,7 +3,7 @@
 这份是给**另一台电脑**看的。你要研究的是"功能整合进我们自己的 App"，所以正文在第 5 节；
 前面几节只到"能把这一版重出来、能刷上板"为止。
 
-基准：本文件与 `muse-carpet.patch` 记的是 2026-11-05 的状态。
+基准：本文件与 `muse-carpet.patch` 记的是 2026-11-06 的状态（契约 v3 那一轮）。
 
 ---
 
@@ -25,30 +25,64 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 12 个文件、1586 行新增 / 20 行删，外加一份 154,528 字节的字库
-  （`muse-carpet.patch`，4,006 行，`git diff --binary` 打的，字库在里面是 base85 段。
+- 我们的全部改动 = 14 个文件、2503 行新增 / 20 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，4,935 行，`git diff --binary` 打的，字库在里面是 base85 段。
   这两个数字每次重打 patch 都要跟着改，别信上一版留下的）：
   ```
-  esp32/components/muse/CMakeLists.txt       |  17 +-   (+embed 那行)
+  esp32/components/muse/CMakeLists.txt       |  17 +-   (+carpet_audio.c 那行 + embed 那行)
   esp32/components/muse/Kconfig              |  14 +
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
-  esp32/components/muse/carpet/carpet_link.c | 383 +   (新，链路 + 上行命令队列 + page_report)
-  esp32/components/muse/carpet/carpet_link.h |  77 +   (新)
-  esp32/components/muse/carpet/carpet_page.c | 845 +   (新，第 1 层宫格 + 五个场景页 + 明细页)
+  esp32/components/muse/carpet/carpet_audio.c | 368 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段)
+  esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
+  esp32/components/muse/carpet/carpet_link.c | 804 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置)
+  esp32/components/muse/carpet/carpet_link.h | 114 +   (新)
+  esp32/components/muse/carpet/carpet_page.c | 849 +   (新，第 1 层宫格 + 五个场景页 + 明细页)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
-  esp32/components/muse/muse_input.c         |  29 +   (>carpet / >page 回读 + bench 命令 ui=carpet)
+  esp32/components/muse/muse_input.c         |  62 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
   esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条)
   esp32/main/muse_glue.c                     |   9 +
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，12 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  每次改动都重打并在干净树上验一遍，记两笔：
+  再 `git apply`，14 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  每次改动都重打并在干净树上验一遍，一轮记一笔：
   - 2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮 —— 验过 `PAGE_NAMES`
     解得出来（漂移测试靠这一个符号，补丁里没有它就是静默不比，绿灯是假的）。
   - 2026-11-05 宫格那轮 —— `carpet_page.c` 解出来 845 行、`carpet_font.ttf` 154,528 字节、
     `PAGE_NAMES` 在。
+  - 2026-11-05 答句上首屏那轮 —— 干净树 `git apply --check` 过、解出来 `carpet_link.c` 631 行 /
+    `carpet_page.c` 849 行 / 字库 154,528 字节 / `PAGE_NAMES` 在。板上实测：`>say` 那条 369 字节的
+    句子按页翻到 `at=216/369`（一页三行、页与页重叠一行，所以步进是 108 字节）后自己收回、脸回 idle；
+    彩排台三句键盘问话都走完「问句 THINKING → 答句 SPEAKING → 翻到头 → 6 秒后清空」。
+    两条只有上板才看得见的坑记在 `carpet_link.c` 里：① 屏打盹时 UI 任务在 `update_sleep()` 就 return，
+    这条念稿的 tick 跟着停（`poke` 不叫醒打盹的屏，彩排时先戳一下或发 `w`）；② 脚本每 6 秒一条主动线
+    会把刚落地 0.4 秒的答句顶掉，所以带子上定了轮次优先：同 `turn_id` 的后一句和屏自己那句可以挤，
+    新轮次的主动线让路（`>say` 之外没有第二条能验它，彩排台的键盘因此要补一条上行回显给屏）。
+  - 2026-11-06 音频探针（`>audio [秒]`）这轮 —— 干净树 `git apply --check` 过、解出来
+    `carpet_link.c` 708 行 / `carpet_page.c` 849 行 / 字库 154,528 字节 / `PAGE_NAMES` 在。
+    板上称到的音频实况（这几条只有上板看得出来，别再从代码推）：
+    ① 上电日志 `audio ready: 16000 Hz, 2 ch, vol 100` 且 `muse_settings` 那行不带
+    `(speaker off)` ⇒ 软件静音、音量、codec 打开三条全排除；
+    ② `>audio` 印 `PA46=1`：ES8311 只做 DAC，推喇叭的是板上 NS4150B，使能脚 GPIO46 在放音全程为高
+    （读它要先 `gpio_input_enable()`，驱动把脚配成了纯输出）；
+    ③ 250 次 `muse_audio_write()` 全 `ESP_OK`、每"一秒"实测 0.92~1.00 秒 ⇒ 样本真按 16k 节拍进了 DMA，
+    不是软件空转。剩下只能靠耳朵/万用表：功放供电、MX1.25 喇叭座、喇叭本身。
+    ④ **麦克风那条不能用来听自己**：开机 5.7 秒 Muse 的 `muse_audio_selftest` 读得到（-51 dBFS），
+    之后 `muse_audio_read()` 一律立刻失败在 `i2s_channel_read(1410): The channel is not enabled`，
+    而 `muse_audio_power(true)` 因 `s_open` 仍为 true 原地返回；强行 `power(false)+power(true)` 重开
+    会改成不返回（日志停在 `I2S_IF: Pending out channel for in channel running`），串口开发口那条任务
+    （3584 字节栈）从此读不到任何命令。所以探针只放音，不读麦克风。
+  - 2026-11-06 契约 v3（`carpet_audio.c` + `on_command` + `hello.screen` + `UI_CARD` 补 maint）这轮 ——
+    干净树（`git worktree add --detach … cdc169d`）`git apply --check` 过、解出来
+    `carpet_link.c` 804 行 / `carpet_audio.c` 368 行 / `carpet_page.c` 849 行 / 字库 154,528 字节 /
+    `PAGE_NAMES` 在 / `UI_CARD` 里有 `maint` / `on_command` 里认 `audio_chunk`。`:core` 的
+    `SchemaDriftTest` + `AudioChunksTest` 实跑全 PASSED（含那条硬比 schema↔Kotlin↔补丁里 `UI_CARD` 的）。
+    **PC 那半已经在真链路上称过**：彩排台带 `--voice` 起，`node simulator/linkcheck.mjs … --voice`
+    收到 92 块 / 233,740 字节 ≈ 7.3 秒，seq 连续、每块加起来正好等于帧里写的 total、最大帧 3570 字节
+    （预算 3800，屏侧 buffer 4096）。**屏那一半还没上板**：环形缓冲、预缓冲 6400 字节起播、
+    真口型（`muse_audio_level`）、翻页跟着播放位置这四条现在是代码 + 编译通过，判据要在板子上看
+    `>audtest 3` 印出来的 `@audio at …/… level …` 那几行，以及带 `--voice` 的彩排台推一句真答句。
   重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
@@ -182,7 +216,7 @@ FontAwesome 符号里没有汽车、没有人、也没有钟，硬凑只会印�
 | 卫星 | `state.sat.phase` + `next_pass_in_s` 倒计时 | 有（`core` 的 `DemoRuntime`/`SimulatedEphemerisSource`） | 有：车载页「卫星」、亲子页「过境」；点条目 = 进第 3 层看明细 |
 | 对话 | 独立帧 `dialog{dir, source}` | 有（`ScreenLink.kt` 发 v2 dialog 帧） | 有：车载/亲子各一行「对话」，数字分身页叫「答句」（`source` 契约里不是必填，缺了只写"手机在说"，不补一个念不通的尾巴；5 秒后按约定清空） |
 | 呼救 | `state.sos.level / since_ts / attempts / sat_ack`（下行）；上行是 `command{sos_press}` | 有 | 有：车载页「呼救」、亲子页「安全」；**上行还没接**（§5.5，物理入口不能是 BOOT 长按 5 秒） |
-| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | 数字分身页「情绪」那一行；**脸本身也在演它**（§5.4）。`>carpet` 回读里照样有这一行 |
+| 表情 | `state.ui.emotion`（`neutral/happy/excited/sad/worried/sleepy/thinking/null`） | 有 | 数字分身页「情绪」那一行；**脸本身也在演它**（§5.4，`worried` 那一档的让路规则和琥珀点在 §5.4.1）。`>carpet` 回读里照样有这一行 |
 
 **接线规则已经照 §5.2 落进代码**：`carpet_link.c` 的 `on_state` 只做一次
 `cJSON_Duplicate` + 换树（mutex 保护），`carpet_page_tick()` 在 LVGL 任务里取值、做差分。
@@ -234,6 +268,32 @@ dialog 帧 dir=down source=model|xiaozhi_cloud → MUSE_MODE_SPEAKING
 只在**值真的变了**时写一次，并且**当前 mode 是 SPEAKING/LISTENING 时不写**（让 Muse 那一轮走完）。
 什么情况下才该由链路夺走表情的控制权：**AI 答句是从我们自己的服务端进来的、而 Muse 那条云链路没在跑**
 （token 没注入或端点指回我们）时。这两种引擎同时开着，谁都不能一直握着脸。
+
+#### 5.4.1 `worried` 这一条 2026-11-06 接上了（#73），三道让路一道不能少
+
+上面那句警告不是抽象的：这条链路的答句**也在写 `mode`**（`face_offer()` 最后一行
+`face_set_mode(answer ? SPEAKING : THINKING)`），所以 `worried` 和答句抢的是同一个字段。
+拍板的优先序是**答句赢**，实现落在 `carpet_link.c` 的 `on_state()`：
+
+```
+帧里 ui.card=maint 且 ui.emotion=worried  →  MUSE_MODE_THINKING（不给 ERROR：那是报警脸）
+否则                                       →  MUSE_MODE_IDLE（少了这一条脸会一直"想"下去，#34 那个老坑）
+```
+
+三道让路，都在 `s_lock` 里判（`s_face_live` 是 UI 任务写的，出了锁再读就可能抢掉它刚接下的那句）：
+
+1. `s_face_live` 为真不写 —— 语音正在播就把脸换走，**嘴立刻不动**，而口型是这一轮的主功能；
+2. 只在当前 mode 是 `IDLE`/`THINKING` 时搬（`face_mode_takeable()`）—— `SPEAKING`/`LISTENING`/`ERROR` 各有各的主人；
+3. 判在**解码这一层**：`carpet_state_view_t.maint_worried` 是个布尔，页面只认它。
+   让 `carpet_page.c` 去比"养车卡""担心"这种中文串，等于把改措辞的成本摊到排版那边。
+
+这条是每秒一帧判一次，**不是 0.25 秒轮询** —— §5.4 警告的正是轮询那个频率。答句念完之后
+hold 到期把脸收回 idle，下一帧 `state`（≤1 秒）再把"担心"补上，所以不需要额外的记账。
+
+**脸被答句占走时那句提醒还剩什么**：场景页「对话」「情绪」两行行首点一枚琥珀色小点
+（`carpet_page.c` 的 `make_dot()`，12 px，`COLOR_HUE_AMBER`，不亮时用 `HIDDEN` 所以不占位、版式和没有它时一样）。
+串口 `>carpet` 现在多回一个 `maint_worried=0/1`，那是那个布尔本身，不是屏上的中文串 ——
+"这一帧到底到没到"要能不看眼睛就称出来。**上板还没验过**（等一次刷机许可）。
 
 ### 5.5 屏能往手机发什么（我们自己的 App 要做服务端就得收这些）
 
@@ -317,9 +377,47 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 要一整块连续的 —— 我们原来给它 8192，真机上直接 `Error create websocket task`。
 处理见 §9.5，别把它当成"调调参数就好了"的事：**新加一个用内部 RAM 的东西之前，先算这一本账**。
 
-镜像尺寸这笔账要盯着：app 分区 4M，这一版 `muse-gadget.bin` 是 **3,346,432 字节，余 831,484（20%）**。
+镜像尺寸这笔账要盯着：app 分区 4M（0x400000），v3 这一版 `muse-gadget.bin` 是 **3,346,432 字节
+（0x331000），余 847,872（20%）** —— 这个数是构建日志里 `Smallest app partition` 那一行给的，
+别拿 4,194,304 减出来的数当分区大小（分区表留了尾部对齐，减错就得一个假余量）。
 字库那份 154,528 是直接从整片 Noto 里裁出来的；**整片子集（2.18MB）这条路是走不通的**，
 装不进这个分区，所以才要工具。
+
+### 5.7 答句的声音（契约 v3）：谁放、口型跟谁、翻页跟谁
+
+服务端合成好的 PCM 分块推下来，屏放喇叭。这一节说清三件容易做错的事。
+
+**来向只有一条**：`command{cmd:"audio_chunk", args:{turn_id, seq, total, rate, b64}}`，
+`rate` 只认 16000。新开一种 `t` 是错的：组件收到不认识的 `t` 关连接，收到不认识的 `cmd` 只丢那一帧
+（`screen_link.c handle_frame()` 那两条分支）—— 音频骑在 `command` 上，没升 v3 的屏才会继续正常看状态。
+
+**缓冲是一条 512KB 的 PSRAM 线性缓冲，不是环形**。故意的：写的人只有链路任务、读的人只有放音任务，
+两个头各自朝前走，环形缓冲要多维护一套头尾同步，而这段音频从来不需要回头读。
+判据全是"丢整段"，没有"放半段"这一档：`seq` 不等于期望、`total` 超容量、单块超 2560 字节、
+写爆缓冲 → 整段丢掉并记 `drops`；`turn_id` 变了 → 清缓冲重来；链路断了 → `carpet_audio_abort`。
+**文字答句走 `dialog` 那一帧，跟这里没有任何依赖** —— 语音失败最多是没声音，扣不下答句。
+
+**口型跟的是真能量**：v3 之前那条 `0.22/0.72` 来回toggle 是"看着像在说话"的唯一来源，
+它现在只在**这一轮没有音频**时才用（别把没声音那一路也弄成没嘴）。有音频在放时
+每 20ms 写一次 `muse_state_set_level(muse_audio_level())`，那是真 RMS。
+§5.4 那两条约束（值真变了才写、Muse 自己的 SPEAKING 不抢）一条没放松。
+
+**翻页跟的是播放位置**，不是墙钟：带子上那一页显示到第几个字 = `len × played / total`。
+`FACE_HOLD`（6 秒）在有音频时只随播放延长、播完就收 —— 上一轮踩过的坑是"hold 被一直往后推，
+带子永远不收回"，这一版靠"延长有上限且只在 live 时延长"挡住。锁的顺序是 `s_lock` → `carpet_audio` 那一把，
+反过来的地方没有。
+
+**两条回读**（`>carpet` 都会打）：
+```
+@carpet screen=466x466 round=1 touch=1 ppi=372      ← hello.screen 报的那一项，服务端排版用
+@audio turn=… wrote=… total=… played=… live=… level=… frames=… drops=… last=…
+```
+`>audtest 3` 不联网造一段 440Hz「音节+静音」，专证三件事：节拍（`@audio at …/…` 每秒往前挪）、
+口型（`level` 不是一常数）、分页（字跟着声音走）。
+
+**这一节还差的**：上板。判据三条 —— `@audio at` 那行每秒动、`level` 随音节起伏、`drops=0`。
+PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/linkcheck.mjs … --voice`：
+92 块 / 233,740 字节 ≈ 7.3 秒、seq 连续、最大帧 3570 字节 < 预算 3800）。
 
 ## 6. 现场怎么连（拓扑与地址）
 
@@ -387,8 +485,13 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 6. ~~大字号 CJK 字体~~ **做完并上板**（§5.6：123,804 字节的本页词表子集 + tiny_ttf 24/20 px）。
    展台距离真要不要更大，是下一件事 —— 现在这套是 24/20，还能往上加，
    但加一档就要重排这一页（圆里的余量已经用完了，见 §9.1 最后那条）。
-7. 语音：屏侧"听/说"是 Muse 自己那条云链路，**和我们自己的 App 无关**；
-   要让它走我们 App 的服务端，得先看 Muse 的 endpoint 能不能被屏上那四个字段改掉。
+7. 语音分两半，别当一件事讲：
+   - **说（服务端合成 → 屏放）这一半代码已经写完**（§5.7 + 契约 v3），PC 那半在真链路上称过
+     92 块 / 7.3 秒一条不少，**屏这一半还没上板**，所以这里仍然不算"做完"。
+   - **听（屏上的麦克风 → ASR → 我们 App 的答题）这一半完全没有**：屏侧"听/说"现在是 Muse 自己
+     那条云链路，**和我们自己的 App 无关**；要让它走我们 App 的服务端，得先看 Muse 的 endpoint
+     能不能被屏上那四个字段改掉。而且 §2 记过一条硬坑：`muse_audio_read()` 开机 5.7 秒之后一律失败，
+     强行重开会挂死串口任务 —— 真要做"听"，那一本账先还掉。
 8. 屏幕上的第三块 tile **还没有目视确认过**（判据见 §9）。
 
 ## 9. 已经实测到的 / 还差的（2026-11-04 这一轮）

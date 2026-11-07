@@ -169,6 +169,19 @@ static void send_hello(void)
     cJSON_AddItemToArray(protos, cJSON_CreateNumber(1));
     cJSON_AddItemToArray(protos, cJSON_CreateNumber(SCREEN_LINK_CONTRACT_MAX));
 
+    /* v3：屏幕几何。填了 w/h 才发这一项 —— 老服务端解不了也不报错（它按 schema 的
+       "可选"处理），而"没申报"和"报了一个编的尺寸"是两件完全不同的事：
+       前者手机按默认排版，后者会在圆屏上少半个字。 */
+    if (s_cfg.screen_w > 0 && s_cfg.screen_h > 0) {
+        cJSON *g = cJSON_CreateObject();
+        cJSON_AddItemToObject(h, "screen", g);
+        cJSON_AddNumberToObject(g, "w", s_cfg.screen_w);
+        cJSON_AddNumberToObject(g, "h", s_cfg.screen_h);
+        cJSON_AddBoolToObject(g, "round", s_cfg.screen_round);
+        cJSON_AddBoolToObject(g, "touch", s_cfg.screen_touch);
+        if (s_cfg.screen_ppi > 0) cJSON_AddNumberToObject(g, "ppi", s_cfg.screen_ppi);
+    }
+
     if (!send_json(root)) return;
     if (mv > 0) {
         ESP_LOGI(TAG, "hello 已发：%s  电量 %dmV", s_cfg.screen_id, mv);

@@ -1,8 +1,11 @@
 package com.carpet.satdemo.simulator
 
+import com.carpet.satdemo.core.ai.AiEndpoint
 import com.carpet.satdemo.core.ai.AiGateway
+import com.carpet.satdemo.core.ai.AudioChunks
 import com.carpet.satdemo.core.ai.DialogBridge
 import com.carpet.satdemo.core.ai.LocalRuleProvider
+import com.carpet.satdemo.core.ai.OpenAiCompatProvider
 import com.carpet.satdemo.core.ai.skillContext
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
@@ -55,6 +58,7 @@ import kotlinx.coroutines.runBlocking
  * `--freeze-sec S` 走到第 S 个假秒定格 —— 步内发生的相位变化用它抓
  * `--blocked`     演「卫星没过顶」：探测无 ACK、SOS 三次重发、只剩倒计时
  * `--card NAME`   把圆屏那张卡钉死（status/sat/dialog/emotion/clock），不跟脚本轮播
+ * `--ai PATH`     仓库外那份端点配置（base/key/model 三行）；给了且齐才走真模型，否则本机规则
  */
 object DemoDriver {
 
@@ -199,7 +203,41 @@ object DemoDriver {
          * `turn_id` 由屏那侧生成，这里沿用；主动提醒的冷却跟着假时钟走。
          */
         val host = CoroutineScope(coroutineContext + SupervisorJob())
-        val gateway = AiGateway(provider = LocalRuleProvider(), log = { line -> println("ai       $line") })
+        /**
+         * 答句由谁来写：`--ai 文件` / 环境变量 `CARPET_AI_CONFIG` 给了一个三行齐的端点就走真模型，
+         * 否则还是那份本机规则。
+         *
+         * 配置文件**放在仓库外面**（key 不进 git，也不打印），三行 `base=` `key=` `model=`。
+         * 没配齐就明说「未接真源」—— 现场最尴尬的是屏上念了一句漂亮话，观众以为接了大模型。
+         */
+        val aiPath = args.argTextAfter("--ai") ?: System.getenv("CARPET_AI_CONFIG")
+        val endpoint = readAiEndpoint(aiPath)
+        val provider = if (endpoint.configured) OpenAiCompatProvider(endpoint) else LocalRuleProvider()
+        println(
+            if (endpoint.configured) "AI       真源 ${endpoint.model} @ ${endpoint.baseUrl}"
+            else "AI       未接真源（本机规则话术）—— 给环境变量 \$CARPET_AI_CONFIG 或 --ai <base/key/model 三行> 才换真模型"
+        )
+        if (aiPath != null && !endpoint.configured) println("AI       配置文件 $aiPath 读不齐三行，按未配处理")
+        val gateway = AiGateway(provider = provider, log = { line -> println("ai       $line") })
+        /**
+         * `--voice`：答句合成一句中文推到圆屏（v3 的 `audio_chunk`）。
+         * 三件事决定这段声音出不出来：这个开关、那块屏报没报 v3、合成成没成 ——
+         * 任何一件不成都**一个字节不发**，而不是发半段（发半段是"这句话讲了一半卡住"那种现场事故）。
+         * 文字答句走 dialog 那一帧，跟这里没有任何依赖，所以语音失败永远扣不下答句。
+         *
+         * 单独一条线程、还必须是**串行**的那一条：合成要 0.6~2 秒，搁在协程上下文里就把假时钟
+         * 一起卡住（脚本的 600 毫秒一跳会变成"看模型心情"）；串行则两段声音不会叠在一起放。
+         */
+        val voiceOn = args.contains("--voice")
+        val voice = VoiceTts(
+            script = repoFile("tools", "tts-say.ps1"),
+            workDir = Paths.get(System.getProperty("java.io.tmpdir")),
+            note = { line -> println("语音     $line"); runtime.log(line) },
+        )
+        val voicePool = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "carpet-voice").apply { isDaemon = true }
+        }
+        if (voiceOn) println("语音     开 —— 优先 Edge 晓伊（说的时候要有网），断网自动退 Windows 离线音")
         val dialog = DialogBridge(
             gateway = gateway,
             facts = { runtime.skillContext(scene = "车") },
@@ -207,8 +245,65 @@ object DemoDriver {
             launch = { body -> host.launch { body() } },
             note = { line -> println("对话     $line"); runtime.log(line) },
             nowMs = { clock.ms },
+            onAnswer = { d ->
+                if (voiceOn) voicePool.execute {
+                    if (!server.audioReady) {
+                        println("语音     不发：连上来的屏没报 v3（hello.protocols 里没这一档），只留文字")
+                        return@execute
+                    }
+                    val pcm = voice.pcm(d.text) ?: return@execute
+                    val frames = AudioChunks.commands(d.turnId, pcm, clock.ms)
+                    if (frames.isEmpty()) {
+                        println("语音     这句超出屏侧缓冲，整段不发（文字照旧在屏上）")
+                        return@execute
+                    }
+                    println("语音     ${d.turnId} ${frames.size} 帧推给屏")
+                    server.broadcast(frames)
+                }
+            },
         )
         runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
+
+        /**
+         * 键盘当嘴：这个窗口里敲一行回车 = 一句提问，走的是脚本那句一模一样的路
+         * （dir=up 回镜给屏 → 出答句 → dir=down 再回镜）。彩排台上只有一句写死的
+         * 「现在链路什么情况」，真要说"问点别的"得有这一条。
+         * turn_id 带启动随机前缀：契约要求跨重启唯一，重放同一句不该被屏的去重吃掉。
+         */
+        val boot = kotlin.random.Random.nextInt(100, 1000)
+        Thread {
+            val rd = System.`in`.bufferedReader()
+            var n = 0
+            while (true) {
+                val q = rd.readLine()?.trim() ?: break
+                if (q.isEmpty()) continue
+                val turnId = "k-$boot-${++n}"
+                // 先落一行再投递：万一 stdin 根本没读到（管道/后台跑法读不到终端），这行能把
+                // "没读到"和"读到但没送出去"分开
+                println("键盘    $turnId ← $q")
+                // 和链路回调那一跳同一种调法：`runtime.onDialog` 也是从非协程的 ws 线程直接进来的，
+                // 桥里自己 launch。在这里再套一层 host.launch 反而排不上（试过：读到了、没跑）。
+                dialog.onScreenFrame(
+                    ScreenMessage(
+                        t = MsgType.dialog, seq = 0, ts = clock.ms,
+                        dialog = DialogPayload(
+                            turnId = turnId, dir = DialogDir.up, text = q, source = DialogSource.asr,
+                        ),
+                    )
+                )
+                // 这一条是给屏的，不是给桥的：真机上问句就是屏自己起的，它当然知道自己问了什么；
+                // 键盘这句住在手机这侧，桥又按契约不把屏起的那句回镜，于是屏收到的关于这一轮的
+                // 第一帧直接就是答句 —— 它分辨不出"有人问过"和"主动播报"，答句会被正在念的那句
+                // 挤掉（2026-11-05 上板实测：额度那句 746 毫秒就被一条脚本线挡在门外）。
+                // 补一条同 turn_id 的上行回显，这个判断不必让屏猜。
+                runtime.pushDialog(
+                    DialogPayload(
+                        turnId = turnId, dir = DialogDir.up, text = q, source = DialogSource.asr,
+                    )
+                )
+            }
+        }.apply { isDaemon = true; name = "ask-stdin" }.start()
+        println("提问    在这个窗口敲一行回车就是问一句；屏那边首屏那条带会先「想」再「说」")
 
         // 假时钟由下面的脚本推，不能再起内部那圈 1Hz
         runtime.start(autoTick = false)
@@ -316,6 +411,40 @@ object DemoDriver {
     private fun Array<String>.argTextAfter(name: String): String? {
         val i = indexOf(name).takeIf { it >= 0 } ?: return null
         return getOrNull(i + 1)
+    }
+
+    /**
+     * 仓库里的文件。`gradlew :simulator:run` 的工作目录是 simulator 那一层，写死相对路径
+     * 就会「找不到合成脚本」；从当前目录往上找第一个命中这一串的目录，从哪儿起都对。
+     * 找不到就原样返回相对路径 —— 让 [VoiceTts] 打印它那一句「找不到」，别在这里编一个假绝对路径。
+     */
+    private fun repoFile(vararg parts: String): Path {
+        val resolve = { dir: Path -> parts.fold(dir) { a, b -> a.resolve(b) } }
+        val start = generateSequence(Paths.get("").toAbsolutePath()) { it.parent }
+            .firstOrNull { Files.exists(resolve(it)) }
+        return resolve(start ?: Paths.get(""))
+    }
+
+    /**
+     * 读仓库外面那份端点配置：三行 `base=` / `key=` / `model=`，# 开头算注释。
+     *
+     * 为什么不写进 sdkconfig 那一侧、也不放仓库里的 example：key 进过一次 git 就当它泄露过。
+     * 读不到、读不齐都只返回"没配"，让 [AiGateway] 退本机规则并把「未接真源」打在开工第一屏上。
+     * 这一句永远不打印 key。
+     */
+    private fun readAiEndpoint(path: String?): AiEndpoint {
+        if (path.isNullOrBlank()) return AiEndpoint()
+        val lines = runCatching { Paths.get(path).toFile().readLines() }.getOrNull() ?: return AiEndpoint()
+        val kv = lines.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains('=') }
+            .associate { it.substringBefore('=').trim().lowercase() to it.substringAfter('=').trim() }
+        return AiEndpoint(
+            kv["base"].orEmpty(), kv["key"].orEmpty(), kv["model"].orEmpty(),
+            // 第四行是可选项：`thinking=disabled` 关掉网关那侧的思考。为什么压在三行配置里而不是代码里：
+            // 这个字段不是 OpenAI 标准，只有实测过的那家网关才该带（见 [AiEndpoint.disableThinking]）
+            disableThinking = kv["thinking"].equals("disabled", ignoreCase = true),
+        )
     }
 
     /**

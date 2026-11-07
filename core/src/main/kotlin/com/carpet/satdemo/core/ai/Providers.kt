@@ -24,6 +24,13 @@ data class AiEndpoint(
     val baseUrl: String = "",
     val apiKey: String = "",
     val model: String = "",
+    /**
+     * 关掉网关那侧的「先想再答」。这条只能是配置，不能是代码里写死的默认：
+     * 实测同一个端点同一个问题，开着思考 8.8 秒、关掉 3.2 秒（关掉之后最差也见过 10 秒那一趟），
+     * 而 12 秒是这趟请求的超时上限 —— 不关的话真实问答**会擦着超时线退成本机话术**。
+     * 但 `thinking` 不是 OpenAI 标准字段，别的网关可能直接 400，所以按端点声明，不全局塞。
+     */
+    val disableThinking: Boolean = false,
 ) {
     /** 三个都填了才算配好。少一个都不试：试了就是等一次超时，用户在首屏上看着转圈 */
     val configured: Boolean get() = baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
@@ -84,8 +91,9 @@ class OpenAiCompatProvider(
             history.takeLast(6).forEach { h ->
                 append(",{\"role\":\"").append(h.role).append("\",\"content\":\"").append(escape(h.content)).append("\"}")
             }
-            append(",{\"role\":\"user\",\"content\":\"").append(escape(question)).append("\"}]"
-            )
+            append(",{\"role\":\"user\",\"content\":\"").append(escape(question)).append("\"}")
+            append("]")
+            if (endpoint.disableThinking) append(",\"thinking\":{\"type\":\"disabled\"}")
             append("}")
         }
         val url = try {

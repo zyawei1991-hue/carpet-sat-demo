@@ -68,13 +68,17 @@ class ScreenLinkInboundWireTest {
 
     @Test
     fun `契约版本不认识时必须拒绝`() {
-        // v1 和 v2 都在窗口内（v2 只多了 dialog），所以这一条测的是**第三个版本**：
-        // 固件报了一个我们没实现的契约，必须当场炸，不能"尽力解解看"
+        // 支持窗口跟着 ScreenCodec.CONTRACT_VERSION 走，所以探针是"它 + 1"而不是某个写死的数：
+        // 这条原来测的是 v3，v3 上线之后它变成"解一个我们支持的版本然后期望它炸"，
+        // 绿的时候才最危险。固件报了一个我们没实现的契约必须当场炸，不能"尽力解解看"。
+        val beyond = ScreenCodec.CONTRACT_VERSION + 1
         val e = assertFailsWith<IllegalArgumentException> {
-            ScreenMessage.decode("""{"v":3,"t":"bye","seq":3}""")
+            ScreenMessage.decode("""{"v":$beyond,"t":"bye","seq":3}""")
         }
         assertTrue(e.message!!.contains("contract"), e.message!!)
         assertFailsWith<IllegalArgumentException> { ScreenMessage.decode("""{"v":0,"t":"bye","seq":3}""") }
+        // 窗口内的三版都得收下，一个都不能当场炸：报 v3 的固件正是现在烧在板上那一版
+        for (v in 1..ScreenCodec.CONTRACT_VERSION) ScreenMessage.decode("""{"v":$v,"t":"bye","seq":3}""")
     }
 
     @Test

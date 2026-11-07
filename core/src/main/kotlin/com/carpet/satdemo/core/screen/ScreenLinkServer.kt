@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.screen
 
+import com.carpet.satdemo.core.protocol.CommandType
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenCodec
 import com.carpet.satdemo.core.protocol.ScreenMessage
@@ -149,14 +150,33 @@ class ScreenLinkServer(
         connections.forEach { conn ->
             if (!conn.isOpen) return@forEach
             val ver = negotiated[conn] ?: 1
-            messages.forEach { if (it.t != MsgType.dialog || ver >= 2) sendOrDrop(conn, it) }
+            messages.forEach { if (deliverable(it, ver)) sendOrDrop(conn, it) }
         }
     }
 
-    /** `isOpen == true` 不等于可写：这一句抛出来的异常必须在这里被吃掉，不能顺着调用栈爬回 1Hz 循环 */
+    /**
+     * 这一帧这条连接画不画得出来。**每加一条新通道就在这儿多一条**，不要靠"应该都升级了"：
+     * 固件解不开陌生的 `t` 是直接关连接，而 v3 之前的固件收到 `audio_chunk` 只会忽略 ——
+     * 后者才是我们要的失败方式（文字照念，只是没声音）。
+     */
+    private fun deliverable(msg: ScreenMessage, ver: Int): Boolean = when {
+        msg.t == MsgType.dialog -> ver >= 2
+        msg.command?.cmd == CommandType.audio_chunk -> ver >= 3
+        else -> true
+    }
+
+    /** 有没有任何一条连接能收语音。彩排台/App 用它决定要不要跑 TTS —— 白跑一遍 TTS 是白等一秒 */
+    val audioReady: Boolean get() = negotiated.values.any { it >= 3 } && connections.any { it.isOpen }
+
+    /**
+     * 出站唯一出口（`broadcast` 每条连接、`sendTo` 单发），所以**按版本降级也只在这儿做一次**：
+     * `docs/MAINTENANCE.md` 验收判据 #4 要的是「老固件永远收不到 `maint`」，挂在某一条调用点上早晚漏一条路。
+     * 另外 `isOpen == true` 不等于可写：这一句抛出来的异常必须在这里被吃掉，
+     * 不能顺着调用栈爬回 1Hz 循环。
+     */
     private fun sendOrDrop(conn: WebSocket, message: ScreenMessage) {
         try {
-            conn.send(message.encode())
+            conn.send(ScreenCodec.forVersion(message, negotiated[conn] ?: 1).encode())
         } catch (e: Exception) {
             negotiated.remove(conn)
             onSendError(e.message ?: e.javaClass.simpleName)
@@ -171,7 +191,7 @@ class ScreenLinkServer(
     fun sendTo(screenId: String, message: ScreenMessage) {
         if (!accepting) return
         val conn = known[screenId] ?: return
-        if (conn.isOpen && (message.t != MsgType.dialog || (negotiated[conn] ?: 1) >= 2)) sendOrDrop(conn, message)
+        if (conn.isOpen && deliverable(message, negotiated[conn] ?: 1)) sendOrDrop(conn, message)
     }
 
     private fun closeClients() {

@@ -1,0 +1,115 @@
+package com.carpet.satdemo.core.ai
+
+import com.carpet.satdemo.core.protocol.CommandPayload
+import com.carpet.satdemo.core.protocol.CommandType
+import com.carpet.satdemo.core.protocol.MsgType
+import com.carpet.satdemo.core.protocol.ScreenMessage
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import java.util.Base64
+
+/**
+ * 答句语音怎么切成 v3 的 `audio_chunk`（契约见 `protocol/screen-link.md`）。
+ *
+ * 这里只有**编码**，没有合成：TTS 引擎归宿主 —— 彩排台是 Windows 那份离线中文语音，
+ * 手机上换成 `android.speech.tts`，两边喂进来的都是同一种东西（16k / 单声道 / s16le 的裸 PCM），
+ * 切块和上行只有一份代码。这跟 [DialogBridge] 住在 core 是同一条理由：两边各写一遍迟早对不上。
+ *
+ * 屏那侧的环形缓冲和 4096 字节的组帧上限决定了这里的两个数，改一个要改另一个。
+ */
+object AudioChunks {
+    /** 屏侧播放节拍按这个数算：`MUSE_AUDIO_RATE`，也是 ES8311 那条 I2S 的采样率 */
+    const val SAMPLE_RATE = 16000
+
+    /** 一块的字节数 = 80 毫秒。base64 之后 3416 字符，整帧约 3.5 KB */
+    const val BYTES_PER_CHUNK = 2560
+
+    /**
+     * 屏侧缓冲的容量（**64 秒**）。超过就整段不发 —— 半句有声音半句没声音比全没声音更难解释。
+     *
+     * 这个数和固件 `carpet_audio.c` 的 `AUDIO_CAP` 是**同一个东西**，改一个必须改另一个。
+     * 2026-11-06 从 512 KB 提到 2 MB：真模型一句答句实测 32 字就吃掉 7.5 秒，
+     * 16 秒那档一句话就能撞穿，撞穿的现场表现是"屏上有整句话、喇叭一句都没有"。
+     * 屏的 PSRAM 实测 8 MB（开机日志 `octal_psram density 0x03 = 64 Mbit`），
+     * 拿 2 MB 还剩 6 MB 给界面和字库；真拿不到时固件会自己打一行报错并把语音这条路关掉。
+     */
+    const val MAX_TOTAL_BYTES = 2 * 1024 * 1024
+
+    /** 固件那边 `SCREEN_LINK_MAX_FRAME` 是 4096，留 300 字节给 JSON 自己长大 */
+    const val JSON_LIMIT = 3800
+
+    /**
+     * PCM → 一串 `audio_chunk` 帧。空输入、超出 [MAX_TOTAL_BYTES] 都返回空表，
+     * 由调用方打印"为什么没声音"：文字答句走的是另一条帧，语音失败绝不能把答句一起扣下。
+     *
+     * 每帧都带 `total`，屏靠它判"收齐了"；`seq` 从 0 连续，缺一块屏就把整段丢掉（同样不挡文字）。
+     */
+    fun commands(turnId: String, pcm: ByteArray, tsMs: Long): List<ScreenMessage> {
+        if (turnId.isEmpty() || pcm.isEmpty() || pcm.size > MAX_TOTAL_BYTES) return emptyList()
+        val b64 = Base64.getEncoder()
+        val out = ArrayList<ScreenMessage>((pcm.size + BYTES_PER_CHUNK - 1) / BYTES_PER_CHUNK)
+        var index = 0
+        var offset = 0
+        while (offset < pcm.size) {
+            val end = minOf(offset + BYTES_PER_CHUNK, pcm.size)
+            val part = ByteArray(end - offset)
+            pcm.copyInto(part, 0, offset, end)
+            val frame = ScreenMessage(
+                t = MsgType.command,
+                seq = index.toLong(),
+                ts = tsMs,
+                command = CommandPayload(
+                    cmd = CommandType.audio_chunk,
+                    args = buildJsonObject {
+                        put("turn_id", JsonPrimitive(turnId))
+                        put("seq", JsonPrimitive(index))
+                        put("total", JsonPrimitive(pcm.size))
+                        put("rate", JsonPrimitive(SAMPLE_RATE))
+                        put("b64", JsonPrimitive(b64.encodeToString(part)))
+                    },
+                ),
+            )
+            // 编码之后超了 4096，固件那头是**静默丢帧**（组帧缓冲溢出），不是报错。
+            // 所以这条必须在手机端当场抛，而不是让现场去怀疑 Wi-Fi。
+            check(frame.encode().toByteArray(Charsets.UTF_8).size <= JSON_LIMIT) {
+                "audio_chunk 第 $index 块编出来 ${frame.encode().toByteArray(Charsets.UTF_8).size} 字节，超了屏侧 $JSON_LIMIT 的组帧上限"
+            }
+            out += frame
+            offset = end
+            index++
+        }
+        return out
+    }
+
+    /**
+     * WAV → 裸 PCM：从 `fmt ` 链里找 `data` 块。
+     *
+     * 不写死 44：Windows 那份 System.Speech 出来的头是 46 字节（多带 2 字节的 fmt 扩展），
+     * 按 44 切会把开头两个字节当成样本播出去，听起来是"咔"一声而不是一句错。
+     */
+    fun wavToPcm(wav: ByteArray): ByteArray? {
+        if (wav.size < 12) return null
+        if (String(wav, 0, 4, Charsets.US_ASCII) != "RIFF") return null
+        if (String(wav, 8, 4, Charsets.US_ASCII) != "WAVE") return null
+        var at = 12
+        while (at + 8 <= wav.size) {
+            val id = String(wav, at, 4, Charsets.US_ASCII)
+            val size = le32(wav, at + 4)
+            val body = at + 8
+            if (id == "data") {
+                val end = minOf(body + size, wav.size)
+                return if (end <= body) null else wav.copyOfRange(body, end)
+            }
+            // 块长按偶数对齐（RIFF 规定奇数长度补一个填充字节）
+            at = body + size + (size % 2)
+        }
+        return null
+    }
+
+    /** PCM 的秒数，给日志和"这句话念了多久"用 */
+    fun secondsOf(pcmBytes: Int): Double = pcmBytes.toDouble() / (SAMPLE_RATE * 2)
+
+    private fun le32(b: ByteArray, at: Int): Int =
+        (b[at].toInt() and 0xff) or ((b[at + 1].toInt() and 0xff) shl 8) or
+            ((b[at + 2].toInt() and 0xff) shl 16) or ((b[at + 3].toInt() and 0xff) shl 24)
+}

@@ -200,11 +200,15 @@ class ScreenLinkContractTest {
 
     @Test
     fun `unknown contract version is rejected`() {
-        // v1（只会看状态）和 v2（能对话）**都**要收得下：明天到货的固件报哪个版本我们都不能拒它。
-        // 真正的"不认识"是第三个版本 —— 那种帧里的字段我们无从猜测，必须当场炸
+        // v1（只会看状态）、v2（能对话）、v3（能收语音）都得收得下：固件报哪个版本我们都不能拒它。
+        // 真正的"不认识"只有一个算法：**超过 ScreenCodec.CONTRACT_VERSION 的那一档**。
+        // 这里写死数字会烂 —— 上一版写的就是 3，v3 上线当天它自己变成了被支持的版本，
+        // 于是这条测试悄悄变成"什么都没测"（错的是尺子，不是被测的东西）。
+        val beyond = ScreenCodec.CONTRACT_VERSION + 1
         ScreenMessage.decode("""{"v":1,"t":"bye","seq":1}""")
         ScreenMessage.decode("""{"v":2,"t":"bye","seq":1}""")
-        assertThrows(Exception::class.java) { ScreenMessage.decode("""{"v":3,"t":"bye","seq":1}""") }
+        ScreenMessage.decode("""{"v":${ScreenCodec.CONTRACT_VERSION},"t":"bye","seq":1}""")
+        assertThrows(Exception::class.java) { ScreenMessage.decode("""{"v":$beyond,"t":"bye","seq":1}""") }
         assertThrows(Exception::class.java) { ScreenMessage.decode("""{"v":0,"t":"bye","seq":1}""") }
     }
 

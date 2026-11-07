@@ -6,10 +6,14 @@
 // 为什么值得单独留一个文件：明天固件烧进去之后，第一件事不是拿真屏试，是跑这个脚本对着手机连一次。
 // 屏上的图画错了肉眼能看出来，链路时序错了肉眼看不出来 —— 而现场只会露一次。
 //
-//   node simulator/linkcheck.mjs [ws://host:8443] [screen_id]
+//   node simulator/linkcheck.mjs [ws://host:8443] [screen_id] [--voice]
+//
+// 带 `--voice` 时这一趟还会盯音频那一条：**必须先起一个带 --voice 的驱动器**，
+// 不带这个开关就只报一句"没收到音频帧"，不判 FAIL —— 那时没声音是正确答案。
 
 const URL_ = process.argv[2] ?? 'ws://127.0.0.1:8443';
 const SCREEN_ID = process.argv[3] ?? 'WS175B-A3F7';
+const WANT_VOICE = process.argv.slice(2).includes('--voice');
 
 let seq = 0;
 const out = [];
@@ -22,17 +26,32 @@ const events = [];
 const dialogs = [];
 const acks = [];
 const closes = [];
+const audio = [];
 let helloAcked = false;
 let byeAt = null;
 
 const send = (t, body) => ws.send(JSON.stringify({ v: 1, t, seq: seq++, ts: Math.floor(Date.now() / 1000), ...body }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/**
+ * 等到条件成立为止，最多 budget 毫秒。
+ * 为什么不用固定 sleep：这条链路的答句有两个完全不同的源头 —— 本机规则几十毫秒，真模型
+ * 三到十秒（`--ai` 那份端点，实测抖动就这么大）。固定 2.5 秒在规则那侧够用，
+ * 在真模型那侧会**每次都报 FAIL**，而那恰恰是要验的那一条。到点就走，不白等。
+ */
+const until = async (pred, budget, every = 250) => {
+  for (let t = 0; t < budget; t += every) {
+    if (pred()) return true;
+    await sleep(every);
+  }
+  return pred();
+};
 
 ws.onopen = () => {
   ok('已连上 ' + URL_);
   // 首帧必须是 hello：服务端在拿到 screen_id 之前没法查白名单（D8）
-  // 申报 [1,2]：不带上 2，服务端那条 dialog 通道根本不会往这台屏推（逐连接按协商结果过滤）
-  send('hello', { hello: { screen_id: SCREEN_ID, fw: 'linkcheck-2', protocols: [1, 2] } });
+  // 申报 [1,2,3]：不带上 2，服务端那条 dialog 通道根本不会往这台屏推；不带上 3，
+  // 服务端连 TTS 都不跑（audioReady 为假），音频那一条就永远验不到东西
+  send('hello', { hello: { screen_id: SCREEN_ID, fw: 'linkcheck-3', protocols: [1, 2, 3] } });
 };
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -42,6 +61,11 @@ ws.onmessage = (e) => {
     if (m.ack?.forSeq === 0 || m.ack?.for_seq === 0) helloAcked = true;
   }
   if (m.t === 'dialog') dialogs.push(m.dialog);
+  if (m.t === 'command' && m.command?.cmd === 'audio_chunk') {
+    // 帧的字节数一起收着：4096 是屏侧 buffer_size，超了的那一帧屏根本收不到，
+    // 而服务端这边一切正常 —— 只有在这里称才知道
+    audio.push({ bytes: Buffer.byteLength(e.data, 'utf8'), ...m.command.args });
+  }
   if (m.t === 'event') {
     const ev = m.event ?? {};
     events.push(ev);
@@ -70,7 +94,7 @@ const run = async () => {
   //    ui 缺失或取值不认识时**两边都不报错** —— 固件默默画回总览，现场表现是
   //    "手机上换了卡、屏没动"，然后所有人去怀疑网络。屏那边是手写分支表，
   //    App 的枚举手滑多一个值就是这么个静默法
-  const CARDS = ['status', 'sat', 'dialog', 'emotion', 'clock'];
+  const CARDS = ['status', 'sat', 'dialog', 'emotion', 'clock', 'maint'];
   const EMOS = ['neutral', 'happy', 'excited', 'sad', 'worried', 'sleepy', 'thinking'];
   const uis = states.map((m) => m.state?.ui).filter((u) => u !== undefined && u !== null);
   const badCard = uis.filter((u) => !CARDS.includes(u.card)).map((u) => String(u.card));
@@ -91,12 +115,21 @@ const run = async () => {
   //    所以这里验的是"手机接住了没有"，不是"屏切到了哪张"。
   //    放在 sos 之前跑：呼救一旦没走完，card_next 会被顶回去，那是正确答案，不是这条要测的东西
   const cardOf = (m) => m?.state?.ui?.card;
+  const lastState = () => states.at(-1)?.state ?? {};
+  // 安全那一句压过屏的切卡请求（呼救没走完 / 已越界 / 蜂窝不顶用又快到窗口）。
+  // card_next 和 poke 一样是**请求**，被顶回去是正确答案，所以两条共用这个判据
+  const safetyHolds = (last) =>
+    (last.sos?.level && last.sos.level !== 'normal' && last.sos.level !== 'armed_ok')
+    || (last.fence?.active && last.fence?.inside === false)
+    || (!last.link?.cellOk && last.sat?.nextPassInS != null && last.sat.nextPassInS <= 120);
   const c0 = cardOf(states.at(-1));
   send('command', { command: { cmd: 'card_next', args: { dir: 1 } } });
-  await sleep(2500);
+  await until(() => cardOf(states.at(-1)) !== c0 || safetyHolds(lastState()), 6000);
   const c1 = cardOf(states.at(-1));
-  if (c1 === c0) fail(`card_next 之后卡还停在 ${c0} —— 要么 dispatch 没通，要么 args 里的 dir 没解出来`);
-  else ok(`card_next(dir=1)：${c0} → ${c1}`);
+  if (c1 === c0) {
+    if (safetyHolds(lastState())) ok(`card_next 让路给安全那一句（当下画 ${c0}）—— 屏的请求不是命令`);
+    else fail(`card_next 之后卡还停在 ${c0}，且当下没有该让路的场面 —— 要么 dispatch 没通，要么 args 里的 dir 没解出来`);
+  } else ok(`card_next(dir=1)：${c0} → ${c1}`);
 
   // 交回策略之后才轮得到戳屏：手动钉住那张卡压过一切判据（含 poke），
   // 所以这条必须排在 card_auto 后面 —— 顺序反了它就不是在验 poke，是在验"钉住还留着"
@@ -106,13 +139,9 @@ const run = async () => {
   send('command', { command: { cmd: 'poke', args: {} } });
   await sleep(2500);
   const c2 = cardOf(states.at(-1));
-  const last = states.at(-1)?.state ?? {};
-  // poke 是**请求**，不是命令：呼救没走完、已越界、蜂窝不顶用又快到窗口 —— 这三种时候它必须让路。
-  // 所以这里按当下相位分两判，而不是死要 emotion：死要 emotion 的话，脚本一挪到离线段就自己报错
-  const safetyHolds = (last.sos?.level && last.sos.level !== 'normal' && last.sos.level !== 'armed_ok')
-    || (last.fence?.active && last.fence?.inside === false)
-    || (!last.link?.cellOk && last.sat?.nextPassInS != null && last.sat.nextPassInS <= 120);
-  if (safetyHolds && c2 !== 'emotion') ok(`poke 让路给安全那一句（当下画 ${c2}）—— 一次触摸不该劫走倒计时`);
+  // poke 是**请求**，不是命令：判据和 card_next 共用上面那条 safetyHolds
+  const held = safetyHolds(lastState());
+  if (held && c2 !== 'emotion') ok(`poke 让路给安全那一句（当下画 ${c2}）—— 一次触摸不该劫走倒计时`);
   else if (c2 !== 'emotion') fail(`poke 之后屏上应该是那张会动的脸，实际是 ${c2} —— 戳了没反应是现场最容易被当成屏坏了的一种`);
   else ok('poke 被接住，屏上换成表情卡');
 
@@ -147,15 +176,16 @@ const run = async () => {
   //    协商错、逐连接过滤写反、回镜没接上 —— 三种错的现场表现都是"屏上说话没反应"，肉眼分不出来
   // 每次跑一个新的 turn_id：**宿主的记录跨连接去重**，复用固定 id 会被当成重复那句话直接丢掉
   const TID = 'lc-' + Date.now().toString(36);
+  const askAt = Date.now();
   send('dialog', { dialog: { turn_id: TID, dir: 'up', text: '链路现在怎么样', source: 'asr', origin: 'screen' } });
-  await sleep(2500);
+  await until(() => dialogs.some((d) => d.turn_id === TID && d.dir === 'down'), 15000);
   const mine = dialogs.filter((d) => d.turn_id === TID);
   if (!mine.length) fail('发了 dialog{dir:up}，服务端一条对话都没回 —— 对话通道没接上，或协商把这台屏挡掉了');
   else if (!mine.some((d) => d.dir === 'down')) fail('对话只收到镜像回来的自己那句，没有答：' + JSON.stringify(mine));
   else {
     const ans = mine.find((d) => d.dir === 'down');
     if (mine.filter((d) => d.dir === 'down').length !== 1) fail(`一轮答了 ${mine.length} 条，屏上就要多出一轮`);
-    ok(`对话往返通：答「${ans.text.slice(0, 24)}」 source=${ans.source ?? 'local_rule(缺省)'} origin=${ans.origin ?? 'screen(缺省)'}`);
+    ok(`对话往返通（${Date.now() - askAt}ms）：答「${ans.text.slice(0, 24)}」 source=${ans.source ?? 'local_rule(缺省)'} origin=${ans.origin ?? 'screen(缺省)'}`);
     // 沿用它那个 turn_id 才钉得回原来那一轮；另起一个 id 屏上就会多出第二条对话
     if (ans.turn_id !== TID) fail(`回镜没沿用屏那边的 turn_id，实际 ${ans.turn_id}`);
     else ok('回镜沿用屏那边的 turn_id');
@@ -163,6 +193,37 @@ const run = async () => {
     const ups = mine.filter((d) => d.dir === 'up').length;
     if (ups) fail(`服务端把屏自己说的那句又镜像回来了 ${ups} 遍，屏上会出现两条一样的问话`);
     else ok('屏自己那句没被回镜，只有答那一条下来');
+  }
+
+  // ── 音频面（契约 v3）。这一条只能在真链路上称：帧的字节数由服务端编码完才算得出来，
+  //    而屏那一侧 buffer_size=4096 是**硬**的 —— 超了的帧在屏那边是静默丢，服务端一切正常。
+  //    合成要 0.6~2 秒，答句落地到第一帧音频之间有一段空，所以这里多等几秒
+  if (WANT_VOICE) {
+    await until(() => audio.some((a) => a.turn_id === TID), 20000);
+    await sleep(1500);   // 第一帧到了之后让整段推完，seq 连续性那一条称的是全部
+    const mine2 = audio.filter((a) => a.turn_id === TID);
+    if (!mine2.length) fail(`答句之后一条 audio_chunk 都没来（总共收到 ${audio.length} 条）。要么驱动器没带 --voice，要么 TTS 没合成成功，要么 audioReady 判假`);
+    else {
+      const bad = mine2.find((a) => a.rate !== 16000);
+      if (bad) fail(`音频帧报的采样率是 ${bad.rate}，屏那边 16000 之外一律丢掉`);
+      const seqs = mine2.map((a) => a.seq);
+      const gap = seqs.findIndex((s, i) => s !== i);
+      if (gap >= 0) fail(`seq 从第 ${gap} 块起不连续（实际 ${seqs.join(',')}）—— 屏侧规则是缺一块丢整段，表现是没声音`);
+      const totals = [...new Set(mine2.map((a) => a.total))];
+      if (totals.length !== 1) fail('同一轮里 total 变了：' + totals.join(','));
+      const got = mine2.reduce((s, a) => s + Buffer.from(a.b64, 'base64').length, 0);
+      if (totals[0] !== got) fail(`每块解出来加在一起 ${got} 字节，帧里写的 total=${totals[0]} —— 屏按 total 判"放完了"`);
+      const fat = mine2.filter((a) => a.bytes > 3800);
+      if (fat.length) fail(`${fat.length} 帧超过 3800 字节预算（最大 ${Math.max(...mine2.map((a) => a.bytes))}），屏侧 buffer 是 4096，这些帧到不了`);
+      const secs = got / 2 / 16000;
+      ok(`音频 ${mine2.length} 块 / ${got} 字节 ≈ ${secs.toFixed(1)} 秒，seq 连续、total 对得上、最大帧 ${Math.max(...mine2.map((a) => a.bytes))} 字节（预算 3800）`);
+      // 屏放一段 16k 的音频要按实时节拍走：这里只称"发出去用了多久"，
+      // 收完第一帧到最后一帧的间隔 ≈ 这句话的时长（服务端是连着推的，不代表播放节拍）
+      const spread = mine2.length > 1 ? '（服务端连推，非播放节拍）' : '';
+      ok(`${mine2.length} 块一次推完${spread}：屏那边靠预缓冲 6400 字节起播，靠 muse_audio_write 的实时阻塞节拍播`);
+    }
+  } else if (audio.length) {
+    ok(`收到 ${audio.length} 块音频帧（驱动器带了 --voice；这趟没加 --voice 所以不判）`);
   }
 
   const lastSeq = seq;

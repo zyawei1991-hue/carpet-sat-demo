@@ -196,6 +196,41 @@ class DialogBridgeTest {
     }
 
     @Test
+    fun `养护提醒那句骑的就是对话帧 归类靠 skill 不靠新字段`() {
+        // 2026-11-06 拍板：为了这句在屏上加一个新的文本字段不做 —— 句子本来就在 dialog 帧里，
+        // 而"这条是养护、不是谁问出来的"归手机（和以后的服务器）按 skill 归类存。
+        // 规则引擎在手机版那边（§9 的 M1/M2），这里只钉**载体**：一帧、一个 skill、一份记录。
+        val maint = Rule("maint.due", 30 * 60_000) {
+            ProactiveTip("maint", "胎压该补到 2.5 bar 了，出门前看一眼。")
+        }
+        val h = Harness()
+        val bridge = DialogBridge(
+            gateway = h.gateway,
+            facts = { CTX },
+            push = { h.pushed += it },
+            launch = { body -> runBlocking { body() } },
+            note = { h.notes += it },
+            nowMs = { h.clock++ },
+            heartbeat = Heartbeat(nowMs = { h.clock++ }, rules = listOf(maint)),
+        )
+        bridge.scanProactive()
+
+        val frame = h.pushed.single()
+        assertEquals(DialogDir.down, frame.dir, "养护那句是屏说出来的，不是屏问出去的")
+        assertEquals("maint", frame.skill, "归类的那一项没上帧，服务端和手机都分不出它是养护")
+        assertEquals("胎压该补到 2.5 bar 了，出门前看一眼。", frame.text)
+        val line = bridge.log.turns.value.single()
+        assertEquals("maint", line.skill)
+        assertTrue(line.proactive, "没人问它就该看得出是主动说的")
+
+        // 分类要真分得开：这条不许冒进"娃在屏上说了啥"那几句里。
+        // 那一筛的条件是"屏起头的问句"，而养护是手机主动播报的答句形状 —— 加进来的话
+        // 家长问一句"娃说了啥"，答案里多出一句胎压，那种东西在现场没法当场解释
+        bridge.onScreenFrame(h.frame(up("今天放学下雨了", "s-30")))
+        assertEquals(listOf("今天放学下雨了"), bridge.log.screenTalk())
+    }
+
+    @Test
     fun `手机上从哪一页问的就归哪一页 问和答一起归`() = runBlocking {
         val h = Harness()
         h.bridge.ask("车在哪", DialogOrigin.phone, scene = TurnScene.vehicle)

@@ -42,6 +42,15 @@ class DialogBridge(
      * 默认 null：屏还没报页的时候，那句话只出现在总时间线里。
      */
     private val screenScene: () -> TurnScene? = { null },
+    /**
+     * **答句**（含主动播报）落地之后的一次回调，问句的回镜不走这里。
+     * 宿主拿它去合成语音：彩排台是 Windows 那份离线中文，手机上换 `android.speech.tts`。
+     *
+     * 为什么不在 [push] 里自己筛：`DialogPayload` 分不出"这是答句"还是"这是被回镜的问句"
+     * —— 两者都是 `dir=down`。拿 `source` 猜等于把一条产品规则建在一个显示字段上，
+     * 而猜错的代价是屏上把车主自己问的那句又念一遍。
+     */
+    private val onAnswer: (DialogPayload) -> Unit = {},
 ) {
     private var turnSeq = 0
 
@@ -145,6 +154,9 @@ class DialogBridge(
             ),
         ) ?: return
         mirror(stored)
+        // 声音挂在文字后面，而不是替掉文字：合成失败、屏没升到 v3、端点没配 ——
+        // 任何一种都只让这一句没声音，那句答话本身已经在屏上了
+        onAnswer(payloadOf(stored))
     }
 
     /**
@@ -156,18 +168,20 @@ class DialogBridge(
      */
     private fun mirror(turn: Turn) {
         if (turn.via == DialogOrigin.screen && turn.from == TurnFrom.Me) return
-        push(
-            DialogPayload(
-                turnId = turn.turnId,
-                // 回屏一律 down：dir 说的是屏该怎么处理这一条，up 是屏"说出去"的方向
-                dir = DialogDir.down,
-                text = turn.text,
-                source = turn.source.toDialog(),
-                skill = turn.skill,
-                origin = turn.via,
-            ),
-        )
+        push(payloadOf(turn))
     }
+
+    /** 一帧对话的形状。[mirror] 和交给 [onAnswer] 的那一份必须是同一个构造：
+     *  语音和文字是同一句话的两半，turn_id 对不上屏就把声音配错了字 */
+    private fun payloadOf(turn: Turn) = DialogPayload(
+        turnId = turn.turnId,
+        // 回屏一律 down：dir 说的是屏该怎么处理这一条，up 是屏"说出去"的方向
+        dir = DialogDir.down,
+        text = turn.text,
+        source = turn.source.toDialog(),
+        skill = turn.skill,
+        origin = turn.via,
+    )
 
     /** 带自增是因为同一毫秒里连点两次是真会发生的，撞了就会丢掉第二条 */
     private fun newTurnId(): String = "t-${nowMs().toString(36)}-${turnSeq++}"

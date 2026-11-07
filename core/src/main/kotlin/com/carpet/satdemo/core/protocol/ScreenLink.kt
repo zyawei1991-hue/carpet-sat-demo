@@ -12,14 +12,20 @@ import kotlinx.serialization.json.Json
 object ScreenCodec {
     /**
      * 契约 v2：加了 `dialog` 通道（对话记录以手机为单一事实源，圆屏是耳朵和嘴）。
+     * 契约 v3：加 `ui.card = maint`（`docs/MAINTENANCE.md` M3）、`hello.screen`（面板几何，
+     * 产品架构 §4 实现要求 #4），以及答句的语音通道 `command{cmd:"audio_chunk"}`。
      *
      * **v1 的连接仍然全部可用**：state / event / command / ack 的形状一个字段都没改，
-     * 所以这里收 1 和 2 两个版本，协商看 `hello.protocols`（不看帧上的 `v` —— 出站帧
+     * 所以这里收 1、2、3 三个版本，协商看 `hello.protocols`（不看帧上的 `v` —— 出站帧
      * 因为 encodeDefaults=false 根本不写 `v`，把它当依据会在真固件上猜错）。
-     * 唯一的差别是 v2 才发 `dialog`，服务端按连接逐个过滤。
+     * 差别只有两条：v2 才发 `dialog`，v3 才发 `audio_chunk`。服务端按连接逐个过滤。
+     *
+     * 音频走 `command` 而不是新的 `t`，是因为固件对**解不开的 t 直接关连接**（那边
+     * `handle_frame` 的最后一条分支），而不认识的 cmd 只是忽略。一条新帧类型会让任何
+     * 没升到 v3 的屏当场掉线，而"掉线"在现场永远被当成 Wi-Fi 抖。
      */
-    const val CONTRACT_VERSION = 2
-    val SUPPORTED_VERSIONS: Set<Int> = setOf(1, 2)
+    const val CONTRACT_VERSION = 3
+    val SUPPORTED_VERSIONS: Set<Int> = setOf(1, 2, 3)
 
     /**
      * 这条连接能不能收对话。取双方都支持的最高版。
@@ -37,6 +43,23 @@ object ScreenCodec {
      */
     fun compatible(protocols: List<Int>?): Boolean =
         protocols == null || protocols.any { it in SUPPORTED_VERSIONS }
+
+    /**
+     * 发给这条连接之前，按它的版本把这一帧改回它画得出来的样子。
+     *
+     * `dialog` 和 `audio_chunk` 是**整帧**新增，逐连接过滤帧类型就够了；`ui.card = maint` 不是 ——
+     * 它骑在 v1 就有的 `state` 帧里，过滤帧类型过滤不到它。`docs/MAINTENANCE.md` 验收判据 #4
+     * 要的是「没申报 protocols 的连接永远收不到 maint」，所以这里把它降回 `status`。
+     * 老固件那张 `UI_CARD` 表查不到 maint 时画的是「—」，那是"手机上换了卡、屏上一根横杠"，
+     * 比退回总览难看得多也更难解释。
+     */
+    fun forVersion(msg: ScreenMessage, ver: Int): ScreenMessage {
+        if (ver >= CONTRACT_VERSION) return msg
+        val state = msg.state ?: return msg
+        val ui = state.ui ?: return msg
+        if (ui.card != UiCard.maint) return msg
+        return msg.copy(state = state.copy(ui = ui.copy(card = UiCard.status)))
+    }
 
     val json: Json = Json {
         // kotlinx 1.3 起默认不写出 null 字段，正好是我们要的紧凑 wire
@@ -89,6 +112,15 @@ enum class EventKind {
 enum class CommandType {
     sos_press, sos_cancel, track_pull, set_demo_mode, set_fence, reboot_ui,
     card_next, card_auto, poke, page_report,
+
+    /**
+     * v3 唯一一条**下行**的指令（其余全是屏→手机）。答句的语音分块推给屏：
+     * 屏拿到文字就念（现有那条带），拿到这块就接着放 —— 文字和语音是两帧，
+     * 所以 TTS 慢、失败、或者根本没接，都不会把答句扣在手机里。
+     *
+     * 为什么塞在 command 里而不是新起一个 `t:"audio"`：见 [ScreenCodec.CONTRACT_VERSION]。
+     */
+    audio_chunk,
 }
 
 /**
@@ -119,9 +151,14 @@ enum class ScreenPage { face, picker, vehicle, kids, avatar, clock, gallery }
  * 手机端 `EventKind` 里那几条早就有了，缺的是屏那侧的 `on_event` 落地。
  *
  * 这里刻意没有 `image`：契约传不动一张照片（见 protocol/screen-link.md 待办那条）。
+ *
+ * `maint` 是 v3 加的（`docs/MAINTENANCE.md` M3）：**一行该做的事，不带数字、不带判据**。
+ * 1.75" 那一页装不下"读数 + 为什么"两行，而"为什么"是手机的事。内容的决定权仍在
+ * [com.carpet.satdemo.core.screen.CardPolicy] —— 屏上出现一条手机没推过的建议，
+ * 「每句话都有出处」这条主张当场就没了，所以固件不许自己算推荐、也不许自己挑哪一条。
  */
 @Serializable
-enum class UiCard { status, sat, dialog, emotion, clock }
+enum class UiCard { status, sat, dialog, emotion, clock, maint }
 
 /**
  * 这块屏当下「穿着」的那张脸。它不是 [UiCard.emotion] 专用字段：
@@ -190,6 +227,26 @@ data class HelloPayload(
      * **默认值不能是当前版本** —— 漏报就被当成最新档，服务端会往一个画不出对话的固件上推 dialog。
      */
     val protocols: List<Int>? = null,
+
+    /**
+     * v3 新增：**这块玻璃到底有多大、是不是圆的、能不能点**（产品架构 §4 实现要求 #4、
+     * 附录 A.4 #1）。`dock_type` 描述的是"挂在哪"，解决不了"能放几行字"——
+     * 466×466 圆的可用区只有约 0.8 直径，同样一句「补气到 2.5 bar」在方屏上一行、在这块屏上两行。
+     *
+     * 可空：老固件没这一项 = 手机按自己那台的默认口径排版，**不许当成"没有屏"**。
+     * 手机侧只读不写，所以这里不需要"缺了等于不知道"那条必填规矩。
+     */
+    val screen: ScreenGeom? = null,
+)
+
+/** 面板几何。物理像素 + 形状 + 触摸，单位写在字段名外面（ppi 是每英寸像素，不是 dpi）。 */
+@Serializable
+data class ScreenGeom(
+    val w: Int,
+    val h: Int,
+    val round: Boolean,
+    val touch: Boolean,
+    val ppi: Int? = null,
 )
 
 @Serializable

@@ -8,8 +8,8 @@
   "properties": {
     "v": {
       "type": "integer",
-      "enum": [1, 2],
-      "description": "契约主版本。**v2 只加了一条 dialog 通道，v1 的字段一个都没动**，所以两端都收 1 和 2：老固件连上来照样看状态，只是不发消息。真正的协商看 hello.protocols（出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断自己该不该解 dialog）"
+      "enum": [1, 2, 3],
+      "description": "契约主版本。**v2 只加了一条 dialog 通道，v3 只加了 maint 这一档卡、hello.screen 和 audio_chunk 这一条下行指令，v1 的字段一个都没动**，所以三档都收：老固件连上来照样看状态，只是不发消息、没声音。真正的协商看 hello.protocols（出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断自己该不该解 dialog）"
     },
     "t": {
       "enum": ["hello", "bye", "state", "event", "command", "ack", "dialog"],
@@ -31,7 +31,19 @@
         },
         "wifi_rssi": { "type": "integer", "minimum": -120, "maximum": 0 },
         "battery_mv": { "type": "integer" },
-        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "展示端能解析的契约版本列表，例如 [1,2]。**省略 = 不申报 = 按 v1 待**（只收状态，服务端不会推 dialog）。固件不要什么都不发却期待拿到对话：App 侧的默认值刻意不是最新版本" }
+        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "展示端能解析的契约版本列表，例如 [1,2,3]。**省略 = 不申报 = 按 v1 待**（只收状态，服务端不会推 dialog，也不会推语音和 maint 卡）。固件不要什么都不发却期待拿到对话：App 侧的默认值刻意不是最新版本" },
+        "screen": {
+          "type": "object",
+          "description": "v3 新增：**这块玻璃的几何**（物理像素 + 形状 + 触摸）。产品架构 §4 实现要求 #4 那条 —— dock_type 说的是\"挂在哪\"，回答不了\"能放几行字\"，而 1.75 圆屏能用满宽度的只有过圆心那一条，可用宽度约 0.8 直径。可空：老固件没这一项时手机按自己那台的默认口径排版，**不许当成\"没有屏\"**。手机侧只读不写",
+          "required": ["w", "h", "round", "touch"],
+          "properties": {
+            "w": { "type": "integer", "minimum": 1, "description": "物理像素宽，1.75 圆屏是 466" },
+            "h": { "type": "integer", "minimum": 1, "description": "物理像素高，1.75 圆屏是 466" },
+            "round": { "type": "boolean", "description": "true = 圆形，四角的像素画不出东西" },
+            "touch": { "type": "boolean", "description": "true = 有触摸，主输入是点按和边缘手势；false = 只剩实体键" },
+            "ppi": { "type": "integer", "description": "每英寸像素，1.75 圆屏约 376。用来把\"触摸目标不小于 8mm\"换算成像素，不是用来看的" }
+          }
+        }
       }
     },
 
@@ -131,8 +143,8 @@
           "required": ["card"],
           "properties": {
             "card": {
-              "enum": ["status", "sat", "dialog", "emotion", "clock"],
-              "description": "**当前那一页里**画哪一条（哪一页由屏自己定，见 page）。status=链路/卫星/围栏总览（也是 ui 缺失时的兜底那张）；dialog=对话（要 v2 会话才可能有内容，屏侧自己判断该档，低于 2 就画'这条要手机开 v2'而不是空白）；clock=钟面，时间取**整帧的 ts**、时区取 ui.tz_min；sat=过境卡，取 state.sat 那一路字段。**故意没有 image**：图片要的字节数远超契约那条 4KB TEXT 通道，通道没建之前先给个屏画不出来的枚举值，只会换来一张空白卡"
+              "enum": ["status", "sat", "dialog", "emotion", "clock", "maint"],
+              "description": "**当前那一页里**画哪一条（哪一页由屏自己定，见 page）。status=链路/卫星/围栏总览（也是 ui 缺失时的兜底那张）；dialog=对话（要 v2 会话才可能有内容，屏侧自己判断该档，低于 2 就画'这条要手机开 v2'而不是空白）；clock=钟面，时间取**整帧的 ts**、时区取 ui.tz_min；sat=过境卡，取 state.sat 那一路字段；**maint=该做的事那一行（v3 起，规格在 docs/MAINTENANCE.md M3）。它只有一行人话，不带数字、不带判据：1.75 那一页装不下\"读数 + 为什么\"两行，而\"为什么\"是手机的事。内容仍由手机 CardPolicy 定，屏不许自己算推荐、不许自己挑哪一条**。低于 v3 的连接一条都收不到（手机按 hello.protocols 过滤），而**收到画不出来的档一律退回 status，不许崩、不许黑屏**。故意没有 image：图片要的字节数远超契约那条 4KB TEXT 通道，通道没建之前先给个屏画不出来的枚举值，只会换来一张空白卡"
             },
             "emotion": {
               "enum": ["neutral", "happy", "excited", "sad", "worried", "sleepy", "thinking", null],
@@ -181,8 +193,8 @@
       "required": ["cmd"],
       "properties": {
         "cmd": {
-          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui", "card_next", "card_auto", "poke", "page_report"],
-          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹（**轨迹数据还没给展示端读，这条现在没人处理**）；card_next=左右滑请求切一条，args.dir 取 +1/-1，App 在 status/sat/dialog/emotion/clock 五张里算出下一张（SOS armed/pending/sent 时拒绝并回一条事件说明原因）；card_auto=把「这一页里说什么」的决定权交回 App 的优先序，这是手动钉住之后唯一的出口；poke=单击，App 换一张脸并可答一句，是「互动表情」这条链的起点；**page_report=屏通报它自己已经切到了哪一页，args.page 取 state.ui.page 那七个页名之一。它是通知、不是申请：手机不许驳回、不许改判，只把它写进 state.ui.page 回声出去，并报给 App 首页那块镜像**。认不出来的页名手机只记一行日志，屏上不会有任何变化。**set_demo_mode 不是场景通道** —— 它这个字面意思是 Tab4 那个「演示模式」开关（把等待和窗口压到几分钟），拿它报场景会让一个名字在两侧各说一件事；报场景走 page_report。**这里刻意没有 card_set，也没有 page_set**：屏不许指定画哪条内容，手机也不许指定屏去哪一页"
+          "enum": ["sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui", "card_next", "card_auto", "poke", "page_report", "audio_chunk"],
+          "description": "sos_press=展示端按钮被长按，App 立即执行双发；track_pull=请求批量轨迹（**轨迹数据还没给展示端读，这条现在没人处理**）；card_next=左右滑请求切一条，args.dir 取 +1/-1，App 在 status/sat/dialog/emotion/clock 五张里算出下一张（SOS armed/pending/sent 时拒绝并回一条事件说明原因）；card_auto=把「这一页里说什么」的决定权交回 App 的优先序，这是手动钉住之后唯一的出口；poke=单击，App 换一张脸并可答一句，是「互动表情」这条链的起点；**page_report=屏通报它自己已经切到了哪一页，args.page 取 state.ui.page 那七个页名之一。它是通知、不是申请：手机不许驳回、不许改判，只把它写进 state.ui.page 回声出去，并报给 App 首页那块镜像**。认不出来的页名手机只记一行日志，屏上不会有任何变化。**set_demo_mode 不是场景通道** —— 它这个字面意思是 Tab4 那个「演示模式」开关（把等待和窗口压到几分钟），拿它报场景会让一个名字在两侧各说一件事；报场景走 page_report。**这里刻意没有 card_set，也没有 page_set**：屏不许指定画哪条内容，手机也不许指定屏去哪一页。—— **audio_chunk 是这一列里唯一一条下行**（v3 起，其余全是屏→手机）：args = {turn_id, seq, total, rate, b64}，把答句的合成语音切成 16k/单声道/s16le 的裸 PCM 逐块推过来，b64 是块的 base64，每帧编码后必须 ≤3800 字节（固件组帧上限 4096，**超了是静默丢帧、串口一个错都不报**）。turn_id 和那条 dialog 答句同一个，屏靠它把声音对上那句话；seq 从 0 连续、total 是整段字节数，**缺一块屏丢掉整段但不挡文字**（文字走 dialog 那一帧，合成失败绝不能把答句一起扣下）。为什么不新开一个 `t:\"audio\"`：固件解不开陌生的 t 是**直接关连接**，那会让没升级的屏当场掉线，而现场永远把掉线怀疑成 Wi-Fi 抖；不认识的 cmd 只是忽略，那才是我们要的失败方式"
         },
         "args": { "type": "object" }
       }

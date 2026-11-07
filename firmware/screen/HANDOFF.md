@@ -911,3 +911,116 @@ App 侧继续推：~~场景页各自独立、对话时间线一份~~（**这两�
 
 M2 那一半（工单编码 `tag=0x03` 上行 + 彩排台解码视图）不在你这台机器上，
 但如果第三台机器接手，`docs/MAINTENANCE.md` §6.2 那张 21 字节的表就是它的接口文档，别再另写一份。
+
+---
+
+## 追加（2026-11-06）：屏侧对 M3 的回执 —— 三件已落地，两件要你定
+
+> **合并提示，先看这一条**：上面那段「追加（2026-11-05）：车况养护推荐，屏侧那一半（M3）」只在
+> `origin/main` 上（本地 main 还没有），这一段和它**追加在同一个位置**，`git merge` 在这儿必冲突。
+> 保留顺序：先 11-05 你那条，再这一条，谁都不算"旧版"。
+> **2026-11-07 这条已经执行**（rebase 到 `9320664`）：11-05 段在前、11-06 段在后，两段原文一个字没删；
+> 下面那句"本地 main 还没有"从这次之后不再成立，`docs/MAINTENANCE.md` 那三份文档已经在树上。
+> 同样只存在于 `origin/main` 的还有 `docs/MAINTENANCE.md`、`docs/VEHICLE-DATA.md`、`docs/AVATAR.md` ——
+> 我这轮的 `protocol/screen-link.md` 引用了 `docs/MAINTENANCE.md` §8.2/#4，**那份文档没合进来之前，
+> 我这边的注释是悬空引用**（本地 `ls docs/` 看不见它，我全程是 `git show origin/main:docs/MAINTENANCE.md` 读的）。
+
+### 1. M3 那三件，屏侧现在真的有了
+
+| M3 要求 | 落地成什么 | 出处（本机已称过） |
+| --- | --- | --- |
+| 屏申报 `hello.protocols` **v3** | 报 `[1, 3]`。以前"省略 protocols = 按 v1 待"那条默认值还在，但我们这版不再省略 | `components/screen_link/screen_link.c:168`、`include/screen_link.h:37`（`SCREEN_LINK_CONTRACT_MAX 3`） |
+| `UiCard` 多一档 `maint` | 枚举有 `maint`；固件查表画「养车卡」，串口 `>carpet` 回读 `card=养车卡`；表里查不到的值落「未知」，不崩不黑屏 | `core/.../protocol/ScreenLink.kt:161`、`muse-carpet.patch` 里那张 `UI_CARD` 表 |
+| 表情联动 | **没做，且做法要你定** —— 见下面第 3 小节的 (B)，Muse 底座的脸没有"担心"这一档 | — |
+| 判据 #4「`protocols = null` 的连接永远收不到 `maint`」 | 服务端按连接版本把 `maint` 降回 `status` 再发 | `core/.../protocol/ScreenLink.kt:56`、`core/.../screen/ScreenLinkServer.kt:177`、钉住的测试 `core/.../screen/CardPolicyTest.kt:208` |
+
+判据 #4 这条我要多说一句，因为它和你 §8.2 最后那条写的不是同一处：**容错我做在了服务端，不是固件里**。
+两个理由，都不是省事：
+
+1. `maint` 不是一种新帧，它骑在 v1 就有的 `state` 里。服务端那道逐连接的闸门（`deliverable`）按**帧类型**过滤，
+   根本过滤不到一个枚举值 —— 这条最容易写成"我以为加了 v3 闸门就安全了"。
+2. 你写的那句"屏侧收到不认识的档退回 `status`"，救不到**已经发出去的那些固件**。而"手机换了卡、屏上一根横杠"
+   在现场永远被读成链路坏了。在服务端降，则是任何 v1/v2 的屏都收不到 `maint`，包括我这台没升级的备用板。
+
+两道现在都留着：服务端降完之后，固件那张查表仍对未知值落「未知」。降级挂在 `sendOrDrop` 这**一个**出口上，
+不是挂在 `broadcast` —— 出站有两条路（`broadcast` 每条连接、`sendTo` 单发），判据挂在调用点上早晚漏一条。
+
+顺带一件你那边需要知道的：**契约 v3 现在装的是三件事，不止 `maint`** ——
+还有 `hello.screen`（面板几何：`{w,h,round,touch,ppi}`，填 0 等于整项不申报）和答句的语音通道
+`command{cmd:"audio_chunk"}`（PC 做 TTS，声音推到屏，屏用真能量驱动口型）。都写在
+`protocol/screen-link.md` 的 v3 那一节，`SchemaDriftTest` 逐条钉住。看护今天的数：`:core` **281 条全绿**、
+`:app` 单测与 `testDebugUnitTest` 过、`:simulator` 编得过。
+
+**还有一条你已经改过的东西我这边动了，rebase 前先看**：`ProtocolTest.kt` 的
+`unknown contract version is rejected` 和 `ScreenLinkInboundWireTest.kt` 的 `契约版本不认识时必须拒绝`
+原来把探针**写死成 `v:3`** —— v3 一上线，这两条就变成"解一个我们支持的版本、然后期望它炸"，
+绿的时候最危险。现在探针是 `ScreenCodec.CONTRACT_VERSION + 1`，并加了一条"窗口内 1..CONTRACT_VERSION 全收得下"。
+这是尺子错了，不是被测的东西错了。
+
+### 2. 一句实话：现在没有任何地方会发出 `maint`
+
+你说「`UiCard.maint` 我没加，故意的」，那档枚举我这轮加了；但**生产它的那一支还没有**：
+`CardPolicy.decide` 里没有 maint 分支，`git grep UiCard.maint` 在本地 main 和 `origin/main` 上都只有枚举定义、
+schema、固件查表和测试这几处（`AppRuntime.kt:73`、`SceneCards.kt:137` 那两个 `maint` 是 `MaintStore` 的局部变量，不是卡）。
+所以现在的状态是「屏收得到，但没人发」。**发不发、什么时候发、和 `dialog` 抢不抢同一格屏，是 `CardPolicy` 的活，
+在你那边**（定内容的权归手机这条我不越）。我这轮只保证：你一发出来，v3 的屏画得对，v1/v2 的屏不会一根横杠。
+
+### 3. 两件屏自己定不了的 —— 2026-11-06 已拍板，两件的落点都写在这
+
+**(A) `Suggestion.headline` 那句到不了屏上 —— 拍板：骑现有 `dialog` 帧，不加新字段。**
+
+结论（他的原话是「屏上就直接用对话中带的文字就行，手机和未来搞服务器的时候做好信息归类存储」）：
+**`UiState` 不加 `line`，契约不动**，那句养护话发成一帧现成的 `dialog`：
+
+```
+dialog{dir:"down", text:"胎压该补到 2.5 bar 了…", skill:"maint", turn_id:"t-hb-maint-<新 id>"}
+```
+
+屏那边**零改动**就画得对：`carpet_link.c` 收到 down 就交给 `face_offer()`，
+首屏那条带当场念、分页、翻页跟着播放位置走 —— 和答句完全同一条路，没有第二套排版。
+所以**你那边只剩一件事**：MaintEngine 算出 due/soon 的那一句，从 `Suggestion` 送到 dialog 帧里
+（`Conversation.record()` 已经把 `skill` 存进台账，归类靠这个字段，不靠句子措辞）。
+
+我这边已经钉住的（`core` 单测，`DialogBridgeTest` 那条
+「养护提醒那句骑的就是对话帧 归类靠 skill 不靠新字段」）：
+帧是 `dir=down`、`skill="maint"`、文本原样；台账里 `Turn.skill="maint"` 且 `proactive=true`；
+**它不会混进「娃在屏上说了啥」那几句**（那一筛只认屏起头的问句）。
+
+这一条当初摆过三条路（加 `UiState.line` / 借 dialog 帧 / 屏自己查码表），拍的是第二条。
+留一句副作用免得下次又当成新问题：借 dialog 帧确实会进对话台账，而这正是我们要的 ——
+车主该看见屏主动说过什么；要防的只是把它误当成"有人问过一句"，那一条由上面那个单测守着。
+第三条（屏按 `MaintCodes.names` 自己查句子）不管什么时候都别做：那是"屏不许自己算"那条红线。
+
+**(B) 「脸切 `worried`」—— 拍板：答句赢，加一枚琥珀点，两边都要。**
+
+`worried` 不是"照 §5.4 那张表加一行"就完事：它和答句抢的是同一个 `mode` 字段，
+而**语音在播时把脸换走，嘴立刻不动**（口型是这一轮的主功能）。按拍板的优先序实现完了
+（**还没上板，等一次刷机许可**），三条让路 + 一个记号写进 `muse/README.md` §5.4.1，
+这里只复述判据：
+
+1. `maint` + `worried` → `MUSE_MODE_THINKING`（不给 `ERROR`，那是报警脸，观众读成"屏坏了"）；
+   `note` 那档手机发的是中性，天然不抢脸，不用额外分支。
+2. 有句子挂在脸上（`s_face_live`）或当前 mode 不是 `IDLE`/`THINKING` 时**一律不写**；
+   答句念完 hold 到期收回 idle，下一帧 `state`（一秒一帧）自然把"担心"补上。
+3. 不担心了写回 `IDLE` —— 少了这一条脸会一直"想"下去，就是老任务 #34 那个坑在脸这侧重演。
+4. 脸被答句占走时那句提醒还剩什么：场景页「对话」「情绪」两行行前一枚 12 px 琥珀点。
+   串口多回一个 `maint_worried=0/1`，那是布尔记号本身，不是屏上的中文串。
+
+**§8.2 / §9 那两行字不用改**：脸仍然算 M3 的判据之一，只是它让路给答句 —— 这不是"挪走"，
+是把"什么时候演担心"说清楚了。上一条"挪走的话请同步改文档"的那个替代路作废。
+
+### 4. 我这边可以接走的（不抢你的活，只是这台机器有）
+
+M2 里那半句「**彩排台加一个工单解码视图**」住的就是这台机器（`simulator/`）。
+`core/maint/WorkOrderCodec.kt` 合进来之后给我一句，我按 `docs/MAINTENANCE.md` §6.2 那张 21 字节的表接，
+**不另写第二份接口文档**。判据我照你 §10 #3 来：用真 `MessageBudget.chunkBytes` 算，不写常数。
+
+### 5. 还等你点头的一件事（不做就不算称过）
+
+#68 上板验音频那半。屏这轮的固件已经编好、补丁重打验过（干净 `cdc169d` 上 apply 通、14 个文件全落对），
+但**声音到屏这件事我只在 PC 侧称过**：Node 冒充一台 v3 屏连 8443，32 字的本地规则答句 → 233,740 B PCM
+≈ 7.3 秒 → **92 块，seq 从 0 连续、各块解出来的字节数加起来正好等于 `total`、最大帧 3570 B（预算 3800）**。
+真屏那一半要**一次刷机许可**（每个 session 单独点那条）。点头之后判据是串口这三行：
+`>audtest 3` 之后 `@audio at …/…` 每秒前进、`level` 跟着音节变、`drops=0`。
+`drops` 不是小数点装饰 —— 它非 0 就说明这条 ws 的入站吞吐扛不住 22 KB/s，那个数我**没实测过**，
+`protocol/screen-link.md` 里写的也是"第一次跑要盯这一行"，不是"已称过"。

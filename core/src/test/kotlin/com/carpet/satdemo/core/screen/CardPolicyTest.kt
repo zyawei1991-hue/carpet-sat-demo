@@ -5,14 +5,18 @@ import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.GnssState
 import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.LinkState
+import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.SatState
+import com.carpet.satdemo.core.protocol.ScreenCodec
+import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.SosState
 import com.carpet.satdemo.core.protocol.SentinelState
 import com.carpet.satdemo.core.protocol.StatePayload
 import com.carpet.satdemo.core.protocol.UiCard
 import com.carpet.satdemo.core.protocol.UiEmotion
+import com.carpet.satdemo.core.protocol.UiState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -36,6 +40,7 @@ class CardPolicyTest {
         fence: FenceState = FenceState(active = false, inside = true),
         sentinel: SentinelState? = null,
         moduleOk: Boolean = true,
+        ui: UiState? = null,
     ) = StatePayload(
         link = LinkState(primary = if (cellOk) LinkPrimary.cell else LinkPrimary.sat, cellOk = cellOk, satOk = !cellOk),
         sat = SatState(phase = SatPhase.idle, nextPassInS = inS, moduleOk = moduleOk, queuePending = 0),
@@ -43,6 +48,7 @@ class CardPolicyTest {
         fence = fence,
         sos = SosState(level = sos),
         sentinel = sentinel,
+        ui = ui,
     )
 
     @Test
@@ -191,5 +197,27 @@ class CardPolicyTest {
         )
         assertEquals(UiCard.status, d.card)
         assertTrue(d.notable)
+    }
+
+    /**
+     * `docs/MAINTENANCE.md` 验收判据 #4：「`protocols = null` 的连接永远收不到 `UiCard.maint`」。
+     * 这条容易漏，因为 maint 不是一种新帧 —— 它骑在 v1 就有的 `state` 里，
+     * 逐连接按**帧类型**过滤那一道（`deliverable`）根本管不到它。
+     */
+    @Test
+    fun `maint 那一档只有报了三版的屏收得到`() {
+        val frame = ScreenMessage(
+            t = MsgType.state, seq = 7, ts = now,
+            state = snap(ui = UiState(card = UiCard.maint, emotion = UiEmotion.worried)),
+        )
+        fun card(ver: Int) = ScreenCodec.forVersion(frame, ver).state!!.ui!!.card
+        assertEquals(UiCard.status, card(1), "v1 连接收到 maint 的话，老固件那张表只能画一根横杠")
+        assertEquals(UiCard.status, card(2))
+        assertEquals(UiCard.maint, card(3), "报了 v3 就不许再改，屏上一行字要对得上手机里那条")
+        // 表情不跟着降：worried 那张脸 v1 就画得出来，降它等于把判据里那句"该做的事"演成没事
+        assertEquals(UiEmotion.worried, ScreenCodec.forVersion(frame, 1).state!!.ui!!.emotion)
+        // 别的卡一字节不许动
+        val sat = frame.copy(state = snap(ui = UiState(card = UiCard.sat)))
+        assertEquals(UiCard.sat, ScreenCodec.forVersion(sat, 1).state!!.ui!!.card)
     }
 }
