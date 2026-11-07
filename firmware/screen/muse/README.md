@@ -25,8 +25,8 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 14 个文件、2594 行新增 / 20 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，5,026 行，`git diff --binary` 打的，字库在里面是 base85 段。
+- 我们的全部改动 = 14 个文件、2647 行新增 / 20 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，5,079 行，`git diff --binary` 打的，字库在里面是 base85 段。
   这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-07 重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  17 +-   (+carpet_audio.c 那行 + embed 那行)
@@ -34,11 +34,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
   esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
-  esp32/components/muse/carpet/carpet_link.c | 845 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路)
-  esp32/components/muse/carpet/carpet_link.h | 118 +   (新)
+  esp32/components/muse/carpet/carpet_link.c | 881 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口)
+  esp32/components/muse/carpet/carpet_link.h | 126 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
-  esp32/components/muse/muse_input.c         |  62 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频)
+  esp32/components/muse/muse_input.c         |  71 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
   esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条)
@@ -46,8 +46,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，14 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-07 这次重打之后同一条路又走了一遍（`git apply --check` 过、worktree 已删），
-  `SchemaDriftTest` 13 条、`:core:test` 284 条实跑全 PASSED。
+  2026-11-07 这天重打过两次（第一次是把 11-06 那三处源码改动收进来，5,026 行；第二次加了 `>maint`
+  这个开发口，就是上面这组 5,079 行），每次都走同一条验法：`git worktree add --detach ... cdc169d`
+  → `git apply --check` 过 → worktree 删掉。`:core` 的 `SchemaDriftTest` 13 条、`:core:test` 305 条
+  重打之后实跑全 PASSED —— 其中 `SchemaDriftTest` 有一条是**直接读这份 patch 里的 `UI_CARD` 表**
+  去硬比 schema 和 Kotlin 那份枚举的，所以它绿了就说明新补丁真的被读了，不是在原地打转。
   每次改动都重打并在干净树上验一遍，一轮记一笔：
   - 2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮 —— 验过 `PAGE_NAMES`
     解得出来（漂移测试靠这一个符号，补丁里没有它就是静默不比，绿灯是假的）。
@@ -295,7 +298,17 @@ hold 到期把脸收回 idle，下一帧 `state`（≤1 秒）再把"担心"补�
 **脸被答句占走时那句提醒还剩什么**：场景页「对话」「情绪」两行行首点一枚琥珀色小点
 （`carpet_page.c` 的 `make_dot()`，12 px，`COLOR_HUE_AMBER`，不亮时用 `HIDDEN` 所以不占位、版式和没有它时一样）。
 串口 `>carpet` 现在多回一个 `maint_worried=0/1`，那是那个布尔本身，不是屏上的中文串 ——
-"这一帧到底到没到"要能不看眼睛就称出来。**上板还没验过**（等一次刷机许可）。
+"这一帧到底到没到"要能不看眼睛就称出来。
+
+**`>maint` 是这一条的开发口**（2026-11-07 加，`muse_input.c:950-959` → `carpet_link_bench_maint()`）：
+本机造一帧 `ui={card:"maint",emotion:"worried"}`，交的是链路收帧时**同一条** `on_state()`，
+所以它称的是那一帧真走得通，不是我另写的一句 if。`>maint off` 造中性帧，专称"搬回 IDLE"那一条。
+两条用法：① 空屏发 `>maint` → `>carpet` 应回 `maint_worried=1` 且 `mode` 从 1(idle) 变 3(thinking)；
+② 先 `>say 一句长话` 让句子挂在脸上再 `>maint` → `mode` 必须**还是 4(speaking)**（第一道让路），
+这时这一条在屏上只剩那枚琥珀点。都不联网、不接模型。
+**上板称过没有：还没有。** 11-07 这一版编好了（`Project build complete`）、补丁重打并在干净 baseline 上
+`apply --check` 过，但 `app-flash` 起不来 —— 那次之后 COM8 从设备列表里消失了（`GetPortNames` 只剩
+COM4/5/6/7），板子不在机器上，判据一条都没称。别把这段当成"已验"。
 
 ### 5.5 屏能往手机发什么（我们自己的 App 要做服务端就得收这些）
 
@@ -393,7 +406,9 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 `rate` 只认 16000。新开一种 `t` 是错的：组件收到不认识的 `t` 关连接，收到不认识的 `cmd` 只丢那一帧
 （`screen_link.c handle_frame()` 那两条分支）—— 音频骑在 `command` 上，没升 v3 的屏才会继续正常看状态。
 
-**缓冲是一条 512KB 的 PSRAM 线性缓冲，不是环形**。故意的：写的人只有链路任务、读的人只有放音任务，
+**缓冲是一条 2MB 的 PSRAM 线性缓冲，不是环形**（11-06 从 512KB 提上来的，`carpet_audio.c` 的
+`AUDIO_CAP` 和 core 那份 `AudioChunks.MAX_TOTAL_BYTES` 必须是同一个数，改一处就要改两处）。
+故意的：写的人只有链路任务、读的人只有放音任务，
 两个头各自朝前走，环形缓冲要多维护一套头尾同步，而这段音频从来不需要回头读。
 判据全是"丢整段"，没有"放半段"这一档：`seq` 不等于期望、`total` 超容量、单块超 2560 字节、
 写爆缓冲 → 整段丢掉并记 `drops`；`turn_id` 变了 → 清缓冲重来；链路断了 → `carpet_audio_abort`。
@@ -417,7 +432,11 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 `>audtest 3` 不联网造一段 440Hz「音节+静音」，专证三件事：节拍（`@audio at …/…` 每秒往前挪）、
 口型（`level` 不是一常数）、分页（字跟着声音走）。
 
-**这一节还差的**：上板。判据三条 —— `@audio at` 那行每秒动、`level` 随音节起伏、`drops=0`。
+**这一节还差的**：上板。判据三条 —— `@audio at` 那行每秒动、`level` 随音节起伏、
+**`drops` 的增量为 0**。为什么是增量不是绝对值：`drops` 是 `drop_locked()`
+（`carpet_audio.c:90-95`）在锁里 `++` 的**开机以来累计计数**，只有复位才归零 ——
+一块开了几小时的板子上它必然非 0，把判据写成"等于 0"永远过不了，而过不了的时候人第一反应
+是去怀疑链路，其实那只是历史。要么重启之后称，要么称一段前后各读一次 `>carpet` 比差值。
 PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/linkcheck.mjs … --voice`：
 92 块 / 233,740 字节 ≈ 7.3 秒、seq 连续、最大帧 3570 字节 < 预算 3800）。
 

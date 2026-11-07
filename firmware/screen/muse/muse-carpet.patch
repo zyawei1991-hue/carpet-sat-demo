@@ -2666,10 +2666,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..7fa6c5e
+index 0000000..f1f0b82
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,881 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3464,6 +3464,42 @@ index 0000000..7fa6c5e
 +    carpet_audio_bench(seconds);
 +}
 +
++/* 开发口 `>maint [off]`：本机造一帧"到点的养护"。
++ * 走的是链路收帧时**同一条** `on_state()` —— 不是绕开它去手点那个布尔记号，
++ * 那样称出来的是我自己写的那句 if，不是"这一帧到底到没到"。`off` 造一张中性帧，
++ * 专门称第三道让路（不担心了要搬回 IDLE，少了它脸会一直"想"下去，就是 #34 那个坑）。
++ * 先 `>say 一句长话` 让句子挂在脸上、再发这一帧，称的就是第一道让路：脸不许被搬走，
++ * 这一条只剩「对话」「情绪」两行前面那枚琥珀点（carpet_page.c:874 认的就是下面回读的
++ * 那个 `maint_worried`）。不联网、不接模型，所以这块板在哪都能称这两条。 */
++void carpet_link_bench_maint(bool worried)
++{
++    if (!s_lock) {
++        printf("@maint 链路还没起（没锁），这一帧发不进去\n");
++        fflush(stdout);
++        return;
++    }
++    cJSON *st = cJSON_CreateObject();
++    cJSON *ui = st ? cJSON_AddObjectToObject(st, "ui") : NULL;
++    if (!ui) {
++        if (st) cJSON_Delete(st);
++        printf("@maint 造不出帧（内存）\n");
++        fflush(stdout);
++        return;
++    }
++    cJSON_AddStringToObject(ui, "card", "maint");
++    cJSON_AddStringToObject(ui, "emotion", worried ? "worried" : "neutral");
++    on_state(st, 0);
++    cJSON_Delete(st);
++    /* 回读走 `carpet_link_state()` —— 页面上那两行的点和脸都是从这个视图读的，
++     * 印我传进去的那个参数就成了自己给自己打勾。mode：1=idle 3=thinking 4=speaking。 */
++    carpet_state_view_t s;
++    carpet_link_state(&s);
++    printf("@maint sent=%d view.maint_worried=%d card=%s emotion=%s face=%d mode=%d\n",
++           (int)worried, (int)s.maint_worried, s.card[0] ? s.card : "-",
++           s.emotion[0] ? s.emotion : "-", (int)s_face_live, (int)muse_state_mode(NULL));
++    fflush(stdout);
++}
++
 +void carpet_link_dump(void)
 +{
 +    carpet_link_view_t v;
@@ -3517,10 +3553,10 @@ index 0000000..7fa6c5e
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..7b0ab86
+index 0000000..7b79bf3
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,126 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -3639,6 +3675,14 @@ index 0000000..7b0ab86
 + * text 传空串就只放声音。
 + */
 +void carpet_link_bench_say_audio(const char *text, int seconds);
++
++/*
++ * 开发口 `>maint` / `>maint off`：本机造一帧 `ui={card:"maint",emotion:"worried"|"neutral"}`
++ * 的 state，交的是链路收帧时同一条 `on_state()`。为的是让 #73 那三条让路和那枚琥珀点
++ * **不依赖网络**就能称：`>maint` 之后 `>carpet` 那行应回 `maint_worried=1`。
++ * worried=true 之后一定要再来一条 `off`，否则脸一直停在"想"上。
++ */
++void carpet_link_bench_maint(bool worried);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
 index 0000000..18e2537
@@ -4578,7 +4622,7 @@ index 0000000..53f5a9a
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..7c5ce92 100644
+index 7c579bb..e25f10a 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,10 @@
@@ -4592,7 +4636,7 @@ index 7c579bb..7c5ce92 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +896,58 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +896,67 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -4647,11 +4691,20 @@ index 7c579bb..7c5ce92 100644
 +        carpet_link_bench_say_audio(*rest ? rest : "", sec);
 +        return true;
 +    }
++    /* 本机造一帧"到点的养护"，称 #73 那三条让路和那枚琥珀点：`>maint` 是 worried，
++     * `>maint off` 是中性（少了这一条就退不回 IDLE，脸会一直"想"着）。
++     * 和 `>audtest` 同一个道理：不联网、不接模型，这块板在哪都能称。 */
++    if (!strncmp(line, "maint", 5) && (line[5] == '\0' || line[5] == ' ')) {
++        const char *rest = line + 5;
++        while (*rest == ' ') rest++;
++        carpet_link_bench_maint(strcmp(rest, "off") != 0);
++        return true;
++    }
 +#endif
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +982,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +991,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }

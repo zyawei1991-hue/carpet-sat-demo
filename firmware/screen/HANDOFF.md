@@ -1021,8 +1021,11 @@ M2 里那半句「**彩排台加一个工单解码视图**」住的就是这台�
 但**声音到屏这件事我只在 PC 侧称过**：Node 冒充一台 v3 屏连 8443，32 字的本地规则答句 → 233,740 B PCM
 ≈ 7.3 秒 → **92 块，seq 从 0 连续、各块解出来的字节数加起来正好等于 `total`、最大帧 3570 B（预算 3800）**。
 真屏那一半要**一次刷机许可**（每个 session 单独点那条）。点头之后判据是串口这三行：
-`>audtest 3` 之后 `@audio at …/…` 每秒前进、`level` 跟着音节变、`drops=0`。
-`drops` 不是小数点装饰 —— 它非 0 就说明这条 ws 的入站吞吐扛不住 22 KB/s，那个数我**没实测过**，
+`>audtest 3` 之后 `@audio at …/…` 每秒前进、`level` 跟着音节变、**`drops` 的增量为 0**。
+最后那条 11-07 改了写法，原因一句话说清：**`drops` 是开机以来的累计数（`carpet_audio.c:90-95`
+在锁里 `++`，只有复位归零），一块开了几小时的板子上它必然不是 0** —— 判据写成"等于 0"
+永远过不了，而过不了时人容易去怀疑链路，其实那只是历史。要么重启后称，要么称一段前后各读一次比差值。
+`drops` 增量为 0 说的还是那件事：非 0 就说明这条 ws 的入站吞吐扛不住 22 KB/s，那个数我**没实测过**，
 `protocol/screen-link.md` 里写的也是"第一次跑要盯这一行"，不是"已称过"。
 
 ---
@@ -1048,7 +1051,8 @@ M2 里那半句「**彩排台加一个工单解码视图**」住的就是这台�
 
 **`drops=0` 这条当场不成立，但原因不是链路：** 回读是 `frames=509 drops=5698 last=seq 不连续`。
 连着三次 `>carpet`（跨约 15 秒）这两个数一个字没动，刚那 38 块也没被拒 —— 它是这块板**开机 8.4 小时里攒的历史计数**。
-所以这条判据要么在重启之后称，要么改成看增量；拿它当"现在还在丢"读是读错了。
+拿它当"现在还在丢"读是读错了。**已拍板（11-07）**：这条判据改成"重启后跑 `>audtest`，`drops` 增量为 0"，
+§5 和 `muse/README.md` §5.7 那两处同步改过了。
 
 **没称到的，以及卡在哪：** `maint_worried=1`（当前回读 `card=卫星卡 emotion=兴奋 maint_worried=0`，
 因为一条 `state` 都没到）、那枚琥珀点、真链路推一句答句的语音。两个现场原因：屏 `wifi=down`
@@ -1056,8 +1060,71 @@ M2 里那半句「**彩排台加一个工单解码视图**」住的就是这台�
 这台电脑现在在 aa123 上是 `10.50.174.166` —— 热点是开的，IP 换了。改 URL 要动 build 里的 `sdkconfig`
 ＋ `idf.py build` ＋ 一次刷机许可。
 
-**两处和交接说明不一致，按代码为准：** ①「串口口子 `>maint`」**固件里没有** —— `maint` 只出现在
-`UI_CARD` 表（`carpet_link.c:224`）和 `frame_maint_worried`（`:251/:258/:285`），那个布尔记号是
-`>carpet` 打的 `maint_worried=0/1`（`carpet_link.c:822`）。② 串口是**先认单字符、再认 `>` 开头的行**
-（`muse_input.c:1044-1070`：`a`/`s` 菜单、`d`/`u` PTT、`m` mp3 测试、`z`/`w` 睡/醒）—— 不带 `>` 直接发
-`audtest 3` 会被拆成一串按键，这条别再踩。
+**两处和交接说明不一致：** ①「串口口子 `>maint`」11-07 之前**确实没有** —— 当时 `maint` 只在
+`UI_CARD` 表（`carpet_link.c:224`）和 `frame_maint_worried`（`:251/:258/:285`）里，布尔记号是
+`>carpet` 打的 `maint_worried=0/1`（`carpet_link.c:822`）。**现在已经按拍板补上了**，见下面第 3 小节。
+② 串口是**先认单字符、再认 `>` 开头的行**（`muse_input.c:1044-1070`：`a`/`s` 菜单、`d`/`u` PTT、
+`m` mp3 测试、`z`/`w` 睡/醒）—— 不带 `>` 直接发 `audtest 3` 会被拆成一串按键。这条不是新坑，
+`muse/README.md` §9 开头就写着（"控制台有两种输入，写错一种就什么也收不到"），是我没先翻到。
+
+### 1. 为什么换服务端地址绕不开刷机（他问的那条，答案是"不绕不开，但有一条不用刷机的路"）
+
+先说结论：**烧录不是"连不上"的原因，"往哪台机器拨"才是**；而这条路不一定要刷机。三条核过的证据：
+
+1. 我们的 URL 是**编译期常量**：`carpet_link.c:732` 整句只有 `.url = CONFIG_SCREEN_LINK_URL`；
+   值在 `esp32/build-muse-s3-175-carpet/sdkconfig:4278 = "ws://10.50.174.165:8443"`
+   （出厂那份是 `devices/sdkconfig.carpet:26 = ws://192.168.43.1:8443`）。
+2. **全树没有运行期改 URL 的口**：`nvs_set_str` 只命中 Muse 自己的 `muse_settings.c:92` /
+   `main/config_store.c:83`；`muse_input.c` 那一组串口指令只有 page/say/audio/audtest/maint/ui.settings=/face=/chat，
+   没有一个碰 url。
+3. Muse 自带的 wifi/配网（`muse_app.c`、`muse_ble.c`、`muse_settings*.c`）只能做三件事：连 AP、
+   配它自己界面那些设置、从账号 API 拿 **Muse 云自己的** ws 地址（`muse_account_api.c:144` /
+   `vm_api.c:321` 那个 `vm_ws_url`）。它没有一个格子让人填自建服务端地址 —— 而现在 wifi 本身是通的
+   （板子在 `10.50.174.34`，ping 得着），卡的从来不是凭据。
+
+于是两条路摆在这儿：
+
+- **不刷机那条**：给这台电脑的 WLAN 加一个二级地址 `10.50.174.165`（`netsh ... add address`，要管理员），
+  彩排台在 8443 一listen，屏按它自己那条退避阶梯就接上了。**这条要动本机网络配置，他没点头，我没执行。**
+- **刷机那条**：改 `build-muse-s3-175-carpet/sdkconfig` 里那行 → `idf.py build` → `app-flash`。
+
+### 2. 推送其实走的是 github.com，不是 origin 那个代理地址
+
+`origin` = `https://gh-proxy.com/https://github.com/...`，这个代理**转发不了写认证**：凭据存好之后
+`push origin main` 仍回 `remote: No anonymous write access.`（而它读是好的，`ls-remote`/`fetch` 都正常）。
+实际落远端用的是同仓同分支的直连地址，一次 fast-forward，**没改任何配置**：
+
+```bash
+git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet-sat-demo.git main:main
+```
+
+之后 `git fetch origin` 把 `refs/remotes/origin/main` 拉到同一个 commit，`origin/main..HEAD` 为空。
+凭据按 host 存了两份（`gh-proxy.com` 和 `github.com`），token 没进任何文件。
+
+### 3. `>maint` 补上了，称到哪一步
+
+`muse_input.c:950-958` 收 `>maint` / `>maint off` → `carpet_link.c:802` 的 `carpet_link_bench_maint()`
+（声明在 `carpet_link.h:126`）。它造的是 `ui={card:"maint",emotion:"worried"|"neutral"}` 一帧，
+**交的是链路收帧时同一条 `on_state()`**，所以称的是"这一帧到没到"，不是我另写的一句 if；
+回读走 `carpet_link_state()`（页面那两枚点读的就是这个视图），打印
+`@maint sent=? view.maint_worried=? card=? emotion=? face=? mode=?`。
+
+**上板称过没有：没有。** 这一版编好了（日志 `D:\dev\esp\build-carpet.log` 里 `Project build complete`），
+补丁重打成 5,079 行并在干净 `cdc169d` 上 `git apply --check` 过，但 `app-flash` 报
+`Could not open COM8, the port is busy or doesn't exist`，那之后 **COM8 从设备列表里消失了**
+（`[System.IO.Ports.SerialPort]::GetPortNames()` 只剩 COM4/5/6/7，隔 10 秒、22 秒各看一次都一样）——
+板子不在这台机器上了。所以 §5.4.1 那两条判据（空屏 `>maint` → `maint_worried=1` 且 mode 1→3；
+`>say` 挂着句子时 `>maint` → mode 必须还是 4）以及琥珀点本身，**一条都没称**，板子回来插上就能称：
+
+```bash
+<IDF venv python> ../tools/sercmd_norst.py COM8 ">maint" 0.3 4 out.txt
+```
+
+### 4. 旧屏那棵树还在这儿（备忘，不是待办）
+
+`firmware/screen/app/` 11-07 这轮**没进库、也没删**。它里面不只有构建树 —— `main/app_main.c`、
+`axp2101.c/h`、`screen_audio.c/h`、`screen_shot.c/h`、两个 `CMakeLists.txt`、`idf_component.yml`、
+`Kconfig.projbuild`、`partitions.csv`、`sdkconfig.defaults`、`assets/make-font.py`、
+`spiffs_image/carpet-noto.ttf`(2.1 MB) 都在；`build/`、`managed_components/`、`dependencies.lock`、
+`sdkconfig` 已被 `.gitignore` 挡住。它是换 Muse 底座**之前**那条路线（`muse/README.md` §1），
+要不要收进仓库另说，先留这一行免得下次又当成没处理干净。
