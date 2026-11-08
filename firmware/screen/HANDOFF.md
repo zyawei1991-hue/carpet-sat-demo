@@ -1501,3 +1501,71 @@ Muse 侧出图走串口触发的 LVGL snapshot —— `>ui.settings=<页>` 选�
 
 COM8 这一段时间归那边跑四个现场验证项，我这边没有正在跑的 flash 或串口命令，
 接下来只改代码、编译、写文档、提交，不开端口。
+
+## 追加（2026-11-08 夜）：出厂地址在真手机热点上零输入拨通了；卡点挪到 App 那一侧
+
+这一段是那边（跑现场验证的会话）称到的结果 + 我这边复核出来的两处更正。
+**这一轮我没开 COM8、没刷机**（串口那段时间归那边），下面所有原文都是它抓的或仓里读出来的。
+
+### 11. 现场称到的 / 还欠的
+
+**称到（串口原文，那边抓的）**：
+
+```
+@url wifi=1 ssid=Mate 60 linked=1 dialed=1 src=factory saved=(none)
+@carpet wifi=1 linked=1 contract=v3
+```
+
+出厂那条 `ws://192.168.43.1:8443` 在**真手机热点**上、`saved=(none)`（NVS 里根本没填过地址）
+零输入拨通了 —— §0 主路这一条从「没称到」改「称到」。
+`dialed=1` 是"真的往那个地址拨过"，`src=factory` 是"用的是出厂那条，不是 NVS 覆盖"，
+两者同时成立正是 R4 那条兜底要的样子。
+
+**也称到（用户目视）**：设置页「Access point」那一格在，下面那行 note 把
+`ws://192.168.43.1:8443` 整条写全、没被点掉 —— 上一轮记的那条"在折叠区以下没出图"现在划掉。
+
+**还欠两条**：
+
+- (a) `has_state=1` —— 卡在 App 那个缺陷上（`ScreenLinkServer` 同一实例二次 `start()` 必抛
+  `can only be started once.`），判据、文件:行、改法都写进 `docs/APP-SCREEN-CONNECT.md` §6 了。
+- (b) 那枚 12px 琥珀点 —— 那边已用 `>maint` 把它点着（`card=养车卡 emotion=担心 maint_worried=1`），
+  等用户退出设置页往上滑到「数字分身」看「答句」「情绪」两行行首。**这条现在只有回读，没有新图**
+  （上一轮 `shots8/zh_shot0.png` 那张是同一条口的旧图，不能拿来当这一次的图证）。
+
+### 12. 两处更正，都是判据层面的
+
+**① `contract=v3` 不是谈下来的，它证明不了服务端回了 hello。** 复核 `screen_link.c`：
+
+- `:63` —— `static volatile int s_negotiated = SCREEN_LINK_CONTRACT_MAX;`（`screen_link.h:37` = `3`）。
+  全文件 `s_negotiated` 只有这一处写，`:553` / `:674` / `:705` 三处读，**没有任何收到的帧给它赋值**。
+- `:552-553` —— `send_hello();` 之后**立刻** `on_connected(s_negotiated)`，不等回执。
+
+所以 `I carpet: linked, contract v3` 只是屏把自己声明的上限印了一遍。
+这一串里算数的是 `ws 接入`（`:437-441`，打在 `WEBSOCKET_EVENT_CONNECTED`，
+esp_websocket_client 只在收到 HTTP 101 之后才派它）—— 它证明 TCP + WS 握手通了。
+**我自己 §5 那条没踩错**：当时称的是 `gap_s=0 has_state=1`，靠的就是 state 帧真的到了，
+不是 `contract=v3`；但以后谁只贴 `linked=1 contract=v3`，那一行不算称到。
+屏侧要不要把 `>carpet` 里那个 `contract=` 改成"我声明的上限"这种不误导的写法，是下一轮的小事，
+不改也不影响判据 —— 只是别让它当证据。
+
+**② 那条红字的机制，字段名要说准。** 那边写的是「`stop()` 不重置 `startcalled`」。
+方向对，但 1.5.6 里没有 `startcalled` 这个字段。我对那份 jar 里的
+`org/java_websocket/server/WebSocketServer.class` 跑了 `javap -p -c`：
+`start()` 判的是 `selectorthread` 是否非空（非空就 `throw IllegalStateException(name + " can only be started once.")`），
+而 `stop(int,String)` 做的是 `isclosed` CAS → 逐个 `close(1001)` → `wsf.close()` → `selector.wakeup()` →
+`selectorthread.join(timeout)`，**整份 class 里 `selectorthread` 只被写过一次**（`run()` 里赋成当前线程）。
+结论一样、更强：这个对象一旦起过就永远起不第二次。对上的 App 侧三行是
+`DemoRuntime.kt:70`（`val server` 是构造默认值）/ `:216`（`runCatching { server.start() }`）/
+`:238`（`runCatching { server.stop() }`），加上 `AppRuntime.kt:86` 一个进程一个 runtime、
+`:576-585` 那个开关就是 `start()`/`stop()` —— 「停止演示 → 再开始演示」正好是同一实例 stop→start。
+
+### 13. 屏侧缺陷一条（记在我这一节，别让它算到 App 头上）
+
+开发口 `>page avatar` / `>page vehicle` 在**用户还停在设置页时不落地**：
+`@page want=avatar now=face`，重试两次都一样（那边现场抓的，原文在 `D:/dev/esp/m1108v/tap3.txt`）。
+机制查到一半：`nav_to()` → `muse_ui_show_carpet()` → `lv_tileview_set_tile(s_tv, s_carpet, …)`，
+而设置页那一层是压在 tileview 之上的另一个对象，`s_tv` 当时不是活动屏；
+tile 回调（`carpet_page.c:544`）又把 `s_tile` 写回实际位置，所以回读看着像"没动"。
+**下一轮要做的**：`muse_ui_show_carpet()` 在设置页还开着时先把它关掉（或拒绝并回读一句
+`page refused, settings open`），而不是静默不落地。
+**任何人现在拿这一条验分页，先把屏退出设置页。**
