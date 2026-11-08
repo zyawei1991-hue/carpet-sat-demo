@@ -1363,3 +1363,8 @@ git -c http.proxy= -c https.proxy= fetch origin main && git log --oneline origin
 
 推送仍走那条带 `-c http.proxy= -c https.proxy=` 的直连命令（见上面 §4 末尾那两行），推完自己称
 `git log --oneline origin/main..HEAD` 必须为空；称不空就是没推上去，如实写在这儿。
+
+**11-08 傍晚实推**：`git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet-sat-demo.git main:main`
+→ `93a6692..f8a0862  main -> main`，`fetch` 之后 `git log --oneline origin/main..HEAD` **为空**。
+这次把上午推不出去的 `7e9c73e` / `93a6692` 一起带上了（`origin/main` 从 `658673d` 走到 `f8a0862`）。
+**没有改任何全局 git 配置，没有 force push**，`firmware/screen/app/` 照旧没 add 没删。
