@@ -2666,10 +2666,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..f1f0b82
+index 0000000..5cd8e1b
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,881 @@
+@@ -0,0 +1,1041 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3387,21 +3387,75 @@ index 0000000..f1f0b82
 +         ? (int)(hypotf((float)*w, (float)*h) / muse_board->diagonal_in + 0.5f) : 0;
 +}
 +
-+static void gate_task(void *arg)
-+{
-+    (void)arg;
-+    /* Home Link joins only after the phone has paired this gadget, so wait for
-+     * a network instead of starting a link that can't resolve the URL. */
-+    while (!muse_wifi_connected()) {
-+        vTaskDelay(pdMS_TO_TICKS(2000));
-+    }
++/* ---- 接入点地址：运行期可设（不必改编译期常量重刷） ----
++ *
++ * 为什么必须有这一层：`CONFIG_SCREEN_LINK_URL` 是**烧在固件里**的，而现场那条地址跟着
++ * 手机热点跑 —— 手机在 aa123 上今天 10.50.174.165、明天 10.50.174.166，每次都要
++ * 改 build 里的 sdkconfig ＋ `idf.py build` ＋ 一次刷机，这条路在用户面前是不成立的。
++ * 现在读的顺序是 **NVS(`muse`/`link_url`) → 出厂常量**，所以：
++ *   · 手机开热点那一档：出厂常量本来就是 `ws://192.168.43.1:8443`（手机自己是 .1），
++ *     设置页里一格都不用填；
++ *   · 拨不通（热点开了客户端隔离）才在设置页或 `>url` 填手机在那个网里的地址。
++ *
++ * 三个记账点，少一个就会变成"改了但看不出来生效没"：
++ *   `s_url` 是**当前真正拨出去**的那条（`screen_link_cfg_t.url` 存的是指针，
++ *     所以这条字符串必须一直活着，不能是栈上的）；
++ *   `s_url_from_nvs` 说来源，`>carpet`/`>url` 把它和地址一起印出来；
++ *   `s_link_mtx` 让"开/关链路"只可能有一个人在做 —— `screen_link_stop()` 里要等
++ *     链路任务自己退出（最长 2 秒），这段时间里 `>url` 再来一次、或开机那条 gate
++ *     刚放行，都会撞车。
++ */
++static char s_url[MUSE_LINK_URL_MAX + 1];
++static volatile bool s_url_from_nvs;
++static screen_link_callbacks_t s_cb;
++static SemaphoreHandle_t s_link_mtx;
++static bool s_link_started;
 +
++/* 先读 NVS，没有（空串或从没写过）才回落编译期那一条。来源跟着一起记，
++ * 因为"拨的是哪条"和"是谁决定的"是两个问题：现场排障问的是后者。 */
++static void url_read(void)
++{
++    char nv[MUSE_LINK_URL_MAX + 1];
++    muse_settings_link_url(nv);
++    if (nv[0]) {
++        snprintf(s_url, sizeof s_url, "%s", nv);
++        s_url_from_nvs = true;
++    } else {
++        snprintf(s_url, sizeof s_url, "%s", CONFIG_SCREEN_LINK_URL);
++        s_url_from_nvs = false;
++    }
++}
++
++/* 现在生效的那条地址 + 是谁定的这一条。
++ * `s_url` 只有真的拨出去之后才有内容（gate_task 先等网络），所以还没拨的时候按
++ * 同一条"先 NVS 再出厂"的规则现算 —— 不然现场刚用 `>url` 改完、网还没起来，
++ * 回读会指着出厂值说"这就是在拨的"，那就是在骗人。
++ * 为什么不在 carpet_link_start() 里先 url_read() 一次：试过了，板子上开机直接
++ * `assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))` 死循环 ——
++ * 那一步 `muse_settings_init()` 还没跑，设置模块那把锁是 NULL。 */
++static void url_effective(char out[MUSE_LINK_URL_MAX + 1], bool *from_nvs)
++{
++    if (s_url[0]) {
++        snprintf(out, MUSE_LINK_URL_MAX + 1, "%s", s_url);
++        *from_nvs = s_url_from_nvs;
++        return;
++    }
++    muse_settings_link_url(out);
++    *from_nvs = out[0] != '\0';
++    if (!out[0]) {
++        snprintf(out, MUSE_LINK_URL_MAX + 1, "%s", CONFIG_SCREEN_LINK_URL);
++    }
++}
++
++/* 拨号。调用者持有 s_link_mtx，且 s_url 已经是想要的那条。 */
++static esp_err_t link_open(void)
++{
 +    int gw, gh, gppi;
 +    bool gr, gt;
 +    screen_geom(&gw, &gh, &gr, &gt, &gppi);
 +
 +    screen_link_cfg_t cfg = {
-+        .url = CONFIG_SCREEN_LINK_URL,
++        .url = s_url,
 +        .screen_id = CONFIG_SCREEN_LINK_ID,
 +        .fw = CONFIG_SCREEN_LINK_FW,
 +        .dock_type = CONFIG_SCREEN_LINK_DOCK_TYPE,
@@ -3412,14 +3466,112 @@ index 0000000..f1f0b82
 +        .screen_touch = gt,
 +        .screen_ppi = gppi,
 +    };
-+    screen_link_callbacks_t cb = {0};
-+    cb.on_connected = on_connected;
-+    cb.on_disconnected = on_disconnected;
-+    cb.on_state = on_state;
-+    cb.on_dialog = on_dialog;
-+    cb.on_command = on_command;
++    esp_err_t err = screen_link_start(&cfg, &s_cb);
++    if (err == ESP_OK) {
++        s_link_started = true;
++        ESP_LOGI(TAG, "dialing %s (%s)", s_url, s_url_from_nvs ? "from settings" : "built-in");
++    }
++    return err;
++}
 +
-+    esp_err_t err = screen_link_start(&cfg, &cb);
++/* 换地址之后重拨一次：先关（发 bye，手机台账立刻离线）再开。
++ * 新起的那条链路自己的退避阶梯从第一档重新开始，这就是"不等阶梯转完"。
++ * 还没拨过（Wi-Fi 没起来，gate 那条还在等）就只存不拨 —— 在这里替 gate 起链路会
++ * 把"没网也去 init 一个 transport"引进来，而 gate 随后那次 start 只会撞 INVALID_STATE。 */
++static void url_restart_task(void *arg)
++{
++    (void)arg;
++    xSemaphoreTake(s_link_mtx, portMAX_DELAY);
++    url_read();
++    if (s_link_started) {
++        screen_link_stop();
++        s_link_started = false;
++        esp_err_t err = link_open();
++        if (err != ESP_OK) {
++            ESP_LOGE(TAG, "re-dial after url change: %s", esp_err_to_name(err));
++        }
++    } else {
++        ESP_LOGI(TAG, "url saved (%s); the link starts on its own once Wi-Fi is up", s_url);
++    }
++    xSemaphoreGive(s_link_mtx);
++    vTaskDelete(NULL);
++}
++
++static void url_restart(void)
++{
++    if (!s_link_mtx) {
++        ESP_LOGE(TAG, "no link mutex, url change not applied");
++        return;
++    }
++    if (xTaskCreate(url_restart_task, "carpet_url", 4096, NULL, 4, NULL) != pdPASS) {
++        ESP_LOGE(TAG, "url restart task out of memory");
++    }
++}
++
++void carpet_link_url(char *out, size_t n, bool *from_nvs)
++{
++    char full[MUSE_LINK_URL_MAX + 1];
++    bool from = false;
++    url_effective(full, &from);
++    if (out && n) snprintf(out, n, "%s", full);
++    if (from_nvs) *from_nvs = from;
++}
++
++esp_err_t carpet_link_set_url(const char *url)
++{
++    if (!s_link_mtx) return ESP_ERR_INVALID_STATE;
++    if (url && *url) {
++        if (strlen(url) > MUSE_LINK_URL_MAX) return ESP_ERR_INVALID_SIZE;
++        /* 只认 ws:// 和 wss:// 起头：填错的人现场要能一眼看出来，别让一个
++         * 手滑的 "192.168.43.1" 变成一条拨不出去又不知道原因的地址。 */
++        if (strncmp(url, "ws://", 5) && strncmp(url, "wss://", 6)) return ESP_ERR_INVALID_ARG;
++        /* 设置页那个键盘会带出空格，空格在 URL 里从来不是有意的 */
++        if (strchr(url, ' ')) return ESP_ERR_INVALID_ARG;
++    }
++    muse_settings_set_link_url(url ? url : "");
++    url_restart();
++    return ESP_OK;
++}
++
++void carpet_link_url_dump(void)
++{
++    char now[MUSE_LINK_URL_MAX + 1];
++    bool from_nvs = false;
++    char want[MUSE_LINK_URL_MAX + 1];
++    url_effective(now, &from_nvs);
++    muse_settings_link_url(want);
++    printf("@url now=%s src=%s saved=%s linked=%d dialed=%d\n",
++           now, from_nvs ? "nvs" : "factory",
++           want[0] ? want : "(none)", (int)screen_link_connected(), (int)s_link_started);
++    /* 地址和网是两件事：这一行说的是"在哪个网里拨这条地址"。
++     * 密码不印 —— 串口日志会被抄进交接文档，那玩意儿抄一次就是一份凭据。 */
++    char ssid[MUSE_SSID_MAX + 1], pass[MUSE_PASS_MAX + 1];
++    muse_settings_wifi(ssid, pass);
++    printf("@url wifi=%d ssid=%s\n", (int)muse_wifi_connected(), ssid[0] ? ssid : "(none)");
++    printf("@url built-in=%s  set: >url ws://a.b.c.d:8443  clear: >url clear\n",
++           CONFIG_SCREEN_LINK_URL);
++    fflush(stdout);
++}
++
++static void gate_task(void *arg)
++{
++    (void)arg;
++    /* Home Link joins only after the phone has paired this gadget, so wait for
++     * a network instead of starting a link that can't resolve the URL. */
++    while (!muse_wifi_connected()) {
++        vTaskDelay(pdMS_TO_TICKS(2000));
++    }
++
++    s_cb.on_connected = on_connected;
++    s_cb.on_disconnected = on_disconnected;
++    s_cb.on_state = on_state;
++    s_cb.on_dialog = on_dialog;
++    s_cb.on_command = on_command;
++
++    xSemaphoreTake(s_link_mtx, portMAX_DELAY);
++    url_read();
++    esp_err_t err = link_open();
++    xSemaphoreGive(s_link_mtx);
 +    if (err != ESP_OK) {
 +        ESP_LOGE(TAG, "screen_link_start: %s", esp_err_to_name(err));
 +    }
@@ -3432,6 +3584,7 @@ index 0000000..f1f0b82
 +    /* 先建锁再建任务：链路回调和 UI 的 tick 都从这一把锁后面碰 s_state */
 +    if (!s_lock) s_lock = xSemaphoreCreateMutex();
 +    if (!s_cmdq) s_cmdq = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
++    if (!s_link_mtx) s_link_mtx = xSemaphoreCreateMutex();
 +    if (xTaskCreate(cmd_task, "carpet_cmd", 4096, NULL, 4, &s_cmd_task) != pdPASS) {
 +        s_cmd_task = NULL;
 +        ESP_LOGE(TAG, "cmd task out of memory");
@@ -3546,6 +3699,13 @@ index 0000000..f1f0b82
 +    bool gr, gt;
 +    screen_geom(&gw, &gh, &gr, &gt, &gppi);
 +    printf("@carpet screen=%dx%d round=%d touch=%d ppi=%d\n", gw, gh, (int)gr, (int)gt, gppi);
++    /* 拨的是哪条、谁定的：现场一半的"连不上"其实是"拨的是上一台电脑那条"。
++     * src=factory 说明 NVS 里那一格是空的（不是丢了，是从没填过）。
++     * 走 url_effective()：网还没起来时 s_url 是空的，那时也要说真话。 */
++    char url_now[MUSE_LINK_URL_MAX + 1];
++    bool url_nvs = false;
++    url_effective(url_now, &url_nvs);
++    printf("@carpet url=%s src=%s\n", url_now, url_nvs ? "nvs" : "factory");
 +    carpet_audio_dump();
 +    fflush(stdout);
 +}
@@ -3553,10 +3713,10 @@ index 0000000..f1f0b82
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..7b79bf3
+index 0000000..d4f7c75
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,149 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -3571,7 +3731,10 @@ index 0000000..7b79bf3
 +#pragma once
 +
 +#include <stdbool.h>
++#include <stddef.h>
 +#include <stdint.h>
++
++#include "esp_err.h"   /* esp_err_t for carpet_link_set_url() */
 +
 +/* Safe from any task. Starts the link once Wi-Fi is up; calling it twice does
 + * nothing. */
@@ -3650,6 +3813,26 @@ index 0000000..7b79bf3
 +/* Console readback (`>carpet`): prints the same numbers and strings the tile
 + * draws, one line each. Safe from any task, never touches LVGL. */
 +void carpet_link_dump(void);
++
++/*
++ * 接入点地址（手机那一头的 ws 地址）现在**运行期可设**，读的顺序是 NVS(`muse`/`link_url`)
++ * → 出厂常量 `CONFIG_SCREEN_LINK_URL`。为什么要有这一条：现场那台电脑/那部手机的 IP 一直在换，
++ * 只靠编译期常量就是"每换一次网络改一次 sdkconfig、重编、再刷一遍"，那条路在用户面前不成立。
++ *
++ * `carpet_link_url(out, n, &from_nvs)` 给的是**现在生效**的那条和它的来源
++ * （true = 设置页或 `>url` 存进 NVS 的那条；false = 出厂常量）。网还没起来时链路一次都
++ * 没拨过，这时它按同一条"先 NVS 再出厂"的规则现算，而不是回一句出厂值糊弄过去 ——
++ * 因为设置页那一格和 `>url` 回读都要在它之前就能说清"你存的那条已经算数了"。
++ * `carpet_link_set_url(url)` 写 NVS（空串 = 抹掉那一格，回到出厂那条）并**立刻重拨**
++ * —— 先 `screen_link_stop()` 发 bye，再重新 start，所以退避阶梯从头开始，不用等它转完；
++ * 链路一次都没起过时只存下下次要拨的那条，不抢 gate 的活。
++ * 返回 `ESP_ERR_INVALID_ARG` = 不以 ws:// 或 wss:// 开头或带空格，`ESP_ERR_INVALID_SIZE` = 超 63 字节，
++ * `ESP_ERR_INVALID_STATE` = `carpet_link_start()` 还没跑（开机极早期，串口命令到不了这么早）。
++ * `carpet_link_url_dump()` 是串口 `>url` 的回读。
++ */
++void carpet_link_url(char *out, size_t n, bool *from_nvs);
++esp_err_t carpet_link_set_url(const char *url);
++void carpet_link_url_dump(void);
 +
 +/*
 + * 开发口：把一句话直接塞进首屏那条带，当它是答句（脸进 speaking、按 2.5 秒一页翻）。
@@ -4622,7 +4805,7 @@ index 0000000..53f5a9a
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..e25f10a 100644
+index 7c579bb..7ca18e4 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,10 @@
@@ -4636,7 +4819,7 @@ index 7c579bb..e25f10a 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +896,67 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +896,104 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -4700,11 +4883,48 @@ index 7c579bb..e25f10a 100644
 +        carpet_link_bench_maint(strcmp(rest, "off") != 0);
 +        return true;
 +    }
++    /* 接入点地址：不带参数=回读现在拨的是哪条、来源是 NVS 还是出厂；
++     * 带一条 ws://…=存进 NVS 并**立刻重拨**；`clear`=抹掉那一格、回到出厂那条。
++     * 为什么给串口这一条：1.75 寸圆屏上用屏上键盘敲一个 IP 是罚人 —— 现场接电脑的时候
++     * 就用这一条，没电脑的时候才用设置页那一格（两条存的是同一个 NVS key，不是两套状态）。
++     * `esp_err_to_name` 要说清"为什么没存进去"：以 ws:// 开头、不带空格、不超 63 字节。 */
++    if (!strncmp(line, "url", 3) && (line[3] == '\0' || line[3] == ' ')) {
++        const char *rest = line + 3;
++        while (*rest == ' ') rest++;
++        if (!*rest) {
++            carpet_link_url_dump();
++            return true;
++        }
++        bool clear = !strcmp(rest, "clear") || !strcmp(rest, "\"\"");
++        esp_err_t err = carpet_link_set_url(clear ? "" : rest);
++        printf("@url %s: %s\n", clear ? "clear" : "set", esp_err_to_name(err));
++        carpet_link_url_dump();
++        return true;
++    }
++    /* 把屏上存过的那几个网络抹干净（NVS 里 ssid/password/那一串列表一起抹）。
++     * 有了 #R2 那条优先级倒置，这是**不重刷就退回编译期那条 SSID** 的唯一口：
++     * 抹掉之后 NVS 是空的，出厂那条才重新作数。链路和 Wi-Fi 都要重启一次才看得出来，
++     * 所以这里只把话说明白，不替人 reboot。密码不印。 */
++    if (!strncmp(line, "wifi", 4) && line[4] == ' ') {
++        const char *rest = line + 5;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "clear")) {
++            char ssid[MUSE_SSID_MAX + 1], pass[MUSE_PASS_MAX + 1];
++            muse_settings_wifi(ssid, pass);
++            printf("@wifi was ssid=%s\n", ssid[0] ? ssid : "(none)");
++            muse_settings_set_wifi("", "");
++            printf("@wifi cleared the saved networks; reboot to fall back to CONFIG_HOMEHUB_WIFI_SSID\n");
++        } else {
++            printf("@wifi usage: >wifi clear\n");
++        }
++        fflush(stdout);
++        return true;
++    }
 +#endif
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +991,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1028,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -4717,6 +4937,195 @@ index 7c579bb..e25f10a 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
+diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
+index fd499cd..fe85866 100644
+--- a/esp32/components/muse/muse_settings.c
++++ b/esp32/components/muse/muse_settings.c
+@@ -46,6 +46,7 @@ static struct {
+     char host[MUSE_HOST_MAX + 1];
+     char vm[MUSE_VM_MAX + 1];
+     char token[MUSE_TOKEN_MAX + 1];
++    char link_url[MUSE_LINK_URL_MAX + 1];
+ } s = {
+     .volume = CONFIG_MUSE_DEFAULT_VOLUME,
+     .speaker_on = true,
+@@ -141,13 +142,15 @@ esp_err_t muse_settings_init(void)
+     load_str("host", s.host, sizeof(s.host));
+     load_str("vm", s.vm, sizeof(s.vm));
+     load_str("token", s.token, sizeof(s.token));
++    load_str("link_url", s.link_url, sizeof(s.link_url));
+ 
+     s.volume = clampi(s.volume, 0, 100);
+     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
+     s.brightness = clampi(s.brightness, 10, 100);
+-    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
++    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s",
+              s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
+-             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
++             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token",
++             s.link_url[0] ? s.link_url : "built-in");
+     return ESP_OK;
+ }
+ 
+@@ -208,6 +211,29 @@ size_t muse_settings_hatch_token_len(void)
+     return n;
+ }
+ 
++void muse_settings_link_url(char out[MUSE_LINK_URL_MAX + 1])
++{
++    LOCKED(strlcpy(out, s.link_url, MUSE_LINK_URL_MAX + 1));
++}
++
++/* An empty url is erased rather than stored as "", so the readback can tell
++ * "cleared, so the built-in one is in force" from a network whose name is
++ * genuinely empty. No notify(): the only reader is the car link, and it
++ * reconnects from the same call that gets here. */
++void muse_settings_set_link_url(const char *url)
++{
++    LOCKED({
++        strlcpy(s.link_url, url ? url : "", sizeof(s.link_url));
++        if (s.link_url[0]) {
++            save_str("link_url", s.link_url);
++        } else {
++            nvs_erase_key(s_nvs, "link_url");
++            nvs_commit(s_nvs);
++        }
++    });
++    ESP_LOGI(TAG, "link url: %s", s.link_url[0] ? s.link_url : "(built-in)");
++}
++
+ void muse_settings_set_volume(int pct)
+ {
+     s.volume = clampi(pct, 0, 100);
+diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
+index 5788e5b..74ef9d0 100644
+--- a/esp32/components/muse/muse_settings.h
++++ b/esp32/components/muse/muse_settings.h
+@@ -33,6 +33,10 @@
+ #define MUSE_HOST_MAX 63
+ #define MUSE_VM_MAX 63
+ #define MUSE_TOKEN_MAX 1023
++/* The Screen-Link access point (our car link's `ws://a.b.c.d:8443`). Same width
++ * as a host on purpose: it is a host plus a port, and a URL typed on the screen
++ * is capped by the field, not by the address. */
++#define MUSE_LINK_URL_MAX 63
+ 
+ #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
+ 
+@@ -69,6 +73,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
+ void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
+ void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
+ size_t muse_settings_hatch_token_len(void);
++/* The Screen-Link access point our car-link tile dials (the phone is the server).
++ * Empty means "use the one built into the firmware", so a settings-page entry can
++ * be cleared again without a reflash. Read only by carpet_link. */
++void muse_settings_link_url(char out[MUSE_LINK_URL_MAX + 1]);
++void muse_settings_set_link_url(const char *url);
+ 
+ void muse_settings_set_volume(int pct);
+ void muse_settings_set_speaker_on(bool on);
+diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
+index 20c46d3..5994452 100644
+--- a/esp32/components/muse/muse_settings_ui.c
++++ b/esp32/components/muse/muse_settings_ui.c
+@@ -45,6 +45,9 @@
+ #if CONFIG_MUSE_VIDEO
+ #include "muse_video.h"
+ #endif
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_link.h"   /* the access-point row on the Wi-Fi page */
++#endif
+ 
+ /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
+ #define LIST_W 330
+@@ -107,6 +110,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
+ static int s_forget_armed = -1;
+ static int64_t s_forget_armed_us;
+ static char s_join_ssid[MUSE_SSID_MAX + 1];
++#if CONFIG_MUSE_CARPET_CARDS
++/* The Screen-Link access point (the phone is the server): one row to tap, and
++ * the address it is actually dialing under it. A row value is capped at 130 px,
++ * which dots "ws://192.168.43.1:8443" off, so the whole thing lives in the note. */
++static lv_obj_t *s_wifi_url_note;
++static int64_t s_wifi_url_bad_us;
++#endif
+ 
+ /* Hatch page. */
+ static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
+@@ -973,6 +983,33 @@ static bool sta_mac(uint8_t m[6])
+ #endif
+ }
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++/* The keyboard runs in the UI task, and applying a new address must not: a
++ * reconnect sends a bye and waits up to 2 s for the old link task to leave.
++ * carpet_link_set_url() therefore only saves and hands the restart to its own
++ * task. An empty field clears the saved one, so the built-in address is back
++ * without a reflash. */
++static void on_wifi_url_done(const char *text)
++{
++    if (carpet_link_set_url(text) != ESP_OK) {
++        s_wifi_url_bad_us = esp_timer_get_time();
++    }
++}
++
++static void on_wifi_url(lv_event_t *e)
++{
++    (void)e;
++    char url[MUSE_LINK_URL_MAX + 1];
++    bool from_nvs = false;
++    /* Only a saved one goes in the field: prefilling the built-in address would
++     * store it the moment Ready is tapped, and "cleared, so built-in" could never
++     * be reached from here again. */
++    carpet_link_url(url, sizeof(url), &from_nvs);
++    open_text("Access point", from_nvs ? url : "", false, MUSE_LINK_URL_MAX,
++              "ws://phone:8443, empty for the built-in", on_wifi_url_done, s_wifi);
++}
++#endif
++
+ static void build_wifi_page(lv_obj_t *tile)
+ {
+     lv_obj_t *list;
+@@ -988,6 +1025,15 @@ static void build_wifi_page(lv_obj_t *tile)
+     s_wifi_list = column(list);
+ 
+     row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
++#if CONFIG_MUSE_CARPET_CARDS
++    /* Above the MAC address on purpose: this is the row the car link needs, and
++     * scrolling for it on a 1.75" screen is the one thing this page must not ask for.
++     * Icon: this LVGL has no LV_SYMBOL_LINK (the build said so), and the thing on the
++     * other end of that address is a phone, so LV_SYMBOL_CALL is the honest glyph. */
++    row(list, LV_SYMBOL_CALL, "Access point", NULL, on_wifi_url, NULL);
++    s_wifi_url_note = note(list, "");
++    s_wifi_url_bad_us = 0;
++#endif
+     lv_obj_t *mac = info_row(list, "MAC address");
+     uint8_t m[6];
+     if (sta_mac(m)) {
+@@ -1046,6 +1092,23 @@ static void tick_wifi(void)
+     if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
+         muse_wifi_apply();
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    {
++        char url[MUSE_LINK_URL_MAX + 1];
++        bool from_nvs = false;
++        carpet_link_url(url, sizeof(url), &from_nvs);
++        if (s_wifi_url_bad_us && esp_timer_get_time() - s_wifi_url_bad_us < 5000000) {
++            set_text(s_wifi_url_note, "Not an address\nUse ws://192.168.43.1:8443");
++            lv_obj_set_style_text_color(s_wifi_url_note, lv_color_hex(COLOR_WARN), 0);
++        } else {
++            char line[MUSE_LINK_URL_MAX + 48];
++            snprintf(line, sizeof(line), "%s\n%s", url,
++                     from_nvs ? "Dialed from what you typed here" : "Built into the firmware");
++            set_text(s_wifi_url_note, line);
++            lv_obj_set_style_text_color(s_wifi_url_note, lv_color_hex(COLOR_DIM), 0);
++        }
++    }
++#endif
+ }
+ 
+ /* ---------- Hatch ---------- */
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
 index 4a98f64..72b6797 100644
 --- a/esp32/components/muse/muse_ui.c
@@ -5050,8 +5459,79 @@ index 0000000..358eeb1
 +CONFIG_SCREEN_LINK_ID="WS175B-A3F7"
 +CONFIG_SCREEN_LINK_FW="muse-0.1.0"
 +CONFIG_SCREEN_LINK_DOCK_TYPE="desk_stand"
+diff --git a/esp32/main/app.c b/esp32/main/app.c
+index 1030652..e8fa4de 100644
+--- a/esp32/main/app.c
++++ b/esp32/main/app.c
+@@ -2824,6 +2824,14 @@ void app_run(void) {
+     // provision action stores ssid/password/access_token there). If those
+     // are present, reconnect automatically — the user shouldn't have to
+     // re-pair via BLE after every flash.
++    //
++    // PRIORITY INVERTED FOR THE CAR LINK (CONFIG_MUSE_CARPET_CARDS): a network
++    // the user joined from the screen's Wi-Fi page now beats the built-in one.
++    // With the old order the settings page could save a phone's hotspot and the
++    // device would still join the bench network, so "connect the screen to my
++    // phone from the screen" was a lie. Revert by deleting the `&& !nvs_ssid[0]`
++    // below and the `dev_override_now()` gate in muse_glue.c. To get back to the
++    // bench network without a reflash, clear the saved one: `>wifi clear`, reboot.
+     const char *ovr_ssid = CONFIG_HOMEHUB_WIFI_SSID;
+     const char *ovr_pwd  = CONFIG_HOMEHUB_WIFI_PASSWORD;
+ 
+@@ -2833,18 +2841,25 @@ void app_run(void) {
+     const char *wifi_ssid = NULL;
+     const char *wifi_pwd = NULL;
+ 
+-    if (ovr_ssid[0]) {
+-        // Menuconfig override takes priority.
++    bool have_nvs = config_get_str("ssid", nvs_ssid, sizeof(nvs_ssid))
++                    && nvs_ssid[0];
++
++    // The built-in SSID is the fallback, not the override it used to be.
++    bool use_override = ovr_ssid[0] && !have_nvs;
++
++    if (use_override) {
+         wifi_ssid = ovr_ssid;
+         wifi_pwd = ovr_pwd;
+-        ESP_LOGI(TAG, "wifi override active, connecting to %s", wifi_ssid);
+-    } else if (config_get_str("ssid", nvs_ssid, sizeof(nvs_ssid))
+-               && config_get_str("password", nvs_pwd, sizeof(nvs_pwd))) {
+-        // Previously provisioned via BLE — auto-reconnect, to whichever saved
+-        // network is in range.
++        ESP_LOGI(TAG, "wifi override active (no saved network), connecting to %s", wifi_ssid);
++    } else if (have_nvs) {
++        // Previously provisioned or joined from the settings page — auto-reconnect,
++        // to whichever saved network is in range. An open hotspot has no password
++        // key, so the password is optional here.
+         memset(nvs_pwd, 0, sizeof(nvs_pwd));
+         wifi_ssid = nvs_ssid;
+-        ESP_LOGI(TAG, "found provisioned creds in NVS, reconnecting (first: %s)", wifi_ssid);
++        ESP_LOGI(TAG, "%s creds in NVS, reconnecting (first: %s)",
++                 ovr_ssid[0] ? "saved network beats the built-in" : "provisioned",
++                 wifi_ssid);
+     }
+ 
+     if (wifi_ssid) {
+@@ -2852,7 +2867,7 @@ void app_run(void) {
+         led_status_set_state(LED_STATE_WIFI_CONNECTING);
+         char joined[WIFI_KNOWN_SSID_MAX + 1] = {0};
+         bool wifi_joined;
+-        if (ovr_ssid[0]) {
++        if (use_override) {
+             wifi_joined = wifi_mgr_connect(wifi_ssid, wifi_pwd, WIFI_CONNECT_TIMEOUT_MS);
+             snprintf(joined, sizeof(joined), "%s", wifi_ssid);
+         } else {
+@@ -2865,7 +2880,7 @@ void app_run(void) {
+             ui_set_wifi(joined);
+             ui_set_status("wifi_connected");
+             led_status_set_state(LED_STATE_WIFI_CONNECTED);
+-            if (!ovr_ssid[0]) {
++            if (!use_override) {
+                 persist_connected_wifi_channel();
+             }
+             if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..050cad6 100644
+index 0c74b08..484ccee 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -5065,7 +5545,43 @@ index 0c74b08..050cad6 100644
  #include "muse_input.h"
  #include "muse_link.h"
  #include "muse_mem.h"
-@@ -663,6 +667,11 @@ void muse_glue_start(void) {
+@@ -490,6 +494,17 @@ static bool none_nearby_lately(void) {
+ // leaves Wi-Fi alone instead of dropping a network it has no copy of.
+ #define WIFI_OVERRIDE (CONFIG_HOMEHUB_WIFI_SSID[0] != '\0')
+ 
++// The override is a fallback now, not a lock-out (paired with the inverted
++// order in app.c's boot connect): once someone joins a network from the
++// screen's Wi-Fi page, that copy is in NVS and this keeper owns it — without
++// this the two `!WIFI_OVERRIDE` tests below would keep the keeper from ever
++// rejoining, so the page could save a phone's hotspot and nothing would change.
++// Revert with app.c's `&& !nvs_ssid[0]`; `>wifi clear` empties NVS, and a
++// reboot is back on the bench network.
++static bool dev_override_now(void) {
++    return WIFI_OVERRIDE && s_ssid[0] == '\0';
++}
++
+ static void keeper_task(void *arg) {
+     (void)arg;
+     xEventGroupWaitBits(s_ready, BIT_LINK | BIT_MUSE, pdFALSE, pdTRUE, portMAX_DELAY);
+@@ -562,7 +577,7 @@ static void keeper_task(void *arg) {
+                 ESP_LOGI(TAG, "screen off a while; left wifi");
+                 napped = true;
+             }
+-        } else if (!WIFI_OVERRIDE && wifi_mgr_is_connected() && joined_gen != s_creds_gen) {
++        } else if (!dev_override_now() && wifi_mgr_is_connected() && joined_gen != s_creds_gen) {
+             ESP_LOGI(TAG, "wifi network changed; rejoining");
+             wifi_mgr_disconnect();
+             next_try = 0;
+@@ -571,7 +586,7 @@ static void keeper_task(void *arg) {
+             backoff = RETRY_MIN_US;
+             away_backoff = AWAY_MIN_US;
+             s_away = false;
+-        } else if (!WIFI_OVERRIDE && !s_editing && esp_timer_get_time() >= next_try) {
++        } else if (!dev_override_now() && !s_editing && esp_timer_get_time() >= next_try) {
+             // NVS has Muse's changes (s_editing is clear), so Link joins from
+             // the same list the settings show.
+             uint32_t gen = s_creds_gen;
+@@ -663,6 +678,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }

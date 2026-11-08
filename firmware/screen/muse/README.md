@@ -25,31 +25,37 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 14 个文件、2647 行新增 / 20 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，5,079 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-07 重打后实读的）：
+- 我们的全部改动 = 18 个文件、3005 行新增 / 34 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，5,595 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  17 +-   (+carpet_audio.c 那行 + embed 那行)
   esp32/components/muse/Kconfig              |  14 +
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
   esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
-  esp32/components/muse/carpet/carpet_link.c | 881 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口)
-  esp32/components/muse/carpet/carpet_link.h | 126 +   (新)
+  esp32/components/muse/carpet/carpet_link.c | 1041 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump`)
+  esp32/components/muse/carpet/carpet_link.h | 149 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
-  esp32/components/muse/muse_input.c         |  71 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧)
+  esp32/components/muse/muse_input.c         | 108 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`)
+  esp32/components/muse/muse_settings.c      |  30 +-  (11-08 新入列：NVS 多一条 `link_url`，读写各一个函数)
+  esp32/components/muse/muse_settings.h      |   9 +   (11-08 新入列：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头)
+  esp32/components/muse/muse_settings_ui.c   |  63 +   (11-08 新入列：WI-FI 子页多一行「Access point」，复用现成的 `open_text` 键盘)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
-  esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条)
-  esp32/main/muse_glue.c                     |   9 +
+  esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值)
+  esp32/main/app.c                           |  35 +-  (11-08 新入列：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
+  esp32/main/muse_glue.c                     |  24 +-   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi")
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，14 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-07 这天重打过两次（第一次是把 11-06 那三处源码改动收进来，5,026 行；第二次加了 `>maint`
-  这个开发口，就是上面这组 5,079 行），每次都走同一条验法：`git worktree add --detach ... cdc169d`
-  → `git apply --check` 过 → worktree 删掉。`:core` 的 `SchemaDriftTest` 13 条、`:core:test` 305 条
-  重打之后实跑全 PASSED —— 其中 `SchemaDriftTest` 有一条是**直接读这份 patch 里的 `UI_CARD` 表**
+  再 `git apply`，18 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  2026-11-08 这天打了两次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
+  （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
+  里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
+  再打第二次就是上面这组 5,595 行。两次都走同一条验法：`git apply --check` 过 → 真 `git apply` 过 →
+  解出来 `carpet_link.c` 1041 行 / 字库 154,528 字节 → worktree 删掉。
+  `:core` 的 `SchemaDriftTest` 13 条、`:core:test` 305 条同一轮实跑（`--rerun`，不吃缓存）全 PASSED —— 其中 `SchemaDriftTest` 有一条是**直接读这份 patch 里的 `UI_CARD` 表**
   去硬比 schema 和 Kotlin 那份枚举的，所以它绿了就说明新补丁真的被读了，不是在原地打转。
   每次改动都重打并在干净树上验一遍，一轮记一笔：
   - 2026-11-04 深夜 §11 步骤 1（场景页信息架构 + `page_report`）那轮 —— 验过 `PAGE_NAMES`
@@ -306,9 +312,21 @@ hold 到期把脸收回 idle，下一帧 `state`（≤1 秒）再把"担心"补�
 两条用法：① 空屏发 `>maint` → `>carpet` 应回 `maint_worried=1` 且 `mode` 从 1(idle) 变 3(thinking)；
 ② 先 `>say 一句长话` 让句子挂在脸上再 `>maint` → `mode` 必须**还是 4(speaking)**（第一道让路），
 这时这一条在屏上只剩那枚琥珀点。都不联网、不接模型。
-**上板称过没有：还没有。** 11-07 这一版编好了（`Project build complete`）、补丁重打并在干净 baseline 上
-`apply --check` 过，但 `app-flash` 起不来 —— 那次之后 COM8 从设备列表里消失了（`GetPortNames` 只剩
-COM4/5/6/7），板子不在机器上，判据一条都没称。别把这段当成"已验"。
+**上板称过了：2026-11-08，COM8，`ELF 4f6f8b4ad`，三条都是串口原文**（11-07 那次没称成是因为板子从设备上掉了，
+不是判据有问题）：
+
+```
+基线      @carpet face=0 mode=1 …  card=- emotion=- maint_worried=0
+空屏      @maint sent=1 view.maint_worried=1 card=养车卡 emotion=担心 face=0 mode=3
+挂句子    @carpet face=1 mode=4 at=255/255   ←  >say 那句 255 字节还挂着
+句子在时  @maint sent=1 view.maint_worried=1 … face=1 mode=4      ← 第一道让路：没被搬走
+>maint off @maint sent=0 view.maint_worried=0 emotion=中性 face=0 mode=1  ← 第三道：搬回 IDLE
+```
+
+判据读的是 `carpet_link_state()` 那个视图，和页面上那两枚点、脸上那一个是同一个来源。
+**唯一还没称到的是那枚 12px 琥珀点本身**：它只能靠眼睛或抓屏，而抓屏通道要 IP，
+这块板那天扫出来 `0 APs found`（`D:\dev\projects\carpet-sat-demo\firmware\screen\HANDOFF.md`
+那份 11-08 追加的 §3 记了全部数字和卡在哪）。
 
 ### 5.5 屏能往手机发什么（我们自己的 App 要做服务端就得收这些）
 
@@ -445,12 +463,48 @@ PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/lin
 契约里拓扑是**反的**：手机是服务端，屏是客户端，屏连上去并先自报 `hello`
 （`ws://<服务端>:8443`，名字带 443 但它是明文 ws）。服务端 hello 白名单没过就 `close(1000, "unknown screen")`。
 
-- `CONFIG_SCREEN_LINK_URL` 出厂默认 `ws://192.168.43.1:8443`（手机开热点时它自己是 `.1`）。
-  **这一条只有编译期能改** —— 屏上没有口、串口 console 也没有命令，换服务端 = 改 `sdkconfig` 重编重刷。
-  （所以真正上台前值得给屏加一个能改 URL 的入口，别在现场拿笔记本重编固件。）
-  这台 PC 在同一个热点里是 **192.168.43.161**，所以"用电脑当服务端验屏"时要把
-  `build-muse-s3-175-carpet/sdkconfig`（未跟踪那一份）里的 URL 改成 `ws://192.168.43.161:8443` 重编；
-  **跟踪的 `devices/sdkconfig.carpet` 保持手机那个默认值**，别把测试地址提交进去。
+- **接入点地址现在是运行期可设的**（2026-11-08 加的，为的是"用手机连屏"不该要求重刷）。
+  读的顺序是 **NVS(`muse` 命名空间 / `link_url`) → 出厂常量 `CONFIG_SCREEN_LINK_URL`**，
+  三个入口写读的都是这一份，不是三套状态：
+  - 屏上 **Settings → WI-FI → Access point** 那一格（用的就是 Muse 现成那套键盘，
+    `muse_settings_ui.c` 里只多了一行 `row()` + 一段 `note()`）；
+  - 串口 **`>url`**：不带参数 = 回读"现在拨的是哪条 + 来源 NVS 还是 factory"，
+    `>url ws://a.b.c.d:8443` = 存进 NVS 并**立刻重拨**（先 `screen_link_stop()` 发 bye 再 start，
+    所以退避阶梯从头开始，不用等它转完），`>url clear` = 抹掉那一格、回到出厂那条；
+  - 出厂常量本身：**回落到 `ws://192.168.43.1:8443`**（跟踪的 `devices/sdkconfig.carpet` 一直是这个值，
+    11-08 这轮改的是本机那份 `build-muse-s3-175-carpet/sdkconfig`，它被现场测试地址顶掉过）。
+    所以**手机开热点那一档，屏上一个字都不用填** —— 手机在它自己的热点里就是 `.1`。
+  - 为什么还留串口那一条：1.75 寸圆屏上用屏上键盘敲一个 IP 是罚人；接电脑的时候走 `>url`，
+    没电脑的时候才用那一格。
+  - 什么时候真需要填：热点开了「客户端隔离」，屏拨 `.1` 拨不通，就把服务端在那张网里的地址
+    （电脑就是 `ipconfig` 那个 IPv4）填进去。
+  - 判据（不用眼睛看屏）：`>carpet` 多一行 `@carpet url=… src=nvs|factory`，`>url` 另印
+    `now= / saved= / linked= / dialed= / wifi= / ssid=`。来源这一项必须报出来，
+    否则"改了没生效"和"生效了但对面没起服务"在现场分不开。
+  - **上板称过（2026-11-08，`ELF 4f6f8b4ad`）**：`>url 192.168.1.17:8443` → `ESP_ERR_INVALID_ARG`
+    且回读没动；`>url ws://192.168.1.17:8443` → `src=nvs`；**拉 RTS 真复位一次**之后开机日志里就是
+    `muse_settings: … link ws://192.168.1.17:8443`、`>url` 仍 `src=nvs`；`>url clear` → `(built-in)` + `src=factory`。
+    **`linked=1` 那半没称到**：那天屏自己扫网是 `link.wifi: scan complete, 0 APs found`（电脑在 5GHz 那张网，
+    S3 没有 5GHz 射频，手机热点没开），所以"和服务端真的连上"要有网。全部数字与卡点见 `../HANDOFF.md` §3。
+- **屏上连 Wi-Fi 的优先级倒过来了**（#R2；这条改的是 Muse 自己的设计，所以要把为什么和怎么退回写死）。
+  原来 `main/app.c` 那句注释写着 "Menuconfig override takes priority"：编译期 `CONFIG_HOMEHUB_WIFI_SSID`
+  非空（本机是 `aa123`）就**让 NVS 里的 ssid/密码完全不起作用** —— 那等于用户在屏上 Wi-Fi 页
+  填了手机热点也不会生效，那一页对连手机这件事是假的。现在：**NVS 里有用户填的网络就用它，
+  没有才用编译期那条**。两处一起改才算，少一处就是"看着改了其实没重连"：
+  - `main/app.c` 开机连网那段：`bool use_override = ovr_ssid[0] && !have_nvs;`
+  - `main/muse_glue.c`：新增 `dev_override_now()`（= 编译期覆盖**且** NVS 那份是空的），
+    keeper 里原来两处 `!WIFI_OVERRIDE` 换成它。只改 `app.c` 的话，开机之后在设置页换网络时
+    keeper 永远不重连（那两处判断把它整条关掉了）。
+  - 当初为什么要有那条编译期覆盖：调试隧道吞吐时不想每次刷机都重新配对。这条意图没变，
+    变的只是它现在是**兜底**而不是**压制**。
+  - 退回：`app.c` 删掉那句 `&& !have_nvs` 并把 `use_override` 换回 `ovr_ssid[0]`，
+    `muse_glue.c` 两处换回 `!WIFI_OVERRIDE`。
+  - 不刷机就退回编译期那条 SSID 的口：串口 **`>wifi clear`**（走 `muse_settings_set_wifi("","")`
+    → `wifi_known_forget_all()`，把 NVS 的 ssid/password/那一串列表一起抹；**密码不印出来**），
+    然后重启一次才看得见 —— keeper 在 NVS 空了以后不会再自己拨编译期那条，那是开机那一次的事。
+  - **这条倒置在硬件上称过（2026-11-08）**：那块板 NVS 里正存着用户早先在设置页填的热点名，
+    开机日志 `link.app: saved network beats the built-in creds in NVS, reconnecting (first: 吨吨吨的Mate 30 5G)` ——
+    换底座那几年这条一直不会生效，现在它作数了，`aa123` 退成兜底。同一行也证明"密码不印"：只有 `ssid=`。
 - PC 端服务端有两个现成的：`simulator/`（Java 彩排台，`DemoDriver --card dialog`）和
   `firmware/screen/tools/fake-phone.mjs`。验"真的在动"要用彩排台，`fake-phone` 不做换卡。
 - 8443 会被**上一个没死干净的 JVM 占住**：`TaskStop` 杀的是外层 wrapper，得杀 `java.exe`；

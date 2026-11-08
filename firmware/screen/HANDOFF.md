@@ -1128,3 +1128,129 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 `spiffs_image/carpet-noto.ttf`(2.1 MB) 都在；`build/`、`managed_components/`、`dependencies.lock`、
 `sdkconfig` 已被 `.gitignore` 挡住。它是换 Muse 底座**之前**那条路线（`muse/README.md` §1），
 要不要收进仓库另说，先留这一行免得下次又当成没处理干净。
+
+## 追加（2026-11-08）：接入点地址做成运行期可设，Wi-Fi 优先级那一处倒过来了
+
+他的原话是需求不是建议：**用手机连圆屏这件事要在 Muse 自带的那个设置页里做，不要每次改编译期常量重刷；
+手机 App 上的操作越少越好。** 上一节那条「绕不开刷机」因此作废 —— 现在不绕了，把刷机那一格从路上拿掉。
+
+### 0. 现场最少要做的事
+
+主路（手机开热点，**屏上零输入**）：
+
+1. 手机开热点，要 **2.4GHz**（S3 不认 5GHz）。
+2. 屏：Settings → WI-FI → 扫网 → 点那台热点 → 填密码。NVS 里有这一条，编译期那条 `aa123` 就退成兜底（§1.5）。
+3. 屏出厂拨的就是 `ws://192.168.43.1:8443`，也就是手机在自己热点里的那个地址 —— **那一格不用动**。
+4. 手机 App：「配对」那张卡里把**「允许圆屏接入」**打开就够了；`WS175B-A3F7` 已经在白名单
+   （`core/src/main/kotlin/com/carpet/satdemo/core/screen/ScreenLinkServer.kt:22` 和 `:206` 的
+   `DEFAULT_SCREEN_ID`），不用手填编号。App 这边一个按钮都没多给。
+
+退路（热点开了客户端隔离、`.1` 拨不通时，才需要一次输入）：
+
+5. 看 App 那张卡「接入点」那一行显示的地址（`ws://<服务端在那张网里的IP>:8443`）。
+6. 屏：Settings → WI-FI → **Access point** → 屏上键盘填那条 → Ready。屏**立刻重拨**，不用重启。
+   接着电脑的时候走串口更快：`>url ws://…`（不带参数 = 回读，`>url clear` = 抹掉回到出厂那条）。
+
+称它成没成，不看眼睛：`>url` 印 `now= / src= / saved= / linked= / dialed= / wifi= / ssid=`，
+`>carpet` 多一行 `@carpet url=… src=nvs|factory`。来源必须报出来，否则「改了没生效」和
+「生效了但对面没起服务」在现场是同一幅样子。
+
+### 1. 动了哪几处（固件侧，全走 `muse/muse-carpet.patch` 那一条口）
+
+1. **NVS 多一条 `link_url`**（`muse` 命名空间）：`muse_settings.h` 加 `MUSE_LINK_URL_MAX 63` +
+   一对读写口，`muse_settings.c` 在 init 里 `load_str("link_url", …)`。空串走 `nvs_erase_key`
+   而不是存一个空字符串 —— 这样「抹掉了，所以用出厂那条」和「存了一个空地址」是两回事。
+   启动日志尾部多印 `, link <地址>|built-in`，开机一眼看见拨的是哪条。
+   这两条没有 `#if CONFIG_MUSE_CARPET_CARDS` 包住：`muse_settings.h` 是 Muse 的公共头，
+   把 `sdkconfig.h` 引进它会碰主机侧的 harness（`esp32/tests/muse_eink_wifi_harness.cpp`），
+   代价是非车联构建里多 64 字节 .bss 和两个小函数。
+2. **设置页那一格**：`muse_settings_ui.c` 的 Wi-Fi 页在「Other network...」和 MAC 之间加一行
+   **Access point**（点它 → `open_text()`，用的就是 Muse 现成那套键盘，没造轮子），
+   下面一行 `note` 印「完整地址 + 来源」—— `row()` 的值那一栏被 `max_width 130` 卡住，
+   `ws://192.168.43.1:8443` 会被点成 `ws://192.16…`，而现场要读的正好是后面那截。
+   填错（不以 `ws://`/`wss://` 起头、带空格、超 63 字节）时那行 note 变琥珀色写
+   "Not an address"，5 秒后自己恢复。空 = 抹掉那一格。
+   页面上那格是**英文**标签，不是懒得翻译：设置页整页用 `lv_font_montserrat_*`，没有汉字字形。
+   图标那枚用 `LV_SYMBOL_CALL` 而不是 `LV_SYMBOL_LINK`：这棵树的 LVGL 里根本没有 `LINK` 这个符号
+   （第一次编译就被 `error: 'LV_SYMBOL_LINK' undeclared` 拦下了），而这条地址对面那台机器就是手机，
+   `CALL` 反而是最贴的那一枚。
+3. **链路改成先读 NVS**：`carpet_link.c` 新增 `url_read()` / `url_effective()` / `link_open()` /
+   `url_restart_task()` / `carpet_link_set_url()` / `carpet_link_url()` / `carpet_link_url_dump()`，`gate_task` 原来那段
+   建 cfg 的搬进 `link_open()`。重连是 `screen_link_stop()`（发 bye，手机台账立刻离线）
+   \+ `screen_link_start()`，所以退避阶梯从头开始；`s_link_mtx` 保证 stop/start 不重叠
+   （`screen_link_stop()` 自己最长等 2 秒）。地址存在静态 `s_url` 里 ——
+   `screen_link_cfg_t.url` 是**指针**，栈上那条会在 start 之后变成悬空读。
+   `url_effective()` 是这一节里唯一被硬件教的一课，见 §3 最后那段。
+4. **串口两个口**（`muse_input.c`）：`>url`、`>wifi clear`。为什么要给串口留一条：
+   1.75 寸圆屏上用屏上键盘敲一个 IP 是罚人，接电脑的时候走串口、没电脑的时候才用那一格，
+   两条写的是同一个 NVS key，不是两套状态。
+5. **优先级倒置（这条改了 Muse 的设计，所以为什么和怎么退回都得写死）**：
+   `main/app.c` 那句 "Menuconfig override takes priority" 换成 `use_override = ovr_ssid[0] && !have_nvs`；
+   `main/muse_glue.c` 新增 `dev_override_now()` 并把 keeper 里两处 `!WIFI_OVERRIDE` 换成它。
+   **两处都要改**：只改 `app.c` 的话开机能连上用户填的网络，但之后在设置页换网络时 keeper 永远不重连
+   （那两处判断正是「编译期覆盖在，Wi-Fi 归 Link，别碰」）。
+   那条编译期覆盖原来的用途还在（调试时不重刷就不必重新配对），只是从「压制」降成「兜底」。
+   不重刷退回它：`>wifi clear`（→ `muse_settings_set_wifi("","")` → `wifi_known_forget_all()`
+   把 NVS 的 ssid/password/列表一起抹，**密码不印**）+ 重启一次。
+   退回这条改动本身：`app.c` 删掉 `&& !have_nvs`、`muse_glue.c` 两处换回 `!WIFI_OVERRIDE`。
+6. **编译期回落改回出厂值**：本机 `build-muse-s3-175-carpet/sdkconfig` 里那条从
+   `ws://10.50.174.165:8443` 改回 `ws://192.168.43.1:8443`（跟踪的 `devices/sdkconfig.carpet` 本来就是它）。
+   改的是本机那一份，所以留了备份 `sdkconfig.bak-20261108`。
+   为什么必须改回去：出厂值等于「手机热点里那个 `.1`」，这才是「操作越少越好」的正解 ——
+   主路一格都不用填，而不是让屏去拨某台笔记本。
+
+### 2. App 侧只改了一句文案
+
+`apps/android/src/main/kotlin/com/carpet/satdemo/app/ui/HomeShell.kt:641` 那句「配对怎么做」还写着
+"再到圆屏上填上面那个接入点地址"，那是换底座之前那块屏的能力，Muse 这块屏做不到（当时也确实没这个口）。
+现在改成：手机开热点 / 放开接入 / 编号已在白名单 → 屏出厂就拨 `.1`，不用填；只有拨不通才去屏上那一格改。
+**没加新按钮新开关**：「允许圆屏接入」（`HomeShell.kt:577` / `DemoRuntime.kt:331`）就是全部。
+
+### 3. 上板称到哪一步（2026-11-08 上午，板子在 COM8）
+
+称的是这一版固件：`app-flash` → `Hash of data verified.`（`D:\dev\esp\flash-carpet.log`），
+开机自报 `ELF file SHA256: 4f6f8b4ad...`、`ESP-IDF: v6.0.1-dirty`。
+下面每一条都是串口原文，抓在 `D:\dev\esp\m1108\*.txt`（读法：`<IDF venv python> tools/sercmd_norst.py COM8 ">…" 0.3 4 文件`，
+不带 `>` 的字符会被当成按键，所以每条都得带 `>`）。
+
+**称到的**
+
+1. 出厂值（§0 主路的前提）：`@url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=0 dialed=0`，
+   `>carpet` 那行也在：`@carpet url=ws://192.168.43.1:8443 src=factory`。
+2. 填错被拒（那一格不是"存了再看运气"）：`>url 192.168.1.17:8443` → `@url set: ESP_ERR_INVALID_ARG`，
+   紧跟的回读还是 `src=factory saved=(none)` —— 没写进去，也没把自己绕进去。
+3. 改地址：`>url ws://192.168.1.17:8443` → `@url set: ESP_OK` → `now=ws://192.168.1.17:8443 src=nvs saved=ws://192.168.1.17:8443`。
+4. **真重启之后还在**（这才叫持久化，软复位不算）：拉一次 RTS 让 EN 断电重启，开机日志里
+   `I (1085) muse_settings: … muse no token, link ws://192.168.1.17:8443`，重启后再 `>url` 仍是 `src=nvs`。
+5. 抹掉回到出厂：`>url clear` → `I (29638) muse_settings: link url: (built-in)` → `src=factory saved=(none)`。
+   **板子离开时停在这一档**，和出厂一致。
+6. Wi-Fi 那条优先级在硬件上真的倒过来了：`I (1923) link.app: saved network beats the built-in creds in NVS, reconnecting (first: 吨吨吨的Mate 30 5G)`。
+   NVS 里存着这部手机早先在设置页填的热点名 —— 那一版填了是不生效的，这正是这次要修的洞；现在它作数了，`aa123` 退成兜底。
+   顺带证明"密码不印"那条：同一个回读只有 `ssid=`，没有 `pass=`。
+7. 上一轮欠的 `>maint` 三条（判据读的都是 `carpet_link_state()` 那个视图 —— 和页面上那两枚点、脸上那一个是同一个来源，不是我另写的一句 if）：
+   - 空屏 `>maint` → `@maint sent=1 view.maint_worried=1 card=养车卡 emotion=担心 face=0 mode=3`；
+     发之前基线是 `mode=1 maint_worried=0`，所以 **1→3（idle→thinking）称到了**。
+   - 挂句子时：`>say`（255 字节那句）之后 `@carpet face=1 mode=4 at=255/255`，此时 `>maint` →
+     `mode=4` 不变 —— **第一道让路称到了**（脸没被搬走）。
+   - `>maint off` → `view.maint_worried=0 emotion=中性 mode=1` —— **第三道搬回 IDLE 称到了**（#34 那个"一直想下去"的坑没复现）。
+
+**没称到的（卡在哪写清楚，别当过了）**
+
+- **`linked=1` 这一条没称到。** 它要屏和服务端在同一个网里，而这块屏自己扫出来的结果是
+  `I (2024) link.wifi: scan complete, 0 APs found`（`country=US ch=1-13`，2.4GHz）—— 这台机器此刻不在任何
+  2.4GHz 网里（电脑连的是 `ChinaNet-FBe9-5G`，S3 没有 5GHz 射频），手机热点也没开。
+  所以 §0 里那句"改地址 → 重启 → 地址还在"称到了，"且 `linked=1`"没有。
+  补它的姿势不用重刷：手机开 **2.4GHz** 热点 → 屏的 WI-FI 那一页连上 → 电脑也连同一个热点 →
+  `simulator/linktest.sh`（电脑当服务端，8443）。那时判据是 `>url` 里 `linked` 从 0 变 1、`dialed=1`，
+  以及 `>carpet` 第一行 `linked=1 contract=v3`。
+- **设置页那一格的长相没称**（Access point 那行的图标、note 两行的换行、填错后琥珀色那 5 秒）。
+  抓屏通道要 IP（`CONFIG_SCREEN_SHOT_PORT=8444`），网不通就没有图，只能靠眼睛的那几条还是纸面推理。
+  称到的是它背后那半条链：那一格写的就是 3~5 走过的那个 NVS key，读写同源。
+- **那枚 12px 琥珀点**同理，等图。
+
+**一次刷机称出来的一件事，记在这儿别再踩**：第一版刷上去开机死循环
+`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`（`ELF dd4b43e42`），
+根因是我在 `carpet_link_start()` 里提前 `url_read()` 了一次 —— 那时 `muse_settings_init()` 还没跑，
+设置模块那把锁还是 NULL。改法不是"加个判空糊过去"，而是回读走 `url_effective()`：
+一次都没拨出去过时，按同一条"先 NVS 再出厂"的规则现算。副产品是网还没起来的时候 `>url`/`>carpet` 也说真话
+（上面第 3 条那次 `dialed=0` 却 `src=nvs`，靠的就是它）。
