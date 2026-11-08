@@ -1294,6 +1294,10 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 home / wifi / muse / ble / sound / battery / sleep / power 八页 + 宫格页 + 车载页，人眼逐张看过
 ——没有豆腐块、没有被省略号截掉的条目。图在 `D:\dev\esp\shots3\`（八页）、`shots4\zh_avatar.png`（宫格）、
 `shots8\zh_shot0.png`（车载页 + 琥珀点）。
+设置主页那张要单独说一句：`shots3\zh_home.png` 抢跑了（截到的是脸页，不是设置主页），
+补拍的在 **`shots9\zh_home.png`** —— 标题「设置」已经是中文（说明标题那档 unscii 真的整档换掉了），
+六行 `Wi-Fi / Muse / 蓝牙 / 声音 / 熄屏 / 电量` 的值 `Mate 60 / 没设置 / 开 / 音量 100% / 2 分钟 / USB`
+全中文、无豆腐块、无省略号。
 **第一版截图就看出一处漏翻**：Muse 页第二行还是英文「Pair in the Muse app」——根因是 `h.detail` / `w.detail`
 那两句整句没走表（它们是 `muse_chat.c` / `muse_glue.c` 写进状态里的句子，不是状态词）。
 补进固件和表（6 条）之后重编、重刷、重截，那一行变成「在 Muse 应用里配对」。
