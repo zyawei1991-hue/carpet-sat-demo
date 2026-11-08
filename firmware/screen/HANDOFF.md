@@ -1477,3 +1477,27 @@ Muse 侧出图走串口触发的 LVGL snapshot —— `>ui.settings=<页>` 选�
 验收按 §4 末尾换过的那条：`git ls-remote --heads git@github.com:…` 与 `git rev-parse HEAD`
 **两边都是 `9bcd8de465354a7796e28b60a4e347dcb70f60d2`**。
 没有 force push、没有改全局 git 配置、没有改 remote，`firmware/screen/app/` 照旧没 add 没删。
+
+### 10. 一处对不上的判断，已称清楚（11-08 晚，另一会话提出）
+
+那边说「本机型构建里抓屏和串口开页都编译不出」，给的行号是
+`esp32/build-muse-s3-175-carpet/sdkconfig:5080 = # CONFIG_LV_USE_SNAPSHOT is not set`。
+**这条在车机这一构里不成立**，三份原文回读：
+
+- `grep LV_USE_SNAPSHOT build-muse-s3-175-carpet/sdkconfig` → `5078:CONFIG_LV_USE_SNAPSHOT=y`
+- `grep LV_USE_SNAPSHOT devices/sdkconfig.carpet` → `28:CONFIG_LV_USE_SNAPSHOT=y`
+- `grep LV_USE_SNAPSHOT build-muse-s3-175/sdkconfig` → `5078:# CONFIG_LV_USE_SNAPSHOT is not set`
+
+也就是说那个"not set"是真的，但它是**不带 `-carpet` 那一份构**；两份的行号都是 5078、
+目录名只差五个字符，读错文件就会得出相反的结论。
+构建脚本那条 defaults 链里 `devices/sdkconfig.muse-bench` 根本没出现
+（`sdkconfig.defaults; …muse; …muse-waveshare-s3-175; …carpet`），所以不是"靠 bench 打开"的。
+图证：这一轮那四张 466×466 的 PNG 就是从 `build-muse-s3-175-carpet` 刷进去的固件上拍的，
+`zh_shot.py` 每页都解出了 `SNAP BEGIN 466 466`（它拿 `SNAP OFF` 时只会印 `no screenshot`）。
+**结论按它给的第二条办**：不用另开 bench 构建、不用 `-d CONFIG_LV_USE_SNAPSHOT=y`，
+理由 + 判定命令 + 那个读错文件的坑都写进 `muse/README.md` §7 了。
+它给的线上格式（`SNAP BEGIN w h 144` / 每行 base64 / 144 字节原始宽 / `SNAP END`）和
+`muse_ui.c` 里 `enum { RAW = 144 }` 那段逐字对过，一致。
+
+COM8 这一段时间归那边跑四个现场验证项，我这边没有正在跑的 flash 或串口命令，
+接下来只改代码、编译、写文档、提交，不开端口。

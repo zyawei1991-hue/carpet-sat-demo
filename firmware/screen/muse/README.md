@@ -591,6 +591,31 @@ PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/lin
   开关是 `devices/sdkconfig.carpet` 里那条 `CONFIG_LV_USE_SNAPSHOT=y`。
   现成的用法别自己写：`tools/zh_shot.py`（一次会话、等启动、逐页 3 秒再按 `p`）。
   回滚到老 `app/` 时那条无鉴权口会跟着回来，所以红线照旧：上展台前改回 0。
+
+- **图形验收走哪一条构（11-08 定，别再让下一个人自己试）**：走**车机这一构本身**，
+  不另开 bench 构建，也不用 `-d CONFIG_LV_USE_SNAPSHOT=y`。
+  开关就在 `devices/sdkconfig.carpet:28` 那一条 `CONFIG_LV_USE_SNAPSHOT=y`，
+  11-08 中文化那轮加进去的，**不是从 `devices/sdkconfig.muse-bench` 继承来的** ——
+  构建脚本那条 defaults 链是
+  `sdkconfig.defaults; devices/sdkconfig.muse; devices/sdkconfig.muse-waveshare-s3-175; devices/sdkconfig.carpet`
+  （前三份都没提这一条，carpet 排最后所以它说了算），`sdkconfig.muse-bench` 根本不在链里。
+  理由：要称的恰恰是中文字形、96 字节折叠、`max_width 130` 那点截断，
+  这三样只在 `CONFIG_MUSE_CARPET_CARDS=y` + `CONFIG_MUSE_UI_LANG_ZH=y` 这套组合下才是真的；
+  换一份配置去拍，拍到的是另一套字体档，绿灯是假的。
+  这一条也不是"产品开关" —— 抓屏只有按 `p` 才走，而 `p` 只能从 USB 串口来，不碰网络。
+  **一个会误判的坑**：判定别看 `esp32/build-muse-s3-175/sdkconfig`（那份 5078 行确实是
+  `# CONFIG_LV_USE_SNAPSHOT is not set`，11-08 就有人读了它然后断言"车机构建里抓屏编译不出"），
+  要看 `esp32/build-muse-s3-175-carpet/sdkconfig:5078` —— 两个目录名只差 `-carpet`，行号都一样。
+  别猜，直接称：按 `p` 回 `SNAP BEGIN w h 144` 就是开着，回 `SNAP OFF` 就是没开
+  （`muse_ui.c:1919 send_snapshot()` 的 `#else` 分支）；`tools/zh_shot.py` 拿到 `SNAP OFF`
+  会印 `no screenshot`，不会塞给你一张空白图。
+  线上格式（`muse_ui.c` 里 `enum { RAW = 144 }`）：`SNAP BEGIN <w> <h> 144` + 每行 base64 的
+  RGB565（一行 144 字节原始宽，为的是塞进驱动那 256 字节 TX ring）+ `SNAP END`，全走 console 口；
+  解码用 `esp32/tools/muse/snap.py` 的 `decode_snapshot`，别自己写。
+  串口开页那几条 bench（`>ui=settings`、`>ui.settings=home wifi muse ble sound sleep battery power`、
+  `>ui.demo=`、`>ui=carpet`）也圈在同一个 `#if LV_USE_SNAPSHOT` 里（`muse_input.c:1038` 起那一段），
+  所以这一构开着它们就一起在；`>carpet` / `>page` / `>url` / `>zh` 那几条回读**不在**这个闸里
+  （`muse_input.c:904` 那句注释就是写这个），关抓屏的构里照样能称链路。
 - Muse 的 App（gadgets.muse.ai）不是硬门槛：屏上 Settings → Wi-Fi 有开关、扫描列表和
   "Other network…" 手输，官方那句写得很明白 —— *"Pair with the Muse app to use your account;
   a device token here overrides it."* 但这台 PC 到 `gadgets.muse.ai`/`api.muse.ai` 要走代理
