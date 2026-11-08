@@ -20,6 +20,7 @@
 | `docs/AVATAR.md` | 「小轨」形象规格：几何、色表、七档情绪姿势。**两台机器照同一份做**，不是各画各的 |
 | `docs/MAINTENANCE.md` | 车况养护推荐的整体设计。跨手机/圆屏/GT1005 三份分工都在这一份里，含工单那 21 字节的编码表 |
 | `docs/VEHICLE-DATA.md` | 车况读数从哪来：OBD 盒子选型、独立胎压传感器、车厂云三条路的对比，含采购四条判据 |
+| `docs/APP-SCREEN-CONNECT.md` | 圆屏接入点：App 侧「配对怎么做」那句待改文案的规格（精确到 文件:行 + 替换句 + 判据），交给改 App 的那台机器执行 |
 | `tools/validate_protocol.py` | 契约校验，CI 入口 |
 | `apps/android/` | Gradle `:app`。手机 App 薄壳（定位、蜂窝探测、展示端服务、按钮） |
 | `core/` | Gradle `:core`。纯 Kotlin JVM，协议 / 链路状态机 / SatelliteModem / DemoEngine |

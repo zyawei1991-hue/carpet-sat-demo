@@ -1,14 +1,19 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..bdc20f0 100644
+index b478d5e..679e06a 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -46,6 +46,17 @@ if(CONFIG_MUSE_ENABLED)
+@@ -46,6 +46,22 @@ if(CONFIG_MUSE_ENABLED)
      else()
          list(APPEND srcs "muse_ui.c" "muse_menu.c" "muse_settings_ui.c" "muse_keypad.c" "muse_lv_mem.c")
      endif()
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
 +        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c")
++        # Chinese for the settings pages and the menu, when CONFIG_MUSE_UI_LANG_ZH
++        # picks it. The table itself is only read then; the file costs nothing
++        # otherwise, and keeping it out of muse_lang.c keeps the host test
++        # (tests/test_muse_lang.py) reading the upstream tables.
++        list(APPEND srcs "carpet/carpet_lang_zh.c")
 +        # 24/20px Chinese for that page: a ~120KB subset, sized by tiny_ttf at run
 +        # time (Muse's own CJK bitmap font only comes in 16px). It is NOT tracked in
 +        # the fork -- copy it in from our repo (firmware/screen/muse/font/) before
@@ -20,7 +25,7 @@ index b478d5e..bdc20f0 100644
      if(CONFIG_MUSE_HATCH)
          list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
-@@ -192,7 +203,11 @@ set(muse_priv_requires
+@@ -192,7 +208,11 @@ set(muse_priv_requires
      esp_driver_pcnt efuse
      # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
      # before Kconfig values exist, so these can't depend on it; only the code does.
@@ -34,7 +39,7 @@ index b478d5e..bdc20f0 100644
  
  idf_component_register(
 diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
-index 588d7c6..75c4bf6 100644
+index 588d7c6..9c454d0 100644
 --- a/esp32/components/muse/Kconfig
 +++ b/esp32/components/muse/Kconfig
 @@ -297,6 +297,20 @@ menu "Muse"
@@ -58,6 +63,37 @@ index 588d7c6..75c4bf6 100644
      config MUSE_LATIN_FONT
          bool "Show Vietnamese and other accented letters in captions"
          depends on MUSE_ENABLED && !MUSE_UI_FREEINK
+@@ -319,7 +333,7 @@ menu "Muse"
+             language you speak to it, and the serial console stays in
+             English for the tools that read it. The button menu and the
+             pairing card are translated; the touch boards' settings pages
+-            aren't yet.
++            aren't yet, except Chinese, which is only there.
+ 
+         config MUSE_UI_LANG_EN
+             bool "English"
+@@ -327,6 +341,21 @@ menu "Muse"
+         config MUSE_UI_LANG_VI
+             bool "Vietnamese"
+             select MUSE_LATIN_FONT
++
++        config MUSE_UI_LANG_ZH
++            bool "Chinese (Simplified)"
++            depends on MUSE_CARPET_CARDS
++            help
++                The button menu, the pairing card and the touch settings
++                pages, in Chinese. Needs the car-link page because that is
++                what puts a Chinese font in the image, and it is 16 px - the
++                only size Chinese draws at here, so the settings page's
++                titles and row names come down to it.
++
++                Its words live in components/muse/carpet/carpet_lang_zh.c,
++                not muse_lang.c: the host test reads that file's three
++                tables and checks every letter against the Vietnamese and
++                Latin fonts, which have no hanzi.
+     endchoice
+ 
+     choice MUSE_JC3248W535_MIC
 diff --git a/esp32/components/muse/carpet/carpet_audio.c b/esp32/components/muse/carpet/carpet_audio.c
 new file mode 100644
 index 0000000..a237347
@@ -2664,6 +2700,375 @@ Z|0avKu&(aJx$s_J^^eq%6DR7#{}14Yax4G<
 literal 0
 HcmV?d00001
 
+diff --git a/esp32/components/muse/carpet/carpet_lang_zh.c b/esp32/components/muse/carpet/carpet_lang_zh.c
+new file mode 100644
+index 0000000..c166772
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_lang_zh.c
+@@ -0,0 +1,299 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "carpet_lang_zh.h"
++
++#include <stdio.h>
++#include <string.h>
++
++#include "lvgl.h"
++
++/*
++ * Looked up by the English the code says, like muse_lang.c. Two rules the
++ * table has to live inside, both from what this screen actually is:
++ *
++ *   Width. A row's name gets about 124 px once its icon and its value label
++ *   (capped at 130 px) have taken theirs, and in the one size Chinese draws
++ *   here - 16 px - that is seven characters. A value gets eight. Every row
++ *   name below is counted, not estimated; the ones that came close went to
++ *   four or five characters instead of six.
++ *
++ *   Glyphs. CONFIG_MUSE_UI_LANG_ZH can only be picked with
++ *   CONFIG_MUSE_CARPET_CARDS, which is the only thing that pulls
++ *   muse_font_cjk_noto_16 into the image. That font is 16 px and covers
++ *   GB2312's 6763 hanzi plus U+3000-30FF and U+FF00-FFEF - so full-width
++ *   punctuation (，。、；：？！（）「」) is there and the general-punctuation
++ *   ellipsis U+2026 and em-dash U+2014 are not. "..." and "-" stay ASCII; a
++ *   missing glyph is a hollow box, and the box is what a viewer remembers.
++ *
++ * The long English help paragraphs are rewritten short rather than translated
++ * line by line: muse_text_showable() folds anything with a non-ASCII byte
++ * through a 96-byte buffer, and a 300-byte paragraph of 16 px Chinese is ten
++ * lines in a 330 px column nobody scrolls on purpose.
++ */
++
++typedef struct {
++    const char *en, *zh;
++} entry_t;
++
++static const entry_t TABLE[] = {
++    /* ---------- the words two pages (and the button menu) share ---------- */
++    { "On", "开" },
++    { "Off", "关" },
++    { "Cancel", "取消" },
++    { "Not set", "未设置" },
++    { "Custom", "自定义" },
++    { "Never", "从不" },
++    { "Battery", "电量" },
++    { "Volume", "音量" },
++    { "Speaker", "扬声器" },
++    { "Brightness", "亮度" },
++    { "Mic gain", "麦克风增益" },
++    { "Auto-sleep", "自动熄屏" },
++    { "Phone setup", "手机设置" },
++    { "Status", "状态" },
++    { "Reset pairing", "重设配对" },
++    { "Screen off", "熄屏" },
++    { "Power off", "关机" },
++    { "Close menu", "关闭菜单" },
++    { "Change", "改" },
++    { "Toggle", "切" },
++    { "Open", "开" },
++    { "Select", "选" },
++    { "Close", "关" },
++    { "Back", "返回" },
++    { "Reset", "重设" },
++
++    /* ---------- page titles; the unscii font has no hanzi at all ---------- */
++    { "SETTINGS", "设置" },
++    { "BLUETOOTH", "蓝牙" },
++    { "SOUND", "声音" },
++    { "SCREEN", "屏幕" },
++    { "AUTO-SLEEP", "自动熄屏" },
++    { "BATTERY", "电量" },
++    { "POWER", "关机" },
++
++    /* ---------- home ---------- */
++    { "Bluetooth", "蓝牙" },
++    { "Sound", "声音" },
++    { "Screen", "屏幕" },
++    { "Sleep", "熄屏" },
++    { "Phone camera", "手机摄像头" },
++    { "Not nearby", "不在附近" },
++    { "Joining", "连接中" },
++    { "Connecting", "连接中" },
++    { "Failed", "失败" },
++    { "Not found", "未找到" },
++    { "Not set up", "没设置" },
++    { "Offline", "离线" },
++    { "offline", "离线" },
++    { "Saved", "已保存" },
++    { "Connected", "已连接" },
++    { "Can't connect", "连不上" },
++    { "Starting", "启动中" },
++    { "Ready to pair", "等着配对" },
++    { "App connected", "应用连上了" },
++    { "Confirm pairing", "确认配对" },
++    { "Online", "在线" },
++    { "Error", "出错" },
++    { "Mic only", "只有麦克风" },
++    { "No audio", "没有音频" },
++    { "Vol %d%%", "音量 %d%%" },
++    { "Muted", "已静音" },
++    { "Ready", "就绪" },
++    { "No phone", "没连手机" },
++
++    /* ---------- Wi-Fi ---------- */
++    { LV_SYMBOL_REFRESH "  Scan for networks", LV_SYMBOL_REFRESH "  搜索网络" },
++    { "Scanning...", "正在搜索..." },
++    { "Other network...", "其他网络" },
++    { "Other network", "其他网络" },
++    { "Access point", "接入点" },
++    { "MAC address", "MAC 地址" },
++    { "Saved networks", "已保存的网络" },
++    { "Tap to forget", "再点一次忘掉" },
++    { "Hidden", "隐藏网络" },
++    { "No networks found", "没搜到网络" },
++    { "Password", "密码" },
++    { "Network name", "网络名称" },
++    { "Empty if it's open", "开放网络留空" },
++    { "Wi-Fi is off", "Wi-Fi 已关掉" },
++    { "No saved networks. Scan and pick one.", "还没有保存的网络，搜索后选一个。" },
++    { "Joining %s\n%s", "正在连接 %s\n%s" },
++    { "Connected to %s\n%s", "已连上 %s\n%s" },
++    { "Connected to %s\n%s  -  %d dBm", "已连上 %s\n%s  -  %d dBm" },
++    { "Couldn't join %s\n%s", "连不上 %s\n%s" },
++    { "No saved network nearby\nLooking again within a minute", "附近没有已保存的网络\n一分钟内自己再找" },
++    /* The second line of those two formats: main/muse_glue.c writes it into
++     * wifi_status.detail, and the page now asks the table for it too. */
++    { "No saved network nearby", "附近没有已保存的网络" },
++    { "Can't join; retrying", "连不上，正在重试" },
++    /* The scan list's right-hand column: a state word and the signal. */
++    { "saved", "已保存" },
++    { "secured", "加密" },
++    { "open", "开放" },
++    { "saved  ", "已保存 " },
++    { "open  ", "开放 " },
++    /* The Screen-Link row: what it says under the row, and the keyboard's hint. */
++    { "Not an address\nUse ws://192.168.43.1:8443", "地址不对\n用 ws://192.168.43.1:8443" },
++    { "Dialed from what you typed here", "屏上填的" },
++    { "Built into the firmware", "固件自带的" },
++    { "ws://phone:8443, empty for the built-in", "ws://phone:8443，留空用自带的" },
++    { "Muse remembers up to 8 networks and joins the strongest one in range. Tap a saved one twice to forget it.",
++      "最多记 8 个网络，自动连最强的。点两次已保存的就忘掉它。" },
++
++    /* ---------- Muse (the cloud pairing page; see HANDOFF's dead list) ------ */
++    { "Muse app: %s\n%s", "Muse 应用：%s\n%s" },
++    /* muse_chat.c / muse_chat_link.c write these into hatch_status.detail, and
++     * the page's second line is that detail. "Connecting..." and "Starting..."
++     * are already above, with the Wi-Fi state words. */
++    { "Pair in the Muse app", "在 Muse 应用里配对" },
++    { "Waiting for Wi-Fi", "等 Wi-Fi 连上" },
++    { "Connects when you talk", "说话时才连接" },
++    { "Through Home Link, text replies", "走 Home Link，只回文字" },
++    { "not paired", "没配对" },
++    { "paired", "已配对" },
++    { "paired with another SDK token, pair again to use this one", "配的是另一个 SDK 令牌，要再配一次" },
++    { "Resetting...", "正在重设..." },
++    { "Tap again to reset", "再点一次重设" },
++    { "Server", "服务器" },
++    { "Muse server", "Muse 服务器" },
++    { "VM ID", "虚拟机" },
++    { "Device token", "设备令牌" },
++    { "SDK token", "SDK 令牌" },
++    { "Test connection", "测试连接" },
++    { "Set", "已设" },
++    { "Set here", "在这儿填的" },
++    { "Not a token", "不是令牌" },
++    { "Empty for the default", "留空用默认" },
++    { "Optional", "可留空" },
++    { "Empty keeps the current one", "留空保持不变" },
++    { "Empty keeps the current one; a new one restarts", "留空保持不变；填新的会重启" },
++    { "Pair with the Muse app to use your account; a device token here overrides it, and a long one is easier to "
++      "send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from gadgets.muse.ai; one set here "
++      "replaces the firmware's. Reset pairing forgets Wi-Fi and the app pairing, then restarts.",
++      "这四格是给 Muse 云端配对用的，车联这条链路用不到，留空就行。" },
++
++    /* ---------- Bluetooth ---------- */
++    { "Forget paired phones", "忘掉配过的手机" },
++    { "Visible as %s", "能被搜到：%s" },
++    { "Phone connected\n%s", "手机已连上\n%s" },
++    { "Paired", "已配对" },
++    { "Waiting for pairing", "等着配对" },
++    { "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, connect, and enter the code "
++      "Muse shows to pair.",
++      "开：手机能搜到它；在浏览器里按屏上显示的码配对。" },
++
++    /* ---------- Sound ---------- */
++    { "Voice notes", "语音留言" },
++    { "Mic level", "麦克风电平" },
++    { "Off: hold yellow to talk live, release to listen; blue ends the call. On: hold yellow to send a voice note. "
++      "Applies to the next call.",
++      "关：按住黄键通话，松手听，蓝键结束。开：按住黄键发语音留言。" },
++    { "Talk at arm's length: the bar should reach green (-30 to -15 dBFS) without going orange.",
++      "隔一条手臂说话：电平条到绿色就好（-30 到 -15 dBFS），别到橙色。" },
++
++    /* ---------- Sleep ---------- */
++    { "30 seconds", "30 秒" },
++    { "1 minute", "1 分钟" },
++    { "2 minutes", "2 分钟" },
++    { "5 minutes", "5 分钟" },
++    { "10 minutes", "10 分钟" },
++    { LV_SYMBOL_EYE_CLOSE "  Sleep now", LV_SYMBOL_EYE_CLOSE "  马上熄屏" },
++    { "Turn the screen off after Muse has been idle for:", "空闲多久之后熄屏：" },
++    { "Tap the screen or press either button to wake.", "碰屏幕或按任意键都能唤醒。" },
++
++    /* ---------- Battery ---------- */
++    { "Used", "已用掉" },
++    { "A full charge", "充满能用" },
++    { "Chip asleep", "打盹时间" },
++    { "Wakes", "唤醒次数" },
++    { "CPU busy", "CPU 占用" },
++    { LV_SYMBOL_REFRESH "  Start over", LV_SYMBOL_REFRESH "  重新计时" },
++    { "No battery", "没有电池" },
++    { "Unplug USB to start measuring.", "拔掉 USB 开始计时。" },
++    { "On battery for %s", "电池供电 %s" },
++    { "Last run: %s on battery", "上次电池供电 %s" },
++    { "None", "无" },
++    { "%d h %d min", "%d 小时 %d 分" },
++    { "%d min", "%d 分" },
++    { "lasts ~%d h", "能用约 %d 小时" },
++    { "%d%% so far", "目前用了 %d%%" },
++    { "measuring", "计时中" },
++    { "Also kept awake by: %s", "还让它醒着：%s" },
++    { "Measures from unplugging USB until it's plugged back in. The gauge moves in 1% steps, so give it a few "
++      "hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.",
++      "拔 USB 起算，插回为止；一格 1%，要几小时才准。" },
++
++    /* ---------- Power ---------- */
++    { "Power Muse off completely?", "要彻底关机吗？" },
++    { LV_SYMBOL_POWER "  Power off", LV_SYMBOL_POWER "  关机" },
++    { "Tap the screen to turn it back on.", "碰屏幕就能再开机。" },
++    { "Press the %s button to turn it back on.", "按 %s 键再开机。" },
++    { "Press the %s button to turn it back on. To just turn the screen off, press the %s button.",
++      "按 %s 键再开机；只想熄屏就按 %s 键。" },
++
++    /* ---------- the text-entry page ---------- */
++    { "Show", "显示" },
++    { "Hide", "隐藏" },
++};
++
++#define N ((int)(sizeof(TABLE) / sizeof(TABLE[0])))
++
++/* Which keys this run has actually drawn, for `>zh`. */
++static uint8_t s_seen[(N + 7) / 8];
++static int s_hits;
++
++const char *carpet_lang_zh(const char *en)
++{
++    for (int i = 0; i < N; i++) {
++        if (!strcmp(TABLE[i].en, en)) {
++            s_seen[i / 8] |= 1 << (i % 8);
++            s_hits++;
++            return TABLE[i].zh;
++        }
++    }
++    return en;
++}
++
++int carpet_lang_zh_entries(void)
++{
++    return N;
++}
++
++/* Keys drawn at least once, not lookups: `s_hits` repeats an entry every tick
++ * a label is refreshed, so counting calls would say thousands for six pages. */
++int carpet_lang_zh_hits(void)
++{
++    int hit = 0;
++    for (int i = 0; i < N; i++) {
++        if (s_seen[i / 8] & (1 << (i % 8))) {
++            hit++;
++        }
++    }
++    return hit;
++}
++
++void carpet_lang_zh_dump(void)
++{
++    for (int i = 0; i < N; i++) {
++        if (!(s_seen[i / 8] & (1 << (i % 8)))) {
++            printf("@zh never: %s\n", TABLE[i].en);
++        }
++    }
++    printf("@zh drawn=%d entries=%d\n", carpet_lang_zh_hits(), N);
++    fflush(stdout);
++}
+diff --git a/esp32/components/muse/carpet/carpet_lang_zh.h b/esp32/components/muse/carpet/carpet_lang_zh.h
+new file mode 100644
+index 0000000..8bec4d4
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_lang_zh.h
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++/*
++ * The Simplified-Chinese strings the touch boards' settings pages draw
++ * (muse_settings_ui.c), selected by CONFIG_MUSE_UI_LANG_ZH.
++ *
++ * It lives here, in carpet/, rather than as another table in muse_lang.c, for
++ * one reason: esp32/tests/test_muse_lang.py reads muse_lang.c and expects to
++ * find exactly its own STATUS/MESSAGES/MENU, then checks every letter of every
++ * translation against the Vietnamese and accented-Latin fonts. Chinese glyphs
++ * are in neither, and a second MENU[] would quietly replace the first in that
++ * test's dictionary - so putting hanzi in muse_lang.c would break a host test
++ * we don't run and stop the Vietnamese table being tested at all. muse_lang.c
++ * only gets the hook: muse_lang_menu() calls this on ZH builds.
++ *
++ * Same contract as muse_lang.h: the code says English, this returns its Chinese
++ * or the same pointer back. A miss is English, never a guess.
++ */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The Chinese of `en`, or `en`. */
++const char *carpet_lang_zh(const char *en);
++
++/* Entries in the table, and how many of them this run has drawn. The count is
++ * a development check only (`>zh`): a label whose English got reworded stops
++ * matching in silence, and a page that kept an English row looks fine until
++ * you ask which keys were never hit. */
++int carpet_lang_zh_entries(void);
++int carpet_lang_zh_hits(void);
++
++/* Every table key this run has never drawn, one per line, then @zh done=<hit>
++ * /<total>. A key here is either a row the page never showed (the Sound page's
++ * notes, an unreachable state) or an English string that drifted from the
++ * table - the second kind is the one to chase. */
++void carpet_lang_zh_dump(void);
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
 index 0000000..5cd8e1b
@@ -4805,21 +5210,24 @@ index 0000000..53f5a9a
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..7ca18e4 100644
+index 7c579bb..250d75e 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -48,6 +48,10 @@
+@@ -48,6 +48,13 @@
  #include "muse_ui.h"
  #include "muse_voice.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"
 +#include "carpet/carpet_page.h"
++#if CONFIG_MUSE_UI_LANG_ZH
++#include "carpet/carpet_lang_zh.h"
++#endif
 +#endif
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +896,104 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +899,117 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -4901,6 +5309,19 @@ index 7c579bb..7ca18e4 100644
 +        carpet_link_url_dump();
 +        return true;
 +    }
++    /* 中文表自检：把这张表里**从没画过**的键逐条打出来，最后报画过几条/共几条。
++     * 截图只看得见他画出来的那些，这一条看的是剩下的 —— 英文原文被改了个词、表却没跟着改，
++     * 屏上只是那一行退回英文，看着像"还剩几行没翻译"，只有这条能把它指出来。
++     * 没开 CONFIG_MUSE_UI_LANG_ZH 时它什么也不做，只说一声。 */
++    if (!strcmp(line, "zh")) {
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_UI_LANG_ZH
++        carpet_lang_zh_dump();
++#else
++        printf("@zh CONFIG_MUSE_UI_LANG_ZH is off\n");
++        fflush(stdout);
++#endif
++        return true;
++    }
 +    /* 把屏上存过的那几个网络抹干净（NVS 里 ssid/password/那一串列表一起抹）。
 +     * 有了 #R2 那条优先级倒置，这是**不重刷就退回编译期那条 SSID** 的唯一口：
 +     * 抹掉之后 NVS 是空的，出厂那条才重新作数。链路和 Wi-Fi 都要重启一次才看得出来，
@@ -4924,7 +5345,7 @@ index 7c579bb..7ca18e4 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1028,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1044,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -4937,6 +5358,74 @@ index 7c579bb..7ca18e4 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
+diff --git a/esp32/components/muse/muse_lang.c b/esp32/components/muse/muse_lang.c
+index 46419e6..da1e3bf 100644
+--- a/esp32/components/muse/muse_lang.c
++++ b/esp32/components/muse/muse_lang.c
+@@ -262,6 +262,63 @@ const lv_font_t *muse_lang_montserrat(const lv_font_t *font)
+     }
+     return font;
+ }
++#elif CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_UI_LANG_ZH
++/*
++ * Chinese, for the car-link build: the button menu, the pairing card and the
++ * touch settings pages. The words are in components/muse/carpet/
++ * carpet_lang_zh.c rather than here, because test_muse_lang.py reads this
++ * file's three tables and checks every letter of them against the Vietnamese
++ * and Latin fonts, which have no hanzi; and a second MENU[] here would
++ * silently replace the Vietnamese one in that test.
++ *
++ * The face keeps English: its status names and captions are what the serial
++ * console shows too, and the tools read that.
++ */
++#include "carpet/carpet_lang_zh.h"
++
++const char *muse_lang_status(const char *en)
++{
++    return en;
++}
++
++const char *muse_lang_message(const char *en)
++{
++    return en;
++}
++
++const char *muse_lang_menu(const char *en)
++{
++    return carpet_lang_zh(en);
++}
++
++/* The one size Chinese comes in, and the only font in the image that has
++ * hanzi: CONFIG_MUSE_CARPET_CARDS selects it. Whatever Montserrat size a
++ * label was built with keeps its own letters, and falls back for a hanzi. */
++#if CONFIG_MUSE_CJK_FONT_NOTO
++LV_FONT_DECLARE(muse_font_cjk_noto_16)
++#endif
++
++const lv_font_t *muse_lang_montserrat(const lv_font_t *font)
++{
++#if CONFIG_MUSE_CJK_FONT_NOTO
++    /* The settings page and the menu use these four; every board that builds
++     * this file has them (lv_conf.h would have to say otherwise). */
++    static const lv_font_t *const SIZES[] = {
++        &lv_font_montserrat_14, &lv_font_montserrat_16, &lv_font_montserrat_20, &lv_font_montserrat_28,
++    };
++    static lv_font_t copies[sizeof(SIZES) / sizeof(SIZES[0])];
++    for (size_t i = 0; i < sizeof(SIZES) / sizeof(SIZES[0]); i++) {
++        if (font == SIZES[i]) {
++            if (!copies[i].get_glyph_dsc) {
++                copies[i] = *font;
++                copies[i].fallback = &muse_font_cjk_noto_16;
++            }
++            return &copies[i];
++        }
++    }
++#endif
++    return font;
++}
+ #else
+ const char *muse_lang_status(const char *en)
+ {
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
 index fd499cd..fe85866 100644
 --- a/esp32/components/muse/muse_settings.c
@@ -5025,10 +5514,18 @@ index 5788e5b..74ef9d0 100644
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..5994452 100644
+index 20c46d3..6b143e2 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
-@@ -45,6 +45,9 @@
+@@ -35,6 +35,7 @@
+ #include "muse_chat.h"
+ #include "muse_input.h"
+ #include "muse_keypad.h"
++#include "muse_lang.h"
+ #include "muse_link.h"
+ #include "muse_settings.h"
+ #include "muse_state.h"
+@@ -45,6 +46,9 @@
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
@@ -5038,7 +5535,7 @@ index 20c46d3..5994452 100644
  
  /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
  #define LIST_W 330
-@@ -107,6 +110,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
+@@ -107,6 +111,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
  static int s_forget_armed = -1;
  static int64_t s_forget_armed_us;
  static char s_join_ssid[MUSE_SSID_MAX + 1];
@@ -5052,7 +5549,115 @@ index 20c46d3..5994452 100644
  
  /* Hatch page. */
  static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
-@@ -973,6 +983,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -166,6 +177,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
+     return font;
+ }
+ 
++/* The font a label gets for the text it's about to show.
++ *
++ * CONFIG_MUSE_UI_LANG_ZH (which only exists beside the car-link page, the one
++ * thing that puts a Chinese font in the image) needs two things the English
++ * build doesn't: every string looked up in the table, and the hanzi drawn in
++ * muse_font_cjk_noto_16 - 16 px, the only size it comes in. A 20 px letter
++ * beside a 16 px hanzi reads as a mistake, so a label that gets hanzi comes
++ * down to 16 px, titles included; the unscii face English titles use has no
++ * hanzi at all and is replaced outright. Icons and the back arrow are LVGL
++ * symbols, not letters, and keep their size. Off, this is settings_font().
++ */
++static const lv_font_t *page_font(const lv_font_t *font, const char *text)
++{
++    font = settings_font(font);
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_UI_LANG_ZH
++    if (text == NULL || !*text) {
++        /* Filled in later: whatever it turns out to say, it needs the CJK
++         * letters behind it, at the size it was already going to be. */
++        return muse_lang_montserrat(font);
++    }
++    if (muse_text_has_cjk(text)) {
++        return muse_lang_montserrat(&lv_font_montserrat_16);
++    }
++#endif
++    return font;
++}
++
+ /* A 172 px portrait panel cannot fit an icon, name and status side by side. */
+ static bool narrow_panel(void)
+ {
+@@ -199,11 +237,17 @@ static int stacked_text_w(void)
+     return (s_tiny ? TINY_LIST_W : muse_board->width - 16) - 20;
+ }
+ 
++/* Every string this page shows goes through muse_lang_menu(), which is the
++ * English text itself until CONFIG_MUSE_UI_LANG_ZH picks it up: a page's
++ * worth of rows, notes, titles and values, and the words the button menu
++ * shares with it. Composed strings (a value snprintf'd into a line) ask for
++ * their format here instead, since that's what's in the table. */
+ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color, const char *text)
+ {
+     char shown[SHOWN_MAX];
++    text = muse_lang_menu(text);
+     lv_obj_t *l = lv_label_create(parent);
+-    lv_obj_set_style_text_font(l, settings_font(font), 0);
++    lv_obj_set_style_text_font(l, page_font(font, text), 0);
+     lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
+     lv_label_set_text(l, muse_text_showable(text, shown, sizeof(shown)));
+     return l;
+@@ -212,7 +256,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
+ static void set_text(lv_obj_t *l, const char *text)
+ {
+     char shown[SHOWN_MAX];
+-    text = muse_text_showable(text, shown, sizeof(shown));
++    text = muse_text_showable(muse_lang_menu(text), shown, sizeof(shown));
+     if (strcmp(lv_label_get_text(l), text) != 0) {
+         lv_label_set_text(l, text);
+     }
+@@ -635,7 +679,7 @@ static void on_text_show(lv_event_t *e)
+     (void)e;
+     bool pw = !lv_textarea_get_password_mode(s_text_ta);
+     lv_textarea_set_password_mode(s_text_ta, pw);
+-    lv_label_set_text(lv_obj_get_child(s_text_show, 0), pw ? "Show" : "Hide");
++    lv_label_set_text(lv_obj_get_child(s_text_show, 0), muse_lang_menu(pw ? "Show" : "Hide"));
+ }
+ 
+ /* Beside the keyboard's field, a button to show a password. */
+@@ -752,7 +796,7 @@ static void build_text_page(lv_obj_t *tile)
+     int top = text_y(98);
+     if (narrow_panel()) {
+         /* Portrait panels need a header inside the screen, not the round layout. */
+-        lv_obj_set_style_text_font(s_text_title, &lv_font_montserrat_16, 0);
++        lv_obj_set_style_text_font(s_text_title, muse_lang_montserrat(&lv_font_montserrat_16), 0);
+         single_line(s_text_title, muse_board->width - 16);
+         lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
+         lv_obj_set_width(s_text_ta, muse_board->width - 60);
+@@ -791,6 +835,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+     lv_textarea_set_max_length(s_text_ta, max_len);
+     lv_textarea_set_password_mode(s_text_ta, password);
+     lv_textarea_set_text(s_text_ta, initial ? initial : "");
++    /* The hint is translated, and Chinese draws in the one 16 px face, so
++     * this label's font follows its text the way label()'s does. */
++    if (hint) {
++        hint = muse_lang_menu(hint);
++    }
++    lv_obj_set_style_text_font(s_text_ta, page_font(&lv_font_montserrat_16, hint), LV_PART_TEXTAREA_PLACEHOLDER);
+     lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
+     if (s_text_kp) {
+         muse_keypad_reset(s_text_kp, password);
+@@ -944,10 +994,12 @@ static bool rebuild_scan_list(void)
+         bool saved = is_saved(s_aps[i].ssid);
+         saved_seen |= saved;
+         char buf[24];
++        /* The state word comes from the table; the signal after it doesn't. */
+         if (muse_board->epaper) {
+-            snprintf(buf, sizeof(buf), "%s", saved ? "saved" : s_aps[i].secure ? "secured" : "open");
++            snprintf(buf, sizeof(buf), "%s", muse_lang_menu(saved ? "saved" : s_aps[i].secure ? "secured" : "open"));
+         } else {
+-            snprintf(buf, sizeof(buf), "%s%d dBm", saved ? "saved  " : (s_aps[i].secure ? "" : "open  "), s_aps[i].rssi);
++            const char *word = muse_lang_menu(saved ? "saved  " : s_aps[i].secure ? "" : "open  ");
++            snprintf(buf, sizeof(buf), "%s%d dBm", word, s_aps[i].rssi);
+         }
+         lv_label_set_text(v, buf);
+     }
+@@ -973,6 +1025,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -5086,7 +5691,7 @@ index 20c46d3..5994452 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1025,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1067,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -5102,7 +5707,44 @@ index 20c46d3..5994452 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1046,6 +1092,23 @@ static void tick_wifi(void)
+@@ -1006,27 +1094,29 @@ static void tick_wifi(void)
+     char buf[128];
+     switch (w.state) {
+     case MUSE_WIFI_OFF:
+-        strlcpy(buf, "Wi-Fi is off", sizeof(buf));
++        strlcpy(buf, muse_lang_menu("Wi-Fi is off"), sizeof(buf));
+         break;
+     case MUSE_WIFI_NO_NETWORK:
+-        strlcpy(buf, "No saved networks. Scan and pick one.", sizeof(buf));
++        strlcpy(buf, muse_lang_menu("No saved networks. Scan and pick one."), sizeof(buf));
+         break;
+     case MUSE_WIFI_CONNECTING:
+-        snprintf(buf, sizeof(buf), "Joining %s\n%s", w.ssid, w.detail);
++        /* w.detail is a sentence the glue wrote ("Joining..."), not an SSID,
++         * so it goes through the table like the state words do. */
++        snprintf(buf, sizeof(buf), muse_lang_menu("Joining %s\n%s"), w.ssid, muse_lang_menu(w.detail));
+         break;
+     case MUSE_WIFI_CONNECTED:
+         if (muse_board->epaper) {
+-            snprintf(buf, sizeof(buf), "Connected to %s\n%s", w.ssid, w.ip);
++            snprintf(buf, sizeof(buf), muse_lang_menu("Connected to %s\n%s"), w.ssid, w.ip);
+         } else {
+-            snprintf(buf, sizeof(buf), "Connected to %s\n%s  -  %d dBm", w.ssid, w.ip, w.rssi);
++            snprintf(buf, sizeof(buf), muse_lang_menu("Connected to %s\n%s  -  %d dBm"), w.ssid, w.ip, w.rssi);
+         }
+         break;
+     case MUSE_WIFI_NOT_NEARBY:
+-        strlcpy(buf, "No saved network nearby\nLooking again within a minute", sizeof(buf));
++        strlcpy(buf, muse_lang_menu("No saved network nearby\nLooking again within a minute"), sizeof(buf));
+         break;
+     case MUSE_WIFI_FAILED:
+     default:
+-        snprintf(buf, sizeof(buf), "Couldn't join %s\n%s", w.ssid, w.detail);
++        snprintf(buf, sizeof(buf), muse_lang_menu("Couldn't join %s\n%s"), w.ssid, muse_lang_menu(w.detail));
+         break;
+     }
+     set_text(s_wifi_status, buf);
+@@ -1046,6 +1136,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -5117,7 +5759,7 @@ index 20c46d3..5994452 100644
 +        } else {
 +            char line[MUSE_LINK_URL_MAX + 48];
 +            snprintf(line, sizeof(line), "%s\n%s", url,
-+                     from_nvs ? "Dialed from what you typed here" : "Built into the firmware");
++                     muse_lang_menu(from_nvs ? "Dialed from what you typed here" : "Built into the firmware"));
 +            set_text(s_wifi_url_note, line);
 +            lv_obj_set_style_text_color(s_wifi_url_note, lv_color_hex(COLOR_DIM), 0);
 +        }
@@ -5126,6 +5768,120 @@ index 20c46d3..5994452 100644
  }
  
  /* ---------- Hatch ---------- */
+@@ -1142,7 +1249,8 @@ static void tick_hatch(void)
+     const char *paired = !muse_link_hatch_linked()    ? "not paired"
+                          : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
+                                                          : "paired";
+-    snprintf(link, sizeof(link), "Muse app: %s\n%s", paired, muse_link_state_name(muse_link_state()));
++    snprintf(link, sizeof(link), muse_lang_menu("Muse app: %s\n%s"), muse_lang_menu(paired),
++             muse_lang_menu(muse_link_state_name(muse_link_state())));
+     set_text(s_link_status, link);
+     if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
+         s_link_reset_armed_us = 0;
+@@ -1153,9 +1261,13 @@ static void tick_hatch(void)
+     muse_hatch_status(&h);
+     char buf[96];
+     if (h.detail[0]) {
+-        snprintf(buf, sizeof(buf), "%s\n%s", muse_hatch_state_name(h.state), h.detail);
++        /* The detail is a sentence muse_chat.c wrote, not a state word, so it
++         * needs the table too - "Pair in the Muse app" is the one this page
++         * shows before anyone has an account. */
++        snprintf(buf, sizeof(buf), "%s\n%s", muse_lang_menu(muse_hatch_state_name(h.state)),
++                 muse_lang_menu(h.detail));
+     } else {
+-        strlcpy(buf, muse_hatch_state_name(h.state), sizeof(buf));
++        strlcpy(buf, muse_lang_menu(muse_hatch_state_name(h.state)), sizeof(buf));
+     }
+     set_text(s_hatch_status, buf);
+     lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
+@@ -1218,11 +1330,12 @@ static void tick_ble(void)
+         strlcpy(buf, "Off", sizeof(buf));
+         break;
+     case MUSE_BLE_ADVERTISING:
+-        snprintf(buf, sizeof(buf), "Visible as %s", b.name);
++        snprintf(buf, sizeof(buf), muse_lang_menu("Visible as %s"), b.name);
+         break;
+     case MUSE_BLE_CONNECTED:
+     default:
+-        snprintf(buf, sizeof(buf), "Phone connected\n%s", b.secure ? "Paired" : "Waiting for pairing");
++        snprintf(buf, sizeof(buf), muse_lang_menu("Phone connected\n%s"),
++                 muse_lang_menu(b.secure ? "Paired" : "Waiting for pairing"));
+         break;
+     }
+     set_text(s_ble_status, buf);
+@@ -1235,10 +1348,12 @@ static void tick_ble(void)
+ 
+ /* ---------- Sound ---------- */
+ 
++/* The value beside a slider or a row: "Vol 60%", "2 minutes". Its format
++ * comes from the table, so the words around the number come with it. */
+ static void set_val(lv_obj_t *l, const char *fmt, int v)
+ {
+     char buf[16];
+-    snprintf(buf, sizeof(buf), fmt, v);
++    snprintf(buf, sizeof(buf), muse_lang_menu(fmt), v);
+     set_text(l, buf);
+ }
+ 
+@@ -1468,14 +1583,14 @@ static void tick_battery(void)
+ 
+     int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
+     if (h) {
+-        snprintf(t, sizeof(t), "%d h %d min", h, m);
++        snprintf(t, sizeof(t), muse_lang_menu("%d h %d min"), h, m);
+     } else {
+-        snprintf(t, sizeof(t), "%d min", m);
++        snprintf(t, sizeof(t), muse_lang_menu("%d min"), m);
+     }
+     if (!b.started) {
+-        strlcpy(buf, p.battery_pct < 0 ? "No battery" : "Unplug USB to start measuring.", sizeof(buf));
++        strlcpy(buf, muse_lang_menu(p.battery_pct < 0 ? "No battery" : "Unplug USB to start measuring."), sizeof(buf));
+     } else {
+-        snprintf(buf, sizeof(buf), b.running ? "On battery for %s" : "Last run: %s on battery", t);
++        snprintf(buf, sizeof(buf), muse_lang_menu(b.running ? "On battery for %s" : "Last run: %s on battery"), t);
+     }
+     set_text(s_batt_status, buf);
+ 
+@@ -1496,10 +1611,10 @@ static void tick_battery(void)
+     } else if (muse_battery_drain(&b, &rate10, &full_h)) {
+         snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
+         set_text(s_batt_drain, buf);
+-        snprintf(buf, sizeof(buf), "lasts ~%d h", full_h);
++        snprintf(buf, sizeof(buf), muse_lang_menu("lasts ~%d h"), full_h);
+         set_text(s_batt_full, buf);
+     } else {
+-        snprintf(buf, sizeof(buf), "%d%% so far", used > 0 ? used : 0);
++        snprintf(buf, sizeof(buf), muse_lang_menu("%d%% so far"), used > 0 ? used : 0);
+         set_text(s_batt_drain, buf);
+         set_text(s_batt_full, "measuring");
+     }
+@@ -1516,7 +1631,7 @@ static void tick_battery(void)
+     }
+     buf[0] = '\0';
+     if (b.started && b.awake[0]) {
+-        snprintf(buf, sizeof(buf), "Also kept awake by: %s", b.awake);
++        snprintf(buf, sizeof(buf), muse_lang_menu("Also kept awake by: %s"), b.awake);
+     }
+     set_text(s_batt_awake, buf);
+ }
+@@ -1543,13 +1658,14 @@ static void build_power_page(lv_obj_t *tile)
+     const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
+     if (power && !strcmp(power, "screen")) {
+         /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
+-        snprintf(text, sizeof(text), "Tap the screen to turn it back on.");
++        strlcpy(text, muse_lang_menu("Tap the screen to turn it back on."), sizeof(text));
+     } else if (sleep) {
+-        snprintf(text, sizeof(text), "Press the %s button to turn it back on. To just turn the screen off, press the %s button.",
++        snprintf(text, sizeof(text),
++                 muse_lang_menu("Press the %s button to turn it back on. To just turn the screen off, press the %s button."),
+                  power, sleep);
+     } else {
+         /* No button turns the screen off (the 1.85C's BOOT talks). */
+-        snprintf(text, sizeof(text), "Press the %s button to turn it back on.", power);
++        snprintf(text, sizeof(text), muse_lang_menu("Press the %s button to turn it back on."), power);
+     }
+     note(list, text);
+ }
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
 index 4a98f64..72b6797 100644
 --- a/esp32/components/muse/muse_ui.c
@@ -5425,10 +6181,10 @@ index a671bbc..857c011 100644
  #endif
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
-index 0000000..358eeb1
+index 0000000..fd5ea98
 --- /dev/null
 +++ b/esp32/devices/sdkconfig.carpet
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,46 @@
 +# 车联（Screen-Link）覆盖层：叠在 devices/sdkconfig.muse-waveshare-s3-175 之后。
 +#
 +# 打开它就有的两件事：
@@ -5441,6 +6197,22 @@ index 0000000..358eeb1
 +# 我们的改动一行都不进二进制。
 +
 +CONFIG_MUSE_CARPET_CARDS=y
++
++# 设置页、按钮菜单和配对卡片的中文（MUSE_UI_LANG_ZH 只有叠了上面那条才选得上，
++# 因为只有那条把 910 KB 那份中文字体弄进镜像）。
++#   词表在 components/muse/carpet/carpet_lang_zh.c，不在 muse_lang.c：
++#   上游那条 host 测试 tests/test_muse_lang.py 只认 muse_lang.c 里它自己的三张表，
++#   还拿越南语和带音标的拉丁字体去对每个字形 —— 那两份字体里没有汉字。
++#   字体只有 16 px 这一档，所以这一页凡是带汉字的标签都降到 16 px（标题那档
++#   unscii 直接换掉）；车联页那 24/20 px 是另一份 tiny_ttf 子集，不通用。
++# 想要英文就把这行删了或改成 # ... is not set：查表原样返回英文，和上游一致。
++CONFIG_MUSE_UI_LANG_ZH=y
++
++# 截图验收用的：串口里按 `p`（tools/muse/snap.py）把当前屏打成 base64 的 RGB565。
++# 中文这层是**看图才能定**的——有没有豆腐块、哪条被省略号截了，编译过说明不了。
++# 代价照 sdkconfig.muse-bench 那句说的：不到 1KB 代码，加上截那一张时要一份和屏
++# 同大小的缓冲（466x466 的 RGB565 约 434 KB，截完就还）。和 bench 那份是同一个开关。
++CONFIG_LV_USE_SNAPSHOT=y
 +
 +# 车联页的字不能停在 16 px：Muse 那份中文是位图字体，只有这一档，字号改不动，
 +# 隔着两米读不了。这一页自己带一份 90~120KB 的 TTF 子集（carpet/carpet_font.ttf，

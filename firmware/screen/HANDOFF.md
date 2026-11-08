@@ -1199,12 +1199,16 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
    为什么必须改回去：出厂值等于「手机热点里那个 `.1`」，这才是「操作越少越好」的正解 ——
    主路一格都不用填，而不是让屏去拨某台笔记本。
 
-### 2. App 侧只改了一句文案
+### 2. App 侧：这一轮**不动代码**，改成交付文档
 
-`apps/android/src/main/kotlin/com/carpet/satdemo/app/ui/HomeShell.kt:641` 那句「配对怎么做」还写着
-"再到圆屏上填上面那个接入点地址"，那是换底座之前那块屏的能力，Muse 这块屏做不到（当时也确实没这个口）。
-现在改成：手机开热点 / 放开接入 / 编号已在白名单 → 屏出厂就拨 `.1`，不用填；只有拨不通才去屏上那一格改。
-**没加新按钮新开关**：「允许圆屏接入」（`HomeShell.kt:577` / `DemoRuntime.kt:331`）就是全部。
+上面那份提交里我确实改过 `HomeShell.kt:641` 那句「配对怎么做」。这一轮按新规矩**回退了**——
+`apps/android/` 一个字都不由我改，改法写成文档交给另一个 agent 执行：
+**`docs/APP-SCREEN-CONNECT.md`**，精确到文件:行、判据、验收，不写背景故事。
+
+要改的那一句现在是（`HomeShell.kt:641`）：「手机这边放开接入、把圆屏编号加进白名单，再到圆屏上填上面那个接入点地址。」
+——「再到圆屏上填」是换底座之前那块屏的能力，Muse 这块屏默认路径**不需要填任何东西**。
+文档里给了直接替换的那一句，以及三条约束：除那一句之外 App 不加新按钮、不加新开关；白名单已经带着 `WS175B-A3F7`；长按复制是建议不是必做。
+「允许圆屏接入」（`HomeShell.kt:577` / `DemoRuntime.kt:331`）就是全部。
 
 ### 3. 上板称到哪一步（2026-11-08 上午，板子在 COM8）
 
@@ -1236,17 +1240,11 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 
 **没称到的（卡在哪写清楚，别当过了）**
 
-- **`linked=1` 这一条没称到。** 它要屏和服务端在同一个网里，而这块屏自己扫出来的结果是
-  `I (2024) link.wifi: scan complete, 0 APs found`（`country=US ch=1-13`，2.4GHz）—— 这台机器此刻不在任何
-  2.4GHz 网里（电脑连的是 `ChinaNet-FBe9-5G`，S3 没有 5GHz 射频），手机热点也没开。
-  所以 §0 里那句"改地址 → 重启 → 地址还在"称到了，"且 `linked=1`"没有。
-  补它的姿势不用重刷：手机开 **2.4GHz** 热点 → 屏的 WI-FI 那一页连上 → 电脑也连同一个热点 →
-  `simulator/linktest.sh`（电脑当服务端，8443）。那时判据是 `>url` 里 `linked` 从 0 变 1、`dialed=1`，
-  以及 `>carpet` 第一行 `linked=1 contract=v3`。
-- **设置页那一格的长相没称**（Access point 那行的图标、note 两行的换行、填错后琥珀色那 5 秒）。
-  抓屏通道要 IP（`CONFIG_SCREEN_SHOT_PORT=8444`），网不通就没有图，只能靠眼睛的那几条还是纸面推理。
-  称到的是它背后那半条链：那一格写的就是 3~5 走过的那个 NVS key，读写同源。
-- **那枚 12px 琥珀点**同理，等图。
+- 上面第 4 条当时只称到"地址还在"，**`linked=1` 那半是当天下午补称的**，见 §5。
+- **WI-FI 页「接入点」那一行的长相没出图**：它在折叠区以下，要手指往上滑才露出来，
+  而串口这边没有滚动旋钮（`ui.settings=` 只能选页，不能滚），所以那一行和它弹出的键盘页没截到。
+  称到的是它背后那半条链：那一格写的就是 3~5 走过的那个 NVS key，读写同源；
+  文案走的表和字体档和已出图的同类行完全同一条。
 
 **一次刷机称出来的一件事，记在这儿别再踩**：第一版刷上去开机死循环
 `assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`（`ELF dd4b43e42`），
@@ -1254,6 +1252,83 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 设置模块那把锁还是 NULL。改法不是"加个判空糊过去"，而是回读走 `url_effective()`：
 一次都没拨出去过时，按同一条"先 NVS 再出厂"的规则现算。副产品是网还没起来的时候 `>url`/`>carpet` 也说真话
 （上面第 3 条那次 `dialed=0` 却 `src=nvs`，靠的就是它）。
+
+## 追加（2026-11-08 下午）：`linked=1` 补称到了，设置页整片中文化，靠截图抓出一处漏翻
+
+### 5. `linked=1` —— 上午那条"没称到"补上了
+
+补它的姿势不需要手机热点，也不需要重刷：**服务端就用彩排台**（`./gradlew :simulator:run --args="--hold 9"`，
+`DemoDriver` 把 `ScreenLinkServer` 绑在 `InetSocketAddress(8443)`，通配地址）。
+屏连的是手机热点 `Mate 60`（`192.168.43.13`），电脑在 `192.168.1.17`，两边隔着 NAT 但热点放行了这条入站——
+所以上午那句"要屏和服务端在同一个网里"是**我当时判断错了条件**，实际拦路的是电脑自己没起服务端，不是网段。
+
+`>url ws://192.168.1.17:8443` → 按一次 DTR/RTS 冷复位 → 重启后回读（串口原文）：
+
+```
+@carpet url=ws://192.168.1.17:8443 src=nvs
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0
+```
+
+**"改地址 → 真重启 → 地址还在 **且真的拨通了**"这一整条现在称到了**，用的正是 §0 说的那条不用刷手机的路。
+脚本 `firmware/screen/tools/url_persist.py`（一次会话里改地址、脉冲复位、等 15 秒、回读）。
+
+### 6. 设置页中文化（`CONFIG_MUSE_UI_LANG_ZH`）
+
+按"最干净的那条"落：不就地替换英文串，加一档 `MUSE_UI_LANG_ZH`（`depends on MUSE_CARPET_CARDS`），
+把设置页文案接进 `muse_lang_menu()` —— 表查不到就原样返回英文，所以**选 EN 时天然等于上游**，
+§2 那条 `CONFIG_MUSE_CARPET_CARDS=n ≡ 上游` 的等价性没被破坏；新增块全部圈在 `#if CONFIG_MUSE_CARPET_CARDS` 里。
+
+三个坑都按预先称过的处理了：
+
+1. **字体**：设置页原本不画任何中日韩——标题是 `lv_font_unscii_16`，正文 Montserrat 16/20/28。
+   照 `muse_lang.c` 里越南语那份 `copies` 的做法给这几档挂 fallback，**标题那档 unscii 整体换成带 fallback 的一档**
+   （它是点阵字，挂不上 CJK）。图里能用的汉字只有 16 px 那一档，所以定了一条：**中文一律走 16 px Noto，
+   不追求和英文同字号**——20 px 那档没有汉字子集，为它重生成词表会把字库撑大，而 16 px 在这块 466×466 圆屏上够读。
+2. **长串**：note 那一档 `SHOWN_MAX 96`，长尾注释重写成短句。
+3. **宽度**：`LIST_W 330`、值那一档 `max_width 130` ⇒ 约 124 px ⇒ 20 px 英文约 12 个字母，而 Noto 16 px 的
+   `adv_w=256` 正好 16.0 px/字 ⇒ **六个汉字**。所以每一条都数了字数，由 `tools/check_zh_table.py` 机器称：
+   五项检查（表内中文按像素预算逐条量、符号串 `LV_SYMBOL_x` 先换成码位、注释里的引号不再被当字符串、
+   经变量到达的键按最紧的 124 px 判、note 档折两行合计不超 660 px），现在 `entries: 159 … problems: 0`。
+
+**验收不是只看编译过**：`tools/zh_shot.py` 一次串口会话里逐页 `>ui.settings=<page>` + `p` 出图，
+home / wifi / muse / ble / sound / battery / sleep / power 八页 + 宫格页 + 车载页，人眼逐张看过
+——没有豆腐块、没有被省略号截掉的条目。图在 `D:\dev\esp\shots3\`（八页）、`shots4\zh_avatar.png`（宫格）、
+`shots8\zh_shot0.png`（车载页 + 琥珀点）。
+**第一版截图就看出一处漏翻**：Muse 页第二行还是英文「Pair in the Muse app」——根因是 `h.detail` / `w.detail`
+那两句整句没走表（它们是 `muse_chat.c` / `muse_glue.c` 写进状态里的句子，不是状态词）。
+补进固件和表（6 条）之后重编、重刷、重截，那一行变成「在 Muse 应用里配对」。
+
+**截图这一路的坑**：Windows 上开串口会脉冲 DTR/RTS 把芯片复位（`snap.py` 那句 termios HUPCL 只对 POSIX 有效），
+所以每开一次口都称到的是"刚开机那半秒、页面还没填值"的图，看着像漏翻其实是抢跑。
+`zh_shot.py` 的写法是：开一次口 → `rd(12, b"muse:")` 等它起来 → 每页发完命令等 3 秒再按 `p`。
+
+`>maint` 那两条判据（欠的）也在这轮称完，串口原文：
+
+```
+@maint sent=1 view.maint_worried=1 card=养车卡 emotion=担心 face=0 mode=3   （空屏：1→3 让路成立）
+@maint sent=1 view.maint_worried=1 card=养车卡 emotion=担心 face=1 mode=4   （句子在时：mode 不动，脸没被搬走）
+```
+
+第二句要先 `>say` 一句足够长的话（那次是 276 字节）——18 字节那句放完了 `face` 已经掉回 0，
+一开始据此误判成 FAIL，重称才对。`>maint off` → `mode=1`。
+`shots8\zh_shot0.png` 是它的图证：「对话」行前那枚 12px 琥珀点亮着，同时回读 `maint_worried=1`。
+（拍这张要先停掉彩排台：它每推一帧都会用 `frame_maint_worried()` 重算那个布尔记号，把 `>maint` 造的那帧冲掉。）
+
+### 7. 死项清单（给拍板用，本轮一条都没删，全部翻成中文）
+
+设置页里这些条目按"还有没有活的读点"分四档，位置都是 `muse_settings_ui.c` 的行号：
+
+| 条目 | 档 | 还活着的读点 / 为什么是死的 |
+| --- | --- | --- |
+| `Phone camera`（1700-1704） | **没编进来** | `# CONFIG_MUSE_VIDEO is not set`（`sdkconfig:4269`），那一行整块在 `#if` 外，屏上根本不会出现 |
+| `Voice notes`（1411-1415） | **没编进来** | `# CONFIG_MUSE_BOARD_M5STACK_STOPWATCH is not set`（4231）、`# CONFIG_MUSE_REALTIME_VOICE is not set`（4265） |
+| `Phone setup`（1310） | **半死** | 开机时已注册就被强清（`main/muse_glue.c:519`），真正读它的只剩 `muse_ble.c:334/354` 那两道闸 |
+| `Server` / `VM ID` / `Device token` / `SDK token` | **活着，但和车联无关** | `CONFIG_MUSE_HATCH=y`（4263）；读点在 `muse_chat_session.cpp:807/823/924`、`muse_ble.c:84-85`、`muse_link.c:71-83` —— 走的是 Muse 云配对那条，不是手机连屏这条 |
+| `MAC address`（1079）、`Mic level`（1427） | **只读** | 没有写口，纯显示 |
+| Wi-Fi / 接入点 / 蓝牙 / 声音 / 睡眠 / 电量 那几组 | **真有用** | 就是这一轮 R1/R2 和现场要用的那些 |
+
+`>status` 现在自报 `"chat":true`、`hatch.state:"Not set up"` —— 也就是说 hatch 那一组虽然编进来了，
+这台机器上没配过账号，屏上那四格填了也不会影响手机连屏。撤不撤由你定，本轮只做翻译和记账。
 
 ### 4. 同步到哪一步（11-08 这次推不出去，原因和昨天正好反过来）
 
@@ -1273,3 +1348,18 @@ cd D:/dev/projects/carpet-sat-demo
 git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet-sat-demo.git main:main
 git -c http.proxy= -c https.proxy= fetch origin main && git log --oneline origin/main..HEAD   # 必须为空
 ```
+
+### 8. 这一轮的同步
+
+本轮改动分两个提交：一个固件+文档（`muse/muse-carpet.patch` 重打到 6,367 行、`muse/README.md` §2 的数、
+这份 HANDOFF、`docs/APP-SCREEN-CONNECT.md`、`tools/` 那四个脚本），一个把 `HomeShell.kt` 回退回
+658673d 那一句（按"App 侧不动代码"的新规矩，`7e9c73e` 里那处 App 改动撤销；不改历史、不 force push，
+所以历史上留了"改了又回退"两笔，树是干净的）。
+
+提交前跑的：`tools/check_zh_table.py` → `entries: 159 … problems: 0`；
+`esp32/tests/test_muse_lang.py` → 7 条 OK；`./gradlew :core:test --rerun` → 305 条 0 失败 0 错误，
+其中 `SchemaDriftTest` 13 条（它有一条直接读这份新 patch 里的 `UI_CARD`）；
+干净树 `git apply --check --binary` + 真 `git apply` + 解出来 `"Pair in the Muse app"` 在 → worktree 删掉。
+
+推送仍走那条带 `-c http.proxy= -c https.proxy=` 的直连命令（见上面 §4 末尾那两行），推完自己称
+`git log --oneline origin/main..HEAD` 必须为空；称不空就是没推上去，如实写在这儿。

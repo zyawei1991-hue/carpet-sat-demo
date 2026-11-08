@@ -25,36 +25,41 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 18 个文件、3005 行新增 / 34 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，5,595 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 重打后实读的）：
+- 我们的全部改动 = 21 个文件、3554 行新增 / 64 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，6,367 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 设置页中文化那轮重打后实读的）：
   ```
-  esp32/components/muse/CMakeLists.txt       |  17 +-   (+carpet_audio.c 那行 + embed 那行)
-  esp32/components/muse/Kconfig              |  14 +
+  esp32/components/muse/CMakeLists.txt       |  22 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行)
+  esp32/components/muse/Kconfig              |  31 +-   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
+  esp32/components/muse/carpet/carpet_lang_zh.c | 299 +   (新，「英文串→中文」那张表 159 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句)
+  esp32/components/muse/carpet/carpet_lang_zh.h |  58 +   (新)
   esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
   esp32/components/muse/carpet/carpet_link.c | 1041 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump`)
   esp32/components/muse/carpet/carpet_link.h | 149 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
-  esp32/components/muse/muse_input.c         | 108 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`)
+  esp32/components/muse/muse_input.c         | 124 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读)
+  esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_settings.c      |  30 +-  (11-08 新入列：NVS 多一条 `link_url`，读写各一个函数)
   esp32/components/muse/muse_settings.h      |   9 +   (11-08 新入列：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头)
-  esp32/components/muse/muse_settings_ui.c   |  63 +   (11-08 新入列：WI-FI 子页多一行「Access point」，复用现成的 `open_text` 键盘)
+  esp32/components/muse/muse_settings_ui.c   | 174 +-  (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
-  esp32/devices/sdkconfig.carpet             |  30 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值)
+  esp32/devices/sdkconfig.carpet             |  46 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
   esp32/main/app.c                           |  35 +-  (11-08 新入列：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
   esp32/main/muse_glue.c                     |  24 +-   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi")
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，18 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-08 这天打了两次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
+  再 `git apply`，21 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  2026-11-08 这天打了三次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
   （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
   里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
-  再打第二次就是上面这组 5,595 行。两次都走同一条验法：`git apply --check` 过 → 真 `git apply` 过 →
-  解出来 `carpet_link.c` 1041 行 / 字库 154,528 字节 → worktree 删掉。
+  再打第二次是 5,595 行那组；第三次收进设置页中文化那一整块（`MUSE_UI_LANG_ZH` + `carpet_lang_zh.c/h`
+  + `muse_lang.c` 的字体 fallback + `muse_settings_ui.c` 接表 + 6 条 detail 整句），就是上面这组 6,367 行。
+  三次都走同一条验法：`git apply --check --binary` 过 → 真 `git apply` 过 →
+  解出来 `carpet_link.c` 1041 行 / 字库 154,528 字节 / `carpet_lang_zh.c` 里 `"Pair in the Muse app"` 在 → worktree 删掉。
   `:core` 的 `SchemaDriftTest` 13 条、`:core:test` 305 条同一轮实跑（`--rerun`，不吃缓存）全 PASSED —— 其中 `SchemaDriftTest` 有一条是**直接读这份 patch 里的 `UI_CARD` 表**
   去硬比 schema 和 Kotlin 那份枚举的，所以它绿了就说明新补丁真的被读了，不是在原地打转。
   每次改动都重打并在干净树上验一遍，一轮记一笔：
@@ -94,6 +99,26 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     （预算 3800，屏侧 buffer 4096）。**屏那一半还没上板**：环形缓冲、预缓冲 6400 字节起播、
     真口型（`muse_audio_level`）、翻页跟着播放位置这四条现在是代码 + 编译通过，判据要在板子上看
     `>audtest 3` 印出来的 `@audio at …/… level …` 那几行，以及带 `--voice` 的彩排台推一句真答句。
+  - 2026-11-08 接入点地址运行期可设（R1~R4）这轮 —— 干净树 `git apply --check --binary` 过、真 `git apply` 过。
+    **板上称到**：`>url ws://192.168.1.17:8443` 之后按 DTR/RTS 冷复位，重启回读
+    `@carpet url=ws://192.168.1.17:8443 src=nvs`（不再是 `src=factory`），且彩排台在 PC 上起着时
+    `@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1` —— 地址活的重启还在、而且真的拨通了。
+    出厂那条 `ws://192.168.43.1:8443` 对应 `src=factory`，即"没填过就是 R4 那条兜底"，两者是同一条。
+  - 2026-11-08 设置页中文化这轮 —— 干净树 `git apply --check --binary` 过、真 `git apply` 解出来
+    `carpet_lang_zh.c` 里 `"Pair in the Muse app"` 在。`tools/check_zh_table.py` 五项全过
+    （`entries: 159 … problems: 0`：表里每条中文的字数都在同一档 Noto 16 px 下按像素预算称过，
+    标签档 124 px、值档 130 px、note 档 330 px 折两行）。**截图验收不是只看编译过**：
+    `tools/zh_shot.py` 一次串口会话里逐页 `>ui.settings=<page>` + `p`，人眼看回
+    home / wifi / muse / ble / sound / sleep / battery / power 八页 + 宫格页 + 车载页，
+    没有豆腐块、没有被省略号截掉的条目；就是靠看第一版截图才发现「在 Muse 应用里配对」漏翻
+    （`h.detail` 那句整句没走表），补进固件和表之后重刷重截确认。
+    车载页那张（`shots8/zh_shot0.png`）同时是 `>maint` 的图证：「对话」行前那枚 12px 琥珀点亮着，
+    回读 `@carpet card=养车卡 emotion=担心 maint_worried=1`。
+    **一个坑记在这儿**：Windows 上开串口会脉冲 DTR/RTS 把芯片复位（`snap.py` 那句 termios HUPCL
+    只对 POSIX 有效），所以逐页截图必须开一次口、等它启动完、每页给 3 秒再按 `p`；
+    分开每次开一口的写法称到的是"刚开机那半秒页面还没填值"，看着像漏翻其实是抢跑。
+    没截到的：WI-FI 页「接入点」那一行在折叠区以下，要手指往上滑才露出来，串口没有滚动旋钮，
+    所以那一行和它的输入键盘页没出图 —— 它和已出图的同类行走同一档字体、同一张表。
   重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
