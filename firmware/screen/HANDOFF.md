@@ -1254,3 +1254,22 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 设置模块那把锁还是 NULL。改法不是"加个判空糊过去"，而是回读走 `url_effective()`：
 一次都没拨出去过时，按同一条"先 NVS 再出厂"的规则现算。副产品是网还没起来的时候 `>url`/`>carpet` 也说真话
 （上面第 3 条那次 `dialed=0` 却 `src=nvs`，靠的就是它）。
+
+### 4. 同步到哪一步（11-08 这次推不出去，原因和昨天正好反过来）
+
+本地提交 `7e9c73e`（4 个文件：`HomeShell.kt` / 这份 HANDOFF / `muse/README.md` / `muse/muse-carpet.patch`），
+`:core:test` 305 条 + `SchemaDriftTest` 13 条按最终那份补丁实跑（`--rerun`）全 PASSED，`firmware/screen/app/` 照旧没 add 没删。
+
+**push 没成功，板子和代码都不受影响**：昨天是"代理坏、直连好"，今天这台网络（`ChinaNet-FBe9-5G`）是
+"**直连 github.com:443 连不上**（`Failed to connect ... Could not connect to server` / `Recv failure: Connection was reset`），
+只有 `gh-proxy.com` 那面能读"。走代理推那两次挂在鉴权弹窗上（`GIT_TERMINAL_PROMPT=0` 一试就露出来：
+`could not read Username for 'https://gh-proxy.com'`），而 §上一轮已经称过这个镜像**只转发读、不转发写鉴权**，
+所以它不是"再试一次"的事。**没有改任何全局 git 配置，没有 force push。**
+
+网络回到昨天那幅样子之后补这一条就完事（和昨天用的同一条，一次 fast-forward）：
+
+```bash
+cd D:/dev/projects/carpet-sat-demo
+git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet-sat-demo.git main:main
+git -c http.proxy= -c https.proxy= fetch origin main && git log --oneline origin/main..HEAD   # 必须为空
+```
