@@ -1306,6 +1306,13 @@ home / wifi / muse / ble / sound / battery / sleep / power 八页 + 宫格页 + 
 所以每开一次口都称到的是"刚开机那半秒、页面还没填值"的图，看着像漏翻其实是抢跑。
 `zh_shot.py` 的写法是：开一次口 → `rd(12, b"muse:")` 等它起来 → 每页发完命令等 3 秒再按 `p`。
 
+**顺带纠正我之前对机主说错的一句**：我说过「抓屏通道要 IP（`CONFIG_SCREEN_SHOT_PORT=8444`）」，
+这对 Muse 这棵树是**错的** —— 全树 grep 没有 `8444`、也没有 `SCREEN_SHOT_PORT`，那是
+`firmware/screen/app/` 那块旧屏的 httpd 口（`main/screen_shot.c`）。Muse 侧的抓屏是**串口触发的
+LVGL snapshot**：`muse_input.c` 的 `#if LV_USE_SNAPSHOT` 那一段，按键 `p` → `muse_ui_request_snapshot()`，
+串口回 `SNAP BEGIN w h` / `SNAP END`，开关是 `devices/sdkconfig.carpet` 里 `CONFIG_LV_USE_SNAPSHOT=y`。
+本轮所有图都是这条口出的，`muse/README.md` §7 那条 8444 红线也已改成"旧 app/ 的口，Muse 没有"。
+
 `>maint` 那两条判据（欠的）也在这轮称完，串口原文：
 
 ```
@@ -1327,7 +1334,8 @@ home / wifi / muse / ble / sound / battery / sleep / power 八页 + 宫格页 + 
 | `Phone camera`（1700-1704） | **没编进来** | `# CONFIG_MUSE_VIDEO is not set`（`sdkconfig:4269`），那一行整块在 `#if` 外，屏上根本不会出现 |
 | `Voice notes`（1411-1415） | **没编进来** | `# CONFIG_MUSE_BOARD_M5STACK_STOPWATCH is not set`（4231）、`# CONFIG_MUSE_REALTIME_VOICE is not set`（4265） |
 | `Phone setup`（1310） | **半死** | 开机时已注册就被强清（`main/muse_glue.c:519`），真正读它的只剩 `muse_ble.c:334/354` 那两道闸 |
-| `Server` / `VM ID` / `Device token` / `SDK token` | **活着，但和车联无关** | `CONFIG_MUSE_HATCH=y`（4263）；读点在 `muse_chat_session.cpp:807/823/924`、`muse_ble.c:84-85`、`muse_link.c:71-83` —— 走的是 Muse 云配对那条，不是手机连屏这条 |
+| `Server` / `VM ID` / `Device token` / `SDK token` | **活着，但和车联无关** | `CONFIG_MUSE_HATCH=y`（4263）；读点在 `muse_chat_session.cpp:807/823/924`、`muse_ble.c:84-85`、`muse_link.c:71-83` —— 走的是 Muse 云配对那条，不是手机连屏这条。**11-08 已按拍板折进「Muse 云」那一组**（见 §9） |
+| 电池诊断那七行读数 | **活着，和车联无关** | `muse_battery_read()` / `muse_power_t`，只有 USB 拔插期间才有意义。**11-08 已按拍板折进「电池诊断」那一组**（见 §9） |
 | `MAC address`（1079）、`Mic level`（1427） | **只读** | 没有写口，纯显示 |
 | Wi-Fi / 接入点 / 蓝牙 / 声音 / 睡眠 / 电量 那几组 | **真有用** | 就是这一轮 R1/R2 和现场要用的那些 |
 
@@ -1398,3 +1406,66 @@ git rev-parse HEAD                                                        # 和�
 **两边都是 `1f24cedf32140b5dbab3ce745940c8cc64d5405e`**（HTTPS 那面 `ls-remote` 回同一个 sha），
 且 `git merge-base --is-ancestor 93a6692 HEAD` 成立 —— 远端没被任何一侧回退过。
 **没有改任何全局 git 配置，没有 force push，没有改 remote**，`firmware/screen/app/` 照旧没 add 没删。
+
+## 追加（2026-11-08 傍晚）：把用不上的那两堆收进默认折叠的分组
+
+四件拍板都按原话落地，一条没扩大范围。
+
+### 9. 折叠分组这一轮
+
+**【1】MUSE 页那四格**（`Server` / `VM ID` / `Device token` / `SDK token`）收进一组，
+用的就是这一页现成的交互：一行 `row()`（左侧 `LV_SYMBOL_DOWN` 箭头 + 右侧一个状态词）
++ 一个带 `LV_OBJ_FLAG_HIDDEN` 的 `column()`，点那一行翻 flag —— **没有新控件语义**，
+`fold()` 只是把这三样按顺序摆好（行 → 说明 → 折上的列），`fold_toggle()` 只改 flag 和那个状态词。
+默认折上。同一格里带一行中文说明
+「以后接 Muse 官方 API 才用，现在这套车联演示连不到它。」—— 这行刻意放在折上的列**外面**，
+不然折着的时候说明也看不见，就白写了。四格那几个标签拍板说英文不翻也行，但上一轮已经翻好并出过图
+（服务器 / 虚拟机 / 设备令牌 / SDK 令牌），就按现状留着，不回退成英文。
+三条闸按原话留着：功能一个没删（`Test connection`、配对说明那两条一起进组，还在）、
+NVS key 一个没删（`muse_settings.c` 那几条照旧）、Kconfig 里 `CONFIG_MUSE_HATCH` 那条依赖没动。
+折叠状态**不落 NVS**：子页返回时被整个销毁（`show()` 里 `drop(prev)`），重启天然回到默认折上，
+所以这一轮没往 NVS 加任何东西。
+新增块全部圈在 `#if CONFIG_MUSE_CARPET_CARDS` 里，`CONFIG_MUSE_CARPET_CARDS=n` 时
+`more = list`，那四格回到原位，与上游逐字等价。
+
+**【2】电池诊断**同样处理：那一页没删，点进「电池诊断 / 已折叠」那一行，
+下面还是原来那七行读数（`电量`/`已用掉`/`充满能用`/`熄屏`/`打盹时间`/`唤醒次数`/`CPU 占用`），
+一个数没少；`重新计时` 那颗按钮留在组外，因为它不是诊断读数。
+
+**【3】`Phone camera` 这一轮没动。** 出厂配置里 `# CONFIG_MUSE_VIDEO is not set`
+（`build-muse-s3-175-carpet/sdkconfig:4269`），那一行本来就在 `#if CONFIG_MUSE_VIDEO` 里，
+屏上根本没有入口 —— 没开 `CONFIG_MUSE_VIDEO`/`MUSE_VIDEO_WIFI`，PSRAM 预算一行没碰。
+
+**【4】voice notes 这一轮没动，只确认它没漏进来。** 那一行在
+`#if CONFIG_MUSE_BOARD_M5STACK_STOPWATCH && CONFIG_MUSE_REALTIME_VOICE` 里，两个开关出厂都没开
+（同一份 sdkconfig 的 4231、4265 行都是 `is not set`），所以 SOUND 页没多出它；
+表里那条 `"Voice notes" → "语音留言"` 是惰性的（那一行不编译，表项读不到，也就多不出一个死入口）。
+
+**一处我之前说错的话已更正**：抓屏通道不是 `CONFIG_SCREEN_SHOT_PORT=8444`。
+Muse 这棵树全树 grep 没有 8444、没有 `SCREEN_SHOT_PORT`，那是 `firmware/screen/app/` 那棵旧屏的东西；
+Muse 侧出图走串口触发的 LVGL snapshot —— `>ui.settings=<页>` 选页 + 按 `p`
+（`muse_input.c` 里 `#if LV_USE_SNAPSHOT` → `muse_ui_request_snapshot()`），
+回读 `SNAP BEGIN w h … SNAP END`，脚本是 `tools/zh_shot.py`。
+`muse/README.md` §7 和本文件 §6 里那句 8444 已经改成这条口。
+
+**为什么多了一个 bench 专用的 `+`**：这条串口注入不了点击（`muse_input.c` 里所有 bench 命令逐条看过，
+没有一条能合成一次 tap），折上的分组就永远拍不到展开态，验收就成了"只看编译过"。
+`>ui.settings=muse+` / `battery+` 只在 `#if LV_USE_SNAPSHOT` 里、只在打开页面之后把那一组**打开**
+（从不反向折上），所以不带 `+` 的名字拍到的仍是用户默认看到的那一屏。它不是 UI 控件，
+不给手指用，也不改任何用户可见的行为。
+
+**称到了什么（`D:/dev/esp/shots10/`，四张都人眼看过）**：
+
+- `zh_muse.png` 折上态 —— 「Muse 云 / 已折叠」+ 那句中文说明折成两行，四格不在屏上。
+- `zh_muse+.png` 展开态 —— 同一行变「已展开」，「服务器 hatch.metaaivm.com」两行折出、「虚拟机 未设置」露出半行。
+- `zh_battery.png` 折上态 —— 只剩「电量 / 没有电池 / 电池诊断 已折叠 / 重新计时」。
+- `zh_battery+.png` 展开态 —— 那套读数原样在（电量 无、已用掉 -、充满能用 -、熄屏 -、打盹时间 -）。
+
+四张没有豆腐块、没有被省略号截掉的条目。`check_zh_table.py` → `entries: 164 … problems: 0`
+（新加的那句说明走 note 档 330 px，已在脚本 `INDIRECT` 里写明理由，不是放宽默认）；
+`test_muse_lang.py` 7 条 OK；`:core:test --rerun` 305 条 0 失败 0 错误（含 `SchemaDriftTest`）。
+
+**没称到的，如实记着**：展开态那一屏视口只装得下前头两格，`Device token` / `SDK token`
+两行在视口以下 —— 串口既不能注入点击也不能滚动，所以那两行的**中文渲染**没有图证，
+只有代码和表（它们和已出图的同类行走同一档字体、同一张表）。
+上一轮欠的「接入点」那一行和它的输入键盘页同样还在折叠区以下，仍未出图。

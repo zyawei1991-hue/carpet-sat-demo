@@ -2702,10 +2702,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_lang_zh.c b/esp32/components/muse/carpet/carpet_lang_zh.c
 new file mode 100644
-index 0000000..c166772
+index 0000000..796bc53
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_lang_zh.c
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,311 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2890,6 +2890,16 @@ index 0000000..c166772
 +    { "Optional", "可留空" },
 +    { "Empty keeps the current one", "留空保持不变" },
 +    { "Empty keeps the current one; a new one restarts", "留空保持不变；填新的会重启" },
++    /* The fold this page got on 11-08: one row, one line under it that says why
++     * it is folded, and the four fields behind it. The value slot is 130 px, so
++     * the state word is three characters; the row name takes "Muse" at 20 px and
++     * one hanzi at 16. The line is the owner's own wording, kept to two wrapped
++     * lines inside the 330 px note column, and it uses no U+2026 or U+2014. */
++    { "Muse cloud", "Muse 云" },
++    { "Only for the official Muse API, later on; this car-link demo can't reach it.",
++      "以后接 Muse 官方 API 才用，现在这套车联演示连不到它。" },
++    { "Folded", "已折叠" },
++    { "Expanded", "已展开" },
 +    { "Pair with the Muse app to use your account; a device token here overrides it, and a long one is easier to "
 +      "send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from gadgets.muse.ai; one set here "
 +      "replaces the firmware's. Reset pairing forgets Wi-Fi and the app pairing, then restarts.",
@@ -2925,6 +2935,8 @@ index 0000000..c166772
 +    { "Tap the screen or press either button to wake.", "碰屏幕或按任意键都能唤醒。" },
 +
 +    /* ---------- Battery ---------- */
++    /* The fold added 11-08; four hanzi in a 124 px row name. */
++    { "Battery diagnostics", "电池诊断" },
 +    { "Used", "已用掉" },
 +    { "A full charge", "充满能用" },
 +    { "Chip asleep", "打盹时间" },
@@ -5514,7 +5526,7 @@ index 5788e5b..74ef9d0 100644
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..6b143e2 100644
+index 20c46d3..a4407b6 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -5611,7 +5623,66 @@ index 20c46d3..6b143e2 100644
      if (strcmp(lv_label_get_text(l), text) != 0) {
          lv_label_set_text(l, text);
      }
-@@ -635,7 +679,7 @@ static void on_text_show(lv_event_t *e)
+@@ -480,6 +524,58 @@ static lv_obj_t *column(lv_obj_t *list)
+     return l;
+ }
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++/* ---------- folded groups ----------
++ *
++ * Two pages carry rows this demo never reaches. The owner wanted that visible
++ * layer back without deleting anything, so it is a fold, not a removal: one
++ * tappable row above a column, the column starting hidden.
++ *
++ * Both halves are the page's own row() and column(), so there is no new widget
++ * and no new gesture - and leaving a sub-page drops it (show() -> drop()), so
++ * the group is folded again the next time the page opens. Nothing about the
++ * fold goes into NVS, which is why there is no state variable to save.
++ */
++static lv_obj_t *s_fold_hatch_col, *s_fold_hatch_val;
++static lv_obj_t *s_fold_batt_col, *s_fold_batt_val;
++
++static void fold_toggle(lv_obj_t *col, lv_obj_t *val)
++{
++    bool fold = !lv_obj_has_flag(col, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_set_flag(col, LV_OBJ_FLAG_HIDDEN, fold);
++    /* "Expanded", not "Open" - the table already answers "Open" with 开, which
++     * is the switch word and would read as a setting rather than a state. */
++    set_text(val, fold ? "Folded" : "Expanded");
++}
++
++static void on_fold_hatch(lv_event_t *e)
++{
++    (void)e;
++    fold_toggle(s_fold_hatch_col, s_fold_hatch_val);
++}
++
++static void on_fold_batt(lv_event_t *e)
++{
++    (void)e;
++    fold_toggle(s_fold_batt_col, s_fold_batt_val);
++}
++
++/* The header row, the one line that says what is behind it, then the column it
++ * opens - all three in that order in the list, so the line is readable while
++ * the group is still folded. Returns the column to build into. */
++static lv_obj_t *fold(lv_obj_t *list, const char *head, const char *caption, lv_event_cb_t cb, lv_obj_t **val_out)
++{
++    row(list, LV_SYMBOL_DOWN, head, val_out, cb, NULL);
++    if (caption) {
++        note(list, caption);
++    }
++    lv_obj_t *col = column(list);
++    lv_obj_add_flag(col, LV_OBJ_FLAG_HIDDEN);
++    set_text(*val_out, "Folded");
++    return col;
++}
++#endif /* CONFIG_MUSE_CARPET_CARDS */
++
+ /* Label and value, not tappable. */
+ static lv_obj_t *info_row(lv_obj_t *list, const char *text)
+ {
+@@ -635,7 +731,7 @@ static void on_text_show(lv_event_t *e)
      (void)e;
      bool pw = !lv_textarea_get_password_mode(s_text_ta);
      lv_textarea_set_password_mode(s_text_ta, pw);
@@ -5620,7 +5691,7 @@ index 20c46d3..6b143e2 100644
  }
  
  /* Beside the keyboard's field, a button to show a password. */
-@@ -752,7 +796,7 @@ static void build_text_page(lv_obj_t *tile)
+@@ -752,7 +848,7 @@ static void build_text_page(lv_obj_t *tile)
      int top = text_y(98);
      if (narrow_panel()) {
          /* Portrait panels need a header inside the screen, not the round layout. */
@@ -5629,7 +5700,7 @@ index 20c46d3..6b143e2 100644
          single_line(s_text_title, muse_board->width - 16);
          lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
          lv_obj_set_width(s_text_ta, muse_board->width - 60);
-@@ -791,6 +835,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+@@ -791,6 +887,12 @@ static void open_text(const char *title, const char *initial, bool password, int
      lv_textarea_set_max_length(s_text_ta, max_len);
      lv_textarea_set_password_mode(s_text_ta, password);
      lv_textarea_set_text(s_text_ta, initial ? initial : "");
@@ -5642,7 +5713,7 @@ index 20c46d3..6b143e2 100644
      lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
      if (s_text_kp) {
          muse_keypad_reset(s_text_kp, password);
-@@ -944,10 +994,12 @@ static bool rebuild_scan_list(void)
+@@ -944,10 +1046,12 @@ static bool rebuild_scan_list(void)
          bool saved = is_saved(s_aps[i].ssid);
          saved_seen |= saved;
          char buf[24];
@@ -5657,7 +5728,7 @@ index 20c46d3..6b143e2 100644
          }
          lv_label_set_text(v, buf);
      }
-@@ -973,6 +1025,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -973,6 +1077,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -5691,7 +5762,7 @@ index 20c46d3..6b143e2 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1067,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1119,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -5707,7 +5778,7 @@ index 20c46d3..6b143e2 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1006,27 +1094,29 @@ static void tick_wifi(void)
+@@ -1006,27 +1146,29 @@ static void tick_wifi(void)
      char buf[128];
      switch (w.state) {
      case MUSE_WIFI_OFF:
@@ -5744,7 +5815,7 @@ index 20c46d3..6b143e2 100644
          break;
      }
      set_text(s_wifi_status, buf);
-@@ -1046,6 +1136,23 @@ static void tick_wifi(void)
+@@ -1046,6 +1188,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -5768,7 +5839,40 @@ index 20c46d3..6b143e2 100644
  }
  
  /* ---------- Hatch ---------- */
-@@ -1142,7 +1249,8 @@ static void tick_hatch(void)
+@@ -1125,12 +1284,26 @@ static void build_hatch_page(lv_obj_t *tile)
+     s_link_status = note(list, "");
+     button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
+     s_hatch_status = note(list, "");
+-    row(list, NULL, "Server", &s_hatch_host, on_hatch_host, NULL);
+-    row(list, NULL, "VM ID", &s_hatch_vm, on_hatch_vm, NULL);
+-    row(list, NULL, "Device token", &s_hatch_token, on_hatch_token, NULL);
+-    row(list, NULL, "SDK token", &s_hatch_sdk_token, on_hatch_sdk_token, NULL);
+-    button(list, "Test connection", COLOR_ACCENT, on_hatch_test, NULL);
+-    note(list, "Pair with the Muse app to use your account; a device token here overrides it, and a long one is "
++#if CONFIG_MUSE_CARPET_CARDS
++    /* These four fields are the Muse cloud account. Nothing in the car link
++     * reads them - the phone reaches this screen over Screen-Link - so they
++     * fold away. Nothing is taken out: muse_settings still stores all four,
++     * Kconfig still carries CONFIG_MUSE_HATCH, and the same handlers and the
++     * same Test connection are behind the row. The line under the header is
++     * the one that says so, in the language the page is drawing in. */
++    s_fold_hatch_col = fold(list, "Muse cloud",
++                            "Only for the official Muse API, later on; this car-link demo can't reach it.",
++                            on_fold_hatch, &s_fold_hatch_val);
++    lv_obj_t *more = s_fold_hatch_col;
++#else
++    lv_obj_t *more = list;
++#endif
++    row(more, NULL, "Server", &s_hatch_host, on_hatch_host, NULL);
++    row(more, NULL, "VM ID", &s_hatch_vm, on_hatch_vm, NULL);
++    row(more, NULL, "Device token", &s_hatch_token, on_hatch_token, NULL);
++    row(more, NULL, "SDK token", &s_hatch_sdk_token, on_hatch_sdk_token, NULL);
++    button(more, "Test connection", COLOR_ACCENT, on_hatch_test, NULL);
++    note(more, "Pair with the Muse app to use your account; a device token here overrides it, and a long one is "
+                "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
+                "gadgets.muse.ai; one set here replaces the firmware's. "
+                "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
+@@ -1142,7 +1315,8 @@ static void tick_hatch(void)
      const char *paired = !muse_link_hatch_linked()    ? "not paired"
                           : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
                                                           : "paired";
@@ -5778,7 +5882,7 @@ index 20c46d3..6b143e2 100644
      set_text(s_link_status, link);
      if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
          s_link_reset_armed_us = 0;
-@@ -1153,9 +1261,13 @@ static void tick_hatch(void)
+@@ -1153,9 +1327,13 @@ static void tick_hatch(void)
      muse_hatch_status(&h);
      char buf[96];
      if (h.detail[0]) {
@@ -5794,7 +5898,7 @@ index 20c46d3..6b143e2 100644
      }
      set_text(s_hatch_status, buf);
      lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-@@ -1218,11 +1330,12 @@ static void tick_ble(void)
+@@ -1218,11 +1396,12 @@ static void tick_ble(void)
          strlcpy(buf, "Off", sizeof(buf));
          break;
      case MUSE_BLE_ADVERTISING:
@@ -5809,7 +5913,7 @@ index 20c46d3..6b143e2 100644
          break;
      }
      set_text(s_ble_status, buf);
-@@ -1235,10 +1348,12 @@ static void tick_ble(void)
+@@ -1235,10 +1414,12 @@ static void tick_ble(void)
  
  /* ---------- Sound ---------- */
  
@@ -5823,7 +5927,42 @@ index 20c46d3..6b143e2 100644
      set_text(l, buf);
  }
  
-@@ -1468,14 +1583,14 @@ static void tick_battery(void)
+@@ -1431,16 +1612,25 @@ static void build_battery_page(lv_obj_t *tile)
+     s_battery = page(tile, "BATTERY", true, &list);
+     s_batt_shown_us = 0;
+     s_batt_status = note(list, "");
+-    s_batt_level = info_row(list, "Battery");
+-    s_batt_drain = info_row(list, "Used");
+-    s_batt_full = info_row(list, "A full charge");
+-    s_batt_off = info_row(list, "Screen off");
+-    s_batt_slept = info_row(list, "Chip asleep");
+-    s_batt_wakes = info_row(list, "Wakes");
+-    s_batt_busy = info_row(list, "CPU busy");
+-    s_batt_awake = note(list, "");
++#if CONFIG_MUSE_CARPET_CARDS
++    /* Same fold as the Muse-cloud group: the seven figures stay exactly where
++     * they are, they just start out of sight. Nothing was moved off this page,
++     * so tick_battery() still fills them whether the group is open or not. */
++    s_fold_batt_col = fold(list, "Battery diagnostics", NULL, on_fold_batt, &s_fold_batt_val);
++    lv_obj_t *more = s_fold_batt_col;
++#else
++    lv_obj_t *more = list;
++#endif
++    s_batt_level = info_row(more, "Battery");
++    s_batt_drain = info_row(more, "Used");
++    s_batt_full = info_row(more, "A full charge");
++    s_batt_off = info_row(more, "Screen off");
++    s_batt_slept = info_row(more, "Chip asleep");
++    s_batt_wakes = info_row(more, "Wakes");
++    s_batt_busy = info_row(more, "CPU busy");
++    s_batt_awake = note(more, "");
+     button(list, LV_SYMBOL_REFRESH "  Start over", COLOR_ACCENT, on_battery_reset, NULL);
+-    note(list, "Measures from unplugging USB until it's plugged back in. The gauge moves in 1% steps, so give it a "
++    note(more, "Measures from unplugging USB until it's plugged back in. The gauge moves in 1% steps, so give it a "
+                "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
+ }
+ 
+@@ -1468,14 +1658,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -5842,7 +5981,7 @@ index 20c46d3..6b143e2 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1611,10 @@ static void tick_battery(void)
+@@ -1496,10 +1686,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -5855,7 +5994,7 @@ index 20c46d3..6b143e2 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1631,7 @@ static void tick_battery(void)
+@@ -1516,7 +1706,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -5864,7 +6003,7 @@ index 20c46d3..6b143e2 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1658,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1733,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -5882,6 +6021,60 @@ index 20c46d3..6b143e2 100644
      }
      note(list, text);
  }
+@@ -1658,13 +1849,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+ 
+ #if LV_USE_SNAPSHOT
+ static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
++static volatile bool s_bench_unfold;     /* "muse+" / "battery+": open it and show what is folded */
+ 
+ bool muse_settings_ui_bench_open(const char *name)
+ {
+     static const char *const NAMES[] = { "home", "wifi", "muse", "ble", "sound", "sleep", "battery", "power" };
++    char bare[16];
++    size_t n = strlen(name);
++    /* A trailing + is not a page name, it is the one thing a screenshot cannot do
++     * by itself: there is no way to inject a tap over this port, so a folded group
++     * would otherwise never be pictureable. Bench-only, inside LV_USE_SNAPSHOT. */
++    bool unfold = n > 0 && name[n - 1] == '+';
++    if (unfold) {
++        n--;
++    }
++    if (n >= sizeof(bare)) {
++        return false;
++    }
++    memcpy(bare, name, n);
++    bare[n] = '\0';
+     for (int i = 0; i < (int)(sizeof(NAMES) / sizeof(NAMES[0])); i++) {
+-        if (!strcmp(name, NAMES[i])) {
++        if (!strcmp(bare, NAMES[i])) {
+             s_bench_open = i;
++            s_bench_unfold = unfold;
+             return true;
+         }
+     }
+@@ -1688,6 +1895,22 @@ static void bench_open_pending(void)
+             PAGES[i]->build(s_tile);
+         }
+         show(*PAGES[i]->obj);
++#if CONFIG_MUSE_CARPET_CARDS
++        /* Same reason as the "+" in the command: no tap can be injected over this
++         * port, so a folded group would have no second picture. Unfold it the way
++         * a tap would - and only ever unfold, never fold, so the plain names still
++         * shoot the default view a user actually sees. */
++        if (s_bench_unfold) {
++            s_bench_unfold = false;
++            if (*PAGES[i]->obj == s_hatch && s_fold_hatch_col
++                && lv_obj_has_flag(s_fold_hatch_col, LV_OBJ_FLAG_HIDDEN)) {
++                fold_toggle(s_fold_hatch_col, s_fold_hatch_val);
++            } else if (*PAGES[i]->obj == s_battery && s_fold_batt_col
++                       && lv_obj_has_flag(s_fold_batt_col, LV_OBJ_FLAG_HIDDEN)) {
++                fold_toggle(s_fold_batt_col, s_fold_batt_val);
++            }
++        }
++#endif
+     }
+ }
+ #endif
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
 index 4a98f64..72b6797 100644
 --- a/esp32/components/muse/muse_ui.c

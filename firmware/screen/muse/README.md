@@ -25,14 +25,14 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 21 个文件、3554 行新增 / 64 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，6,367 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 设置页中文化那轮重打后实读的）：
+- 我们的全部改动 = 21 个文件、3689 行新增 / 80 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，6,560 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 折叠分组那轮重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  22 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行)
   esp32/components/muse/Kconfig              |  31 +-   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
-  esp32/components/muse/carpet/carpet_lang_zh.c | 299 +   (新，「英文串→中文」那张表 159 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句)
+  esp32/components/muse/carpet/carpet_lang_zh.c | 311 +   (新，「英文串→中文」那张表 164 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条)
   esp32/components/muse/carpet/carpet_lang_zh.h |  58 +   (新)
   esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
@@ -44,7 +44,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_settings.c      |  30 +-  (11-08 新入列：NVS 多一条 `link_url`，读写各一个函数)
   esp32/components/muse/muse_settings.h      |   9 +   (11-08 新入列：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头)
-  esp32/components/muse/muse_settings_ui.c   | 174 +-  (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表)
+  esp32/components/muse/muse_settings_ui.c   | 313 +-  (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
   esp32/devices/sdkconfig.carpet             |  46 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
@@ -53,12 +53,14 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
   再 `git apply`，21 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
-  2026-11-08 这天打了三次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
+  2026-11-08 这天打了四次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
   （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
   里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
   再打第二次是 5,595 行那组；第三次收进设置页中文化那一整块（`MUSE_UI_LANG_ZH` + `carpet_lang_zh.c/h`
-  + `muse_lang.c` 的字体 fallback + `muse_settings_ui.c` 接表 + 6 条 detail 整句），就是上面这组 6,367 行。
-  三次都走同一条验法：`git apply --check --binary` 过 → 真 `git apply` 过 →
+  + `muse_lang.c` 的字体 fallback + `muse_settings_ui.c` 接表 + 6 条 detail 整句），6,367 行；
+  第四次收进折叠分组那一块（`fold()`/`fold_toggle()` + MUSE/电量两页的收口 + 五条新表项 +
+  bench 的 `+`），就是上面这组 6,560 行。
+  四次都走同一条验法：`git apply --check --binary` 过 → 真 `git apply` 过 →
   解出来 `carpet_link.c` 1041 行 / 字库 154,528 字节 / `carpet_lang_zh.c` 里 `"Pair in the Muse app"` 在 → worktree 删掉。
   `:core` 的 `SchemaDriftTest` 13 条、`:core:test` 305 条同一轮实跑（`--rerun`，不吃缓存）全 PASSED —— 其中 `SchemaDriftTest` 有一条是**直接读这份 patch 里的 `UI_CARD` 表**
   去硬比 schema 和 Kotlin 那份枚举的，所以它绿了就说明新补丁真的被读了，不是在原地打转。
@@ -119,6 +121,21 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     分开每次开一口的写法称到的是"刚开机那半秒页面还没填值"，看着像漏翻其实是抢跑。
     没截到的：WI-FI 页「接入点」那一行在折叠区以下，要手指往上滑才露出来，串口没有滚动旋钮，
     所以那一行和它的输入键盘页没出图 —— 它和已出图的同类行走同一档字体、同一张表。
+  - 2026-11-08 折叠分组这轮 —— 干净树 `git apply --check --binary` 过、真 `git apply` 过，
+    解出来 21 个文件 / `carpet_lang_zh.c` 311 行 / `carpet_link.c` 1041 行 / 字库 154,528 字节。
+    `check_zh_table.py` `entries: 164 … problems: 0`、`tests/test_muse_lang.py` 7 条 OK、
+    `:core:test --rerun` 305 条 0 失败（含 `SchemaDriftTest`）。
+    **截图验收（`shots10/`，人眼看过四张）**：`>ui.settings=muse` 折上态 —— 「Muse 云 / 已折叠」
+    那一行 + 下面那句「以后接 Muse 官方 API 才用，现在这套车联演示连不到它。」两行折好，
+    服务器/虚拟机/令牌那四格不在屏上；`muse+` 展开态 —— 同一行变「已展开」，
+    「服务器 hatch.metaaivm.com」两行折出、「虚拟机 未设置」露出半行；
+    `battery` 折上态只剩「电量 / 没有电池 / 电池诊断 已折叠 / 重新计时」；
+    `battery+` 展开态那套读数原样在（电量 无、已用掉 -、充满能用 -、熄屏 -、打盹时间 -）。
+    四张都没有豆腐块、没有被省略号截掉的条目。
+    **为什么要有那个 `+`**：这条串口注入不了点击（`muse_input.c` 里所有 bench 命令逐条看过，
+    没有一条能合成一次 tap），折上的分组就永远拍不到展开态；`+` 只在 `#if LV_USE_SNAPSHOT`
+    里、只把折上的那一组打开、从不反过来折，所以不带 `+` 的名字拍到的仍是用户默认看到的那一屏。
+    折叠状态不落 NVS：子页返回时整个销毁重建（`show()` 里 `drop(prev)`），重启天然回到默认折上。
   重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
@@ -566,7 +583,14 @@ PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/lin
 - `sdkconfig` 含演示 Wi-Fi 的**明文密码**，已 gitignore，永远不要提交，也不要 `git add -A`；
   只跟踪 `sdkconfig.defaults` 和 `devices/sdkconfig.*`。
 - **`CONFIG_SCREEN_SHOT_PORT=8444` 是个无鉴权的 `/shot.bmp`。上展台前必须改回 0。**
-  （换到 Muse 这一版还没有这个口，但老 `app/` 有，回滚时会带回来。）
+  这条口是**老 `app/` 那棵树的**（`main/screen_shot.c` 起的 httpd）。**Muse 这棵树没有它** ——
+  全树 grep 没有 `8444`，也没有 `SCREEN_SHOT_PORT`；谁在 Muse 侧写下"抓屏要 IP / 要开 8444"，
+  那是把两棵树记混了（11-08 就在这句话上错过一次，见 HANDOFF 的 11-08 那节）。
+  Muse 侧的抓屏是**串口触发的 LVGL snapshot**：`muse_input.c` 里 `#if LV_USE_SNAPSHOT` 那一段，
+  按键 `p` → `muse_ui_request_snapshot()`，串口回 `SNAP BEGIN w h` … `SNAP END`；
+  开关是 `devices/sdkconfig.carpet` 里那条 `CONFIG_LV_USE_SNAPSHOT=y`。
+  现成的用法别自己写：`tools/zh_shot.py`（一次会话、等启动、逐页 3 秒再按 `p`）。
+  回滚到老 `app/` 时那条无鉴权口会跟着回来，所以红线照旧：上展台前改回 0。
 - Muse 的 App（gadgets.muse.ai）不是硬门槛：屏上 Settings → Wi-Fi 有开关、扫描列表和
   "Other network…" 手输，官方那句写得很明白 —— *"Pair with the Muse app to use your account;
   a device token here overrides it."* 但这台 PC 到 `gadgets.muse.ai`/`api.muse.ai` 要走代理

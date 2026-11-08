@@ -63,6 +63,12 @@ INDIRECT = {
     "Connects when you talk": 330,
     "Waiting for Wi-Fi": 330,
     "Pair in the Muse app": 330,
+    # fold(list, head, caption, ...) hands its caption to note() inside itself,
+    # so the literal sits at the fold() call rather than at a note() call and the
+    # CALLS map can't see the drawer. It is a note: 330 px a line, wrapping.
+    # Its head argument is deliberately NOT listed - unlisted keys fall to the
+    # tightest budget (124), which is what a row name gets.
+    "Only for the official Muse API, later on; this car-link demo can't reach it.": 330,
 }
 NOTO = "components/muse/fonts/muse_font_cjk_noto_16.c"
 SYMBOLS = "managed_components/lvgl__lvgl/src/font/lv_symbol_def.h"
