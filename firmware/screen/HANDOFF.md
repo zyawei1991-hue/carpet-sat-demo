@@ -1469,3 +1469,10 @@ Muse 侧出图走串口触发的 LVGL snapshot —— `>ui.settings=<页>` 选�
 两行在视口以下 —— 串口既不能注入点击也不能滚动，所以那两行的**中文渲染**没有图证，
 只有代码和表（它们和已出图的同类行走同一档字体、同一张表）。
 上一轮欠的「接入点」那一行和它的输入键盘页同样还在折叠区以下，仍未出图。
+
+**这一轮的同步**：一个提交 `9bcd8de`（`muse-carpet.patch` 重打 + `muse/README.md` §2 的数 +
+这份 HANDOFF §9 + `tools/check_zh_table.py` 那条 `INDIRECT`），走 SSH 那条口
+`git push git@github.com:zyawei1991-hue/carpet-sat-demo.git main:main` → `4bef23f..9bcd8de`。
+验收按 §4 末尾换过的那条：`git ls-remote --heads git@github.com:…` 与 `git rev-parse HEAD`
+**两边都是 `9bcd8de465354a7796e28b60a4e347dcb70f60d2`**。
+没有 force push、没有改全局 git 配置、没有改 remote，`firmware/screen/app/` 照旧没 add 没删。
