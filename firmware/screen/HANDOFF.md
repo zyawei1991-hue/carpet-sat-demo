@@ -1353,6 +1353,28 @@ git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet
 git -c http.proxy= -c https.proxy= fetch origin main && git log --oneline origin/main..HEAD   # 必须为空
 ```
 
+**后来的实情（11-08 傍晚补记，别照抄上面那段当结论）**：原因确实是**这张网只给读不给写**，不是命令写错。
+当晚 `7e9c73e` / `93a6692` 连同后面四个提交都推上去了，走的就是上面那条 HTTPS 直连
+（`93a6692..f8a0862`、`f8a0862..5daf775`、`5daf775..1f24ced`，全 fast-forward，没 force、没改全局配置、没改 remote）。
+另外这面仓库现在多了一条**备用口**：本机新生成的一对 ed25519（私钥 `~/.ssh/id_ed25519`，无口令）已被加成
+**仓库级 deploy key（带写权）**，`ssh -T git@github.com` 回的是 `Hi zyawei1991-hue/carpet-sat-demo!`
+——回文是仓库名，证明认的是 deploy key 不是账号 key。HTTPS 再被卡住时走这条，同样不 force、不改 remote：
+
+```bash
+git push git@github.com:zyawei1991-hue/carpet-sat-demo.git main:main
+```
+
+**验收那条要换**：`origin` 这个 ref 仍然指那面只转发读的 `gh-proxy.com` 镜像，它的本地值可能是陈的，
+`git log --oneline origin/main..HEAD` 会把**已经推出去的算成未推**。改称这一条，两边 sha 相等才算同步：
+
+```bash
+git ls-remote --heads git@github.com:zyawei1991-hue/carpet-sat-demo.git   # 拿 refs/heads/main 的 sha
+git rev-parse HEAD                                                        # 和它比，相等才是推上去了
+```
+
+11-08 傍晚实称：两条都是 `1f24cedf32140b5dbab3ce745940c8cc64d5405e`（HTTPS 直连 `ls-remote` 也回同一个 sha），
+且 `git merge-base --is-ancestor 93a6692 HEAD` 成立 —— 远端没被任何一侧回退过。
+
 ### 8. 这一轮的同步
 
 本轮改动分两个提交：一个固件+文档（`muse/muse-carpet.patch` 重打到 6,367 行、`muse/README.md` §2 的数、
@@ -1365,10 +1387,14 @@ git -c http.proxy= -c https.proxy= fetch origin main && git log --oneline origin
 其中 `SchemaDriftTest` 13 条（它有一条直接读这份新 patch 里的 `UI_CARD`）；
 干净树 `git apply --check --binary` + 真 `git apply` + 解出来 `"Pair in the Muse app"` 在 → worktree 删掉。
 
-推送仍走那条带 `-c http.proxy= -c https.proxy=` 的直连命令（见上面 §4 末尾那两行），推完自己称
-`git log --oneline origin/main..HEAD` 必须为空；称不空就是没推上去，如实写在这儿。
+推送走 §4 末尾那两条口（HTTPS 直连为主，SSH deploy key 为备），验收按 §4 末尾换过的那条：
+`git ls-remote --heads git@github.com:…` 的 sha 等于 `git rev-parse HEAD` 才算同步，
+**不要再拿 `git log --oneline origin/main..HEAD` 当判据**（`origin` 指那面只转发读的镜像，本地 ref 可能是陈的）。
 
 **11-08 傍晚实推**：`git -c http.proxy= -c https.proxy= push https://github.com/zyawei1991-hue/carpet-sat-demo.git main:main`
-→ `93a6692..f8a0862  main -> main`，`fetch` 之后 `git log --oneline origin/main..HEAD` **为空**。
-这次把上午推不出去的 `7e9c73e` / `93a6692` 一起带上了（`origin/main` 从 `658673d` 走到 `f8a0862`）。
-**没有改任何全局 git 配置，没有 force push**，`firmware/screen/app/` 照旧没 add 没删。
+连推三次 `93a6692..f8a0862` → `f8a0862..5daf775` → `5daf775..1f24ced`，
+这次把上午推不出去的 `7e9c73e` / `93a6692` 一起带上了（远端 `main` 从 `658673d` 走到 `1f24ced`）。
+最终验收按上面换过的那条走：`git ls-remote --heads git@github.com:…` 与 `git rev-parse HEAD`
+**两边都是 `1f24cedf32140b5dbab3ce745940c8cc64d5405e`**（HTTPS 那面 `ls-remote` 回同一个 sha），
+且 `git merge-base --is-ancestor 93a6692 HEAD` 成立 —— 远端没被任何一侧回退过。
+**没有改任何全局 git 配置，没有 force push，没有改 remote**，`firmware/screen/app/` 照旧没 add 没删。
