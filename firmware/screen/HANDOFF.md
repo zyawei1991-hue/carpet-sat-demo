@@ -1470,8 +1470,9 @@ Muse 侧出图走串口触发的 LVGL snapshot —— `>ui.settings=<页>` 选�
 只有代码和表（它们和已出图的同类行走同一档字体、同一张表）。
 上一轮欠的「接入点」那一行和它的输入键盘页同样还在折叠区以下，仍未出图。
 
-**这一轮的同步**：一个提交 `9bcd8de`（`muse-carpet.patch` 重打 + `muse/README.md` §2 的数 +
-这份 HANDOFF §9 + `tools/check_zh_table.py` 那条 `INDIRECT`），走 SSH 那条口
+**这一轮的同步**：干活那笔是 `9bcd8de`（`muse-carpet.patch` 重打 + `muse/README.md` §2 的数 +
+这份 HANDOFF §9 + `tools/check_zh_table.py` 那条 `INDIRECT`），下面这两笔（记推送结果、更正本段的措辞）
+只是记账 —— 推的时候 `ls-remote` 称到的 sha 就是它自己那一笔之前的 HEAD，别当成漏推。走 SSH 那条口
 `git push git@github.com:zyawei1991-hue/carpet-sat-demo.git main:main` → `4bef23f..9bcd8de`。
 验收按 §4 末尾换过的那条：`git ls-remote --heads git@github.com:…` 与 `git rev-parse HEAD`
 **两边都是 `9bcd8de465354a7796e28b60a4e347dcb70f60d2`**。
