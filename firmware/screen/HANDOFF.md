@@ -1569,3 +1569,64 @@ tile 回调（`carpet_page.c:544`）又把 `s_tile` 写回实际位置，所以�
 **下一轮要做的**：`muse_ui_show_carpet()` 在设置页还开着时先把它关掉（或拒绝并回读一句
 `page refused, settings open`），而不是静默不落地。
 **任何人现在拿这一条验分页，先把屏退出设置页。**
+（补一条 13:0x 的实测：`>ui=face` 退回脸那一格之后再 `>page avatar`，两秒后回读
+`@page want=- now=avatar` —— 落地是好的，**只有设置页开着时不落地**，这一条判据现在才算闭合。）
+
+## 14. 13:00 那一轮：现场四项称到三项，第四项卡在一个新形状的失败上
+
+### 14.1 称到的（附原始回读）
+
+1. **出厂那条地址在真手机热点上零输入拨通**：`@url now=ws://192.168.43.1:8443 src=factory
+   saved=(none) linked=1 dialed=1`、`@url wifi=1 ssid=Mate 60`、`@carpet wifi=1 linked=1 contract=v3`。
+   §0 那条主路到此称完 —— 手机上开热点（2.4GHz）+ 屏在设置页配一次网，屏上那一格 `Access point`
+   一个字都不用填。
+2. **设置页那一格的长相**：用户目视确认「Access point」那一格在、下面那行 note 把
+   `ws://192.168.43.1:8443` 整条写全（没被 `max_width 130` 点成 `ws://192.16…`）。
+3. **那枚 12px 琥珀点称到了，而且是量出来的**：车机构建这轮把 `CONFIG_LV_USE_SNAPSHOT=y` 打开后，
+   串口抓屏这条路就能用了。`>maint` 点着（`card=养车卡 emotion=担心 maint_worried=1`）→
+   `>ui=face` → `>page avatar` → `tools/muse/snap.py` 抓回 `D:/dev/esp/m1108v/shot_avatar.png`，
+   逐像素量：两枚点各 **36×36 @3x = 12.0×12.0 逻辑 px**，和 `carpet_page.c:127` 的 `DOT_D 12` 对上。
+   同一批截图还证明中文化和 §13 那两个折叠都落地了：`shot_muse.png` 里 `Muse 云 已折叠` +
+   那行注「以后接 Muse 官方 API 才用，现在这套车联演示连不到它。」，`shot_battery.png` 里
+   `电池诊断 已折叠`，`shot_wifi.png` 是设置首页（蓝牙 / 声音 / 熄屏 / 电量都是中文）。
+   **页标题 `WI-FI` / `MUSE` 还是那枚像素字体英文** —— `muse_settings_ui.c:303-304` 用的是
+   `lv_font_unscii_16`，没有汉字字形，这一条还欠着。
+
+### 14.2 没称到的那一条，形状和以前不一样
+
+13:0x 现场三条并起来读：App「接入点」那一格显示的是**对的** `ws://192.168.43.1:8443`（红字没复现，
+说明这一次是干净启动）；手机热点的**已连接设备列表里没有这块屏**；而屏自己说它连着：
+`>status` 里 `"wifi":{"on":true,"state":"connected","ssid":"Mate 60","ip":"192.168.43.13","rssi":-31}`，
+每 30 秒拨一次，每次都停在 TCP 层：
+
+```
+E websocket_client: esp_transport_connect() failed with -1,
+  transport_error=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST, tls_error_code=0, esp_ws_handshake_status_code=0, errno=119
+W screen_link: ws 断开/未接通，下一次按退避阶梯再来
+```
+
+`errno=119` 是 ENETUNREACH —— 同网段 ARP 不到那台主机；**不是** 113 ECONNREFUSED（对面在、只是不听这个口）。
+所以这一类失败的成因在网那一层：AP 已经把这台站踢了，S3 那边还留着 `connected` 和租约，
+只靠 ws 那条退避阶梯永远不会把自己重新关联回去。**屏侧要做的两件事**：
+
+1. keeper 认这个形状：连续 N 次（建议 3 次）`ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST` / ENETUNREACH
+   就做一次**全量重连**（`esp_wifi_disconnect()` + 重扫 + 重连存过的那张网），而不是接着按阶梯拨同号。
+   现场判据：把手机热点的已连接设备里那块屏踢掉（或让热点自己超时），屏要在 ~90 秒内自己重新出现在列表里。
+2. `>url` / `>carpet` 把**最后一次 transport 错误的原文和 errno 一起印出来**。113 和 119 在现场是两件
+   不同的事（前者=App 没在监听，后者=屏根本不在那张网里），现在两者都只写成「ws 断开/未接通」，
+   人只能靠猜。
+
+### 14.3 一条工具坑，用它的人必须先知道
+
+`esp32/tools/muse/snap.py` 一开 COM8 就把板子**复位**一次（它是 `serial.Serial(port, …)` 默认开线，
+COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/rts 压成 False 再开）。
+后果：拿它截图 = 板子重启，`dialed` / `sent` / `gap_s` 这些 RAM 计数全清，读数会看着像"链路自己断了"。
+我这轮就有三次是这么来的。**要么把 snap.py 改成开线前压 dtr/rts（和 sercmd_norst.py 同一招），
+要么在任何文档里写"截图会重启"** —— 别让人拿被重启污染的计数去判链路。
+
+### 14.4 我（这一轮）自己说错的一条，留个案
+
+我在给用户解释时说过「`contract v3` 是从服务端 hello 回执谈下来的，不是屏自己填的」—— **这句是错的**，
+正解在 §13 / `docs/APP-SCREEN-CONNECT.md` §6.1：`s_negotiated` 初值就是上限 3，`send_hello()` 之后
+立刻 `on_connected(s_negotiated)`，不等回执。真正算数的是 `ws 接入` 那行（打在
+`WEBSOCKET_EVENT_CONNECTED`，只在收到 HTTP 101 之后才派）。**对外不许再用 `contract=v3` 当"对面活着"的证据。**
