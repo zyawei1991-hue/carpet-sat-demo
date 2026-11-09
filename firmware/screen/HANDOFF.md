@@ -1715,6 +1715,8 @@ COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/
    **手机热点的已连接设备列表里那块屏还在**，`>stay` 回读 `nap=0`。
    这一条的仪器在 11-09 晚换过一次，原因和现在的期望读数见 §15.7 —— 别再拿 `nap=0` 单独当证据，
    它当场只说明"此刻不在 nap"，要看的是 `naps=` / `drops=` 这两个累计数。
+   **11-09 更晚：这一趟跑过了，但它在这块屏上不构成验收项 —— USB 一拔就是断电重启，
+   这块板没有能用的电池，判据作废的原因写在 §15.9。**
 2. 那句 note（`开着时熄屏也连着 Wi-Fi…`）在截图里落在折叠区外、**没拍到像素**。
    但它过了那道脚本守卫：`firmware/screen/tools/check_zh_table.py` 这轮跑出
    `entries: 166   noto glyphs: 7240   problems: 0` —— 每个汉字都有字形、百分号/占位符对得上、
@@ -1797,6 +1799,52 @@ w     →  @stay on=1 nap=0 naps=1 drops=0 wifi=0   ← nap 结束，累计数�
   `link.wifi: scan complete, 0 APs found`，`no saved wifi network nearby`（同一次扫描在别的时间点能找到 3 个邻居，
   说明扫描本身好的，只是 `Mate 60` 不在）。`wifi=0` 的时候"熄屏 3 分钟"测的是"没网时会不会打盹"，
   不是要测的那件事。热点开起来、`wifi=1 linked=1` 之后再做这一趟才有意义。
+  **（后面这一句成立，但那趟跑完之后结论变了 —— 这块屏撑不到"测的那件事"，见 §15.9。）**
+
+### 15.9 这一趟跑了，但它在这块屏上不成立：USB 一拔就是断电（11-09 晚，热点开起来之后跑的）
+
+热点开了之后我先把基线拉到 `wifi=1 linked=1`（`>stay off` + `>stay on` 踢一下 keeper，
+`muse_wifi_apply()` 立刻重新入网），然后跑完「拔 USB 5 分钟 → 插回来」，读到的原始回读：
+
+```
+基线（拔之前）：
+@stay   on=1 nap=0 naps=1 drops=0 wifi=1
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0    ← 连读三次一样
+插回来之后：
+@stay   on=1 nap=0 naps=0 drops=0 wifi=1
+@power  {"boot":"power on","uptime":76,"battery_boots":0,"started":false,"running":false,
+         "battery_pct":[-1,-1],"battery_mv":[0,0], ...}
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+I (288153) link.heartbeat: hb t=287s ... wifi=up
+```
+
+**判读：`naps` 从 1 变回 0 = RAM 被清零 = 这块板重启过。** 上一轮留下的"期望 naps 还是 1"
+当场被推翻，而推翻它的原因不是仪器不灵，是**这块屏没有可用的电池**：
+
+- 复位原因是 `ESP_RST_POWERON`（`muse_battery.c:565` 把它印成 `power on`）—— 供电真的断过。
+  不是串口造成的：这一轮所有读数都走 `sercmd_norst.py` / `cap.py`（开线前把 dtr/rts 压成 False），
+  而且 `uptime=76` 落在"他插回来"那一刻，不是我读的时候。
+- 电池侧两条读数：`battery_pct:[-1,-1]`、`battery_boots:0` —— 电量这一路从来没读数进来。
+  代码侧对得上的位置（**这两条我只是读代码，没在这次的开机日志里亲眼看到那句 W**，
+  下一次抓 boot 日志时顺手确认）：`boards/board_waveshare_s3_175c.c:78` 那句
+  `"PMU unavailable (%s): battery status disabled"` —— PMU 读不到就把电池状态关掉、`battery_pct` 留 -1；
+  而 `:86-88` 那段注释写着原理图上只有 DCDC1（VCC3V3）和 ALDO1（A3V3）两条轨在用、其余没接。
+  合起来 = **这块板就没有能用的电池，拔 USB 等于拔电源**（这条的直接证据是上面那个 `power on` 复位）。
+- 代码和硬件对得上：`muse_state.c:239-243` 是
+  `on_battery = s_as_if_battery || (!p.usb && p.battery_pct >= 0)`，`battery_pct` 在这台上永远是 -1
+  ⇒ `on_battery` 只能靠 `>nap` 假出来 ⇒ `update_power()` 的 `pause`、`auto_nap`、nap
+  **在这块屏上结构性永远不会自己发生**。§15.7 那条"台架上插着 USB 测不到"只是第二层原因，
+  第一层是这台根本没有电池那一档。
+
+所以：
+
+- **§15.4 第 1 条和 §15.7 的判据在这块屏上没有对应的现场**，不是"没称到"，是"这块屏没有可称的东西"。
+  真正会发生的现场是「断电 → 再上电 → 冷启动自己连上」，**这一条这一轮称到了**（上面 `@carpet` 那行，
+  重启后没碰过屏，`has_state=1`；时间尺度见 §15.3 第 5、6 条：8 秒内 linked）。
+- **`熄屏后保持联网` 这个开关的定位跟着改**：它挡的是"真有电池、PMU 读得到"那台机器上的 nap。
+  这块屏用不到它，但它是 NVS 里的保险，留着无害 —— 也**不要**再拿"这块屏上开关=开"当"nap 称过了"的证据。
+- 剩下的岔路是现场的供电，等拍板：要么承认这块屏必须一直在 USB / 充电宝上，验收项换成"冷启动自愈"那条；
+  要么现场用的是带电池的另一台，这一趟得挪到那台上跑（那两个 RAM 计数器在那台上照样管用）。
 
 ### 15.8 同步状态
 

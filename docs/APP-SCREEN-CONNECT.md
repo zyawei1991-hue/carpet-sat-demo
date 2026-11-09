@@ -364,6 +364,10 @@ I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
 **电池那条只能现场称**：电池供电 + 开关打开 + 熄屏 3 分钟，**再插回 USB** 读一次 `>stay`，
 期望 `on=1 nap=0 naps=0 drops=0`。`naps` / `drops` 是屏在 RAM 里记的累计数，拔掉 USB 期间它不断电、
 数还在，所以这一趟不需要任何人在旁边盯串口（屏侧 HANDOFF §15.7）。
+**这一条 11-09 晚跑过了，结果判在这块屏上不成立**：拔 USB 之后屏是断电的（回读 `boot":"power on"`、
+`naps` 被清零、`battery_pct:[-1,-1]`），这块板没有能用的电池，`on_battery` 永远假，nap 也就永远不会自己发生
+（屏侧 HANDOFF §15.9）。这块屏在现场的正确形态是**充电宝走 USB**，验收项换成"断电再上电，不碰屏自己连上"，
+这一条称到了：重启后 `@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0`，没人在屏上做过任何操作。
 **别用电脑去 ping 屏**——这台华为热点上电脑→屏本来就不通，屏明确在线（`linked=1 has_state=1`）的时候
 照样 ping 不到，用它判断会把"仪器不通"读成"屏掉线"（屏侧 HANDOFF §15.6 记了这次误判）。
 
