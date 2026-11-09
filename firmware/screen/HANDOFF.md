@@ -1713,6 +1713,8 @@ COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/
    `muse_state_on_battery()`，板子插着 USB 就永远不成立，`>nap` 又是显式强制、不走这个开关 ——
    所以这条只能在现场称。判据（给现场用）：电池供电、开关打开、屏幕熄灭 3 分钟后，
    **手机热点的已连接设备列表里那块屏还在**，`>stay` 回读 `nap=0`。
+   这一条的仪器在 11-09 晚换过一次，原因和现在的期望读数见 §15.7 —— 别再拿 `nap=0` 单独当证据，
+   它当场只说明"此刻不在 nap"，要看的是 `naps=` / `drops=` 这两个累计数。
 2. 那句 note（`开着时熄屏也连着 Wi-Fi…`）在截图里落在折叠区外、**没拍到像素**。
    但它过了那道脚本守卫：`firmware/screen/tools/check_zh_table.py` 这轮跑出
    `entries: 166   noto glyphs: 7240   problems: 0` —— 每个汉字都有字形、百分号/占位符对得上、
@@ -1750,13 +1752,40 @@ ping -n 6 -w 2000 192.168.43.13 → 已发送 6，已接收 1（那条是本机�
 - 顺带一条实测到的好事：USB 插回来之后屏自己恢复到 linked 并继续收 `state`，
   冷启动那两遍也是 8 秒内起来（§15.3 第 5、6 条），没有任何人工输入。
 
-### 15.5 同步状态
+### 15.7 电池那一趟换的仪器：nap 计数记在 RAM 里，拔电期间也能事后读（11-09 晚）
 
-`muse-carpet.patch` 这一轮重打过：**22 个文件、3826 行新增 / 86 行删，patch 6,803 行**
-（`esp32/components/muse/muse_app.c | 3 +` 是这轮新入列的那一条）。
+§15.6 把 ping 那条作废之后，"屏在电池上打没打盹"只剩两种问法：问手机（热点的已连接设备列表，
+我没实测过它掉站之后多久刷新），或者**插回 USB 之后再问屏自己**。后一条成立的前提是拔 USB 期间屏不断电
+—— 它确实不断：拔掉 USB 只是没了串口，MCU 由电池继续跑，**RAM 里的东西还在**。所以计数放 RAM 里就够了：
+
+- `muse_input.c:585-586` 两个 `volatile uint32_t`：`s_nap_events` = nap 真的开始过几次，
+  `s_wifi_drops` = Wi-Fi 从"连着"变成"没连着"几次（`update_wifi_nap()` 里 `was_up && !up` 那一条，`:593-598`）。
+  开机清零，不需要 NVS —— 要证的本来就是"这一趟"，不是"这台机器一辈子"。
+- `>stay` 回读从 `on=%d nap=%d wifi=%d` 变成 `on=%d nap=%d naps=%lu drops=%lu wifi=%d`（`:1028-1030`）。
+- 判据：跑完「拔 USB → 让它自己熄屏 3 分钟 → 插回来」这一趟之后读一次，
+  **`on=1` 期望 `naps=0 drops=0`**（开关生效 = 根本没打盹，也就没掉网）；
+  反过来把开关关掉应该看到 `naps≥1 drops≥1`，那才证明这个仪器不是永远读 0 的摆设。
+- 一个真踩过的坑，记下来免得再犯：`was_up` 的初值一开始写成 `true`，而刷完那一刻 Wi-Fi 本来就没起来，
+  于是刚开机就白记一次掉线，实测读到 `@stay on=1 nap=0 naps=0 drops=1 wifi=0`。
+  改成 C 的零初值（`static bool was_up;`）之后重刷，基线干净：
+
+```
+@stay on=1 nap=0 naps=0 drops=0 wifi=0
+```
+
+- **这一趟仍然没跑成**：卡在这台 Mate 60 的热点当前不在空中 ——
+  `link.wifi: scan complete, 0 APs found`，`wifi=0` 的时候"熄屏 3 分钟"测的是"没网时会不会打盹"，
+  不是要测的那件事。热点开起来、`wifi=1 linked=1` 之后再做这一趟才有意义。
+
+### 15.8 同步状态
+
+`muse-carpet.patch` 这一轮（11-09 晚，§15.7 那两个 RAM 计数）重打过：
+**22 个文件、3848 行新增 / 86 行删，patch 6,825 行**
+（相对上一版只动了 `muse_input.c`：168 → 190）。
 在 baseline `cdc169d` 干净 worktree 上 `git apply --check` 过、`git apply` 过，
-字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 对 `muse_glue.c` /
-`muse_settings_ui.c` / `carpet_lang_zh.c` / `sdkconfig.carpet` 四个文件比过，**内容和工作树一致**
+字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 这轮对 `muse_input.c` /
+`muse_glue.c` / `muse_settings_ui.c` / `carpet_lang_zh.c` / `carpet_link.c` /
+`sdkconfig.carpet` 六个文件比过，**内容和工作树一致**
 （`diff -rq` 报的那些 boards/*.c 差异全是 autocrlf 的行尾，不是内容 —— 那些文件根本没进 patch）。
 `components/screen_link/` 不进 patch，走 §3 那条 `cp -r`；这一轮把
 `screen_link.c` 和 `include/screen_link.h` 从工作树拷回了本仓库。

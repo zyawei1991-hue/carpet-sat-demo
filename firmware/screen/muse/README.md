@@ -25,9 +25,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 22 个文件、3826 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，6,803 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-09「熄屏后保持联网」那轮重打后实读的）：
+- 我们的全部改动 = 22 个文件、3848 行新增 / 86 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，6,825 行，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-09「nap 计到 RAM 里」那轮重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  22 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行)
   esp32/components/muse/Kconfig              |  31 +-   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
@@ -41,7 +41,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
   esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 168 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口)
+  esp32/components/muse/muse_input.c         | 190 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数）
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_settings.c      |  48 +-  (11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
   esp32/components/muse/muse_settings.h      |  18 +   (11-08：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头；11-09：`MUSE_SETTING_STAY_ONLINE` + `muse_settings_stay_online/set_stay_online`)

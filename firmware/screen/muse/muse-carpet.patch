@@ -5267,7 +5267,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..73b16a2 100644
+index 7c579bb..b971825 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,13 @@
@@ -5284,7 +5284,7 @@ index 7c579bb..73b16a2 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -560,11 +567,20 @@ static bool update_power(void)
+@@ -560,11 +567,35 @@ static bool update_power(void)
   * power arrives; meanwhile nothing reaches the device over the network.
   * Not while a voice note recorded offline waits to go (for a while). Returns
   * true while napping.
@@ -5298,15 +5298,30 @@ index 7c579bb..73b16a2 100644
 + * request, not this timer.
   */
 +static volatile bool s_napping;   /* 现在正在 nap 吗；`>stay` 回读用 */
++/* RAM 里的两个计数，专治"电池那一趟没法抓串口"：拔线的时候板子不掉电，
++ * 这两个数一直在数，插回来再读就知道那 3 分钟里到底发生过什么。
++ * naps = nap 真的开始过几次（`熄屏后保持联网` 开着时应当是 0）；
++ * drops = Wi-Fi 从"连着"变成"没连着"几次（nap、升级重连、AP 踢都算）。
++ * 开机清零，所以读的时候连着 `>status` 的 uptime 一起看。 */
++static volatile uint32_t s_nap_events;
++static volatile uint32_t s_wifi_drops;
 +
  static bool update_wifi_nap(TickType_t now, bool paused)
  {
      static TickType_t low_since;
 -    static bool napping;
++    /* 初值必须是"还没连上"：刷完那一刻 Wi-Fi 本来就没起来，按 true 起算会白记一次
++     * drops（实测到 `@stay ... drops=1 wifi=0` 刚开机就这样）。 */
++    static bool was_up;
++    bool up = muse_wifi_connected();
++    if (was_up && !up) {
++        s_wifi_drops++;
++    }
++    was_up = up;
      if (!s_cpu_low) {
          low_since = now;
      }
-@@ -572,14 +588,15 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -572,14 +603,18 @@ static bool update_wifi_nap(TickType_t now, bool paused)
          s_nap_now = false;
          muse_state_set_as_if_battery(false);
      }
@@ -5319,6 +5334,9 @@ index 7c579bb..73b16a2 100644
 +    bool nap = paused && !muse_voice_notes_waiting() && (s_nap_now || auto_nap);
 +    if (nap != s_napping) {
 +        s_napping = nap;
++        if (nap) {
++            s_nap_events++;
++        }
          ESP_LOGI(TAG, "Wi-Fi %s", nap ? "napping" : "waking");
          muse_wifi_nap(nap);
      }
@@ -5327,7 +5345,7 @@ index 7c579bb..73b16a2 100644
  }
  
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
-@@ -892,6 +909,139 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +927,143 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -5413,7 +5431,10 @@ index 7c579bb..73b16a2 100644
 +     * 为什么也给串口一条：这一条只在**电池**上看得见差别，而那会儿通常没有串口可看，
 +     * 所以现场要么在电脑前提前把它定下来，要么事后拿这一句证明当时是开着的。
 +     * nap=1 = 这会儿真的离开 Wi-Fi 了；插着 USB 它永远是 0（update_wifi_nap 的 paused
-+     * 要求 on_battery），别拿"nap=0"当这一条生效的证据。 */
++     * 要求 on_battery），别拿"nap=0"当这一条生效的证据。
++     * naps= / drops= 是**自上次开机**的两个累计数（只在 RAM 里）：拔了 USB 板子也不掉电，
++     * 所以电池那一趟发生的都记着，插回来读这一句就能复盘 —— 这一条是专门补"电脑 ping 不通屏"
++     * 那个废判据的（HANDOFF §15.6）。电池那一趟要的证据是 naps=0 且 drops=0。 */
 +    if (!strncmp(line, "stay", 4) && (line[4] == '\0' || line[4] == ' ')) {
 +        const char *rest = line + 4;
 +        while (*rest == ' ') rest++;
@@ -5426,8 +5447,9 @@ index 7c579bb..73b16a2 100644
 +            fflush(stdout);
 +            return true;
 +        }
-+        printf("@stay on=%d nap=%d wifi=%d\n", (int)muse_settings_stay_online(),
-+               (int)s_napping, (int)muse_wifi_connected());
++        printf("@stay on=%d nap=%d naps=%lu drops=%lu wifi=%d\n", (int)muse_settings_stay_online(),
++               (int)s_napping, (unsigned long)s_nap_events, (unsigned long)s_wifi_drops,
++               (int)muse_wifi_connected());
 +        fflush(stdout);
 +        return true;
 +    }
@@ -5467,7 +5489,7 @@ index 7c579bb..73b16a2 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1076,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1098,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
