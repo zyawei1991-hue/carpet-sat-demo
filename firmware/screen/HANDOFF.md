@@ -1762,19 +1762,40 @@ ping -n 6 -w 2000 192.168.43.13 → 已发送 6，已接收 1（那条是本机�
   `s_wifi_drops` = Wi-Fi 从"连着"变成"没连着"几次（`update_wifi_nap()` 里 `was_up && !up` 那一条，`:593-598`）。
   开机清零，不需要 NVS —— 要证的本来就是"这一趟"，不是"这台机器一辈子"。
 - `>stay` 回读从 `on=%d nap=%d wifi=%d` 变成 `on=%d nap=%d naps=%lu drops=%lu wifi=%d`（`:1028-1030`）。
-- 判据：跑完「拔 USB → 让它自己熄屏 3 分钟 → 插回来」这一趟之后读一次，
-  **`on=1` 期望 `naps=0 drops=0`**（开关生效 = 根本没打盹，也就没掉网）；
-  反过来把开关关掉应该看到 `naps≥1 drops≥1`，那才证明这个仪器不是永远读 0 的摆设。
 - 一个真踩过的坑，记下来免得再犯：`was_up` 的初值一开始写成 `true`，而刷完那一刻 Wi-Fi 本来就没起来，
   于是刚开机就白记一次掉线，实测读到 `@stay on=1 nap=0 naps=0 drops=1 wifi=0`。
-  改成 C 的零初值（`static bool was_up;`）之后重刷，基线干净：
+  改成 C 的零初值（`static bool was_up;`）之后重刷，基线才是 `naps=0 drops=0`。
+- 判据：跑完「拔 USB → 让它自己熄屏 3 分钟 → 插回来」这一趟之后读一次，
+  **`on=1` 期望 `naps=0 drops=0`**（开关生效 = 根本没打盹，也就没掉网）。
+  对照组（关掉开关应该看到 `naps≥1`）**只能在同一趟电池里做**，原因见下面"台架上永远走不到自动 nap"那一条。
+- **仪器自己先证过一次**（就在这一轮，电脑前，不需要热点）：`>nap` 走的是 `s_nap_now` 那条显式口，
+  当场让它 nap，`naps` 立刻从 0 变 1；`w` 醒过来之后 `nap` 归 0、累计数留着。
+  所以 `naps=0` 不是"这个数永远是 0"：
 
 ```
-@stay on=1 nap=0 naps=0 drops=0 wifi=0
+@stay on=1 nap=0 naps=0 drops=0 wifi=0      ← 刷完的基线，没人碰过
+>nap  →  I (732876) muse_input: display paused (USB host: CPU at full speed)
+          I (732881) muse_input: Wi-Fi napping
+@stay on=1 nap=1 naps=1 drops=0 wifi=0      ← 计数器是活的
+w     →  @stay on=1 nap=0 naps=1 drops=0 wifi=0   ← nap 结束，累计数留在 RAM 里
 ```
 
-- **这一趟仍然没跑成**：卡在这台 Mate 60 的热点当前不在空中 ——
-  `link.wifi: scan complete, 0 APs found`，`wifi=0` 的时候"熄屏 3 分钟"测的是"没网时会不会打盹"，
+  `drops` 那一次仍是 0，不是仪器坏：nap 那一刻 Wi-Fi **本来就没连着**（`was_up` 为假），
+  而 `drops` 只数"连着 → 断了"这一个转换。这一半要有网之后再断才数得到 ——
+  也正是那一趟电池要顺带称的东西。
+- **台架上永远走不到"自动 nap"这一条**，这是这一轮读代码读出来的硬事实：
+  `muse_input.c:543` 是 `want_low = pause && !muse_console_host()`，而 `auto_nap` 要求 `s_cpu_low`
+  （`:607`）。**插着 USB 跟电脑说话时 `s_cpu_low` 恒假 ⇒ 自动 nap 恒不发生**，
+  跟开关开没开没有关系。所以"开关挡住了自动 nap"这半条在电脑前一次也测不出来，
+  要么拔电（就是那一趟），要么用 `>nap` —— 而 `>nap` 故意绕开开关，拿它验开关是验不出来的。
+  §15.4 第 1 条那句"只能在现场称"到这里才算说死。
+- 顺手一条 bench 坑：`>sleep` 只认 `SLEEP_CHOICES = {0,30,60,120,300,600}` 里**当前档位之后**的值，
+  我发 `>sleep 30`（当时是 120）拿到的是 `sleep 30: error: unknown command or bad value`，
+  而且 `set_asleep(false, "serial")` 藏在报错那条路径里 —— **报错顺带把屏叫醒了**。
+  别拿 `>sleep` 当"让它熄屏"的工具，要用 `z` 或者真等自动熄屏。这一轮之后 `>status` 里 `"sleep":120` 原样还在。
+- **那一趟仍然没跑成**：卡在这台 Mate 60 的热点当前不在空中 ——
+  `link.wifi: scan complete, 0 APs found`，`no saved wifi network nearby`（同一次扫描在别的时间点能找到 3 个邻居，
+  说明扫描本身好的，只是 `Mate 60` 不在）。`wifi=0` 的时候"熄屏 3 分钟"测的是"没网时会不会打盹"，
   不是要测的那件事。热点开起来、`wifi=1 linked=1` 之后再做这一趟才有意义。
 
 ### 15.8 同步状态
