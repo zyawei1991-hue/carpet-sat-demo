@@ -2702,10 +2702,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_lang_zh.c b/esp32/components/muse/carpet/carpet_lang_zh.c
 new file mode 100644
-index 0000000..796bc53
+index 0000000..798e6d3
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_lang_zh.c
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,314 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2932,6 +2932,9 @@ index 0000000..796bc53
 +    { "10 minutes", "10 分钟" },
 +    { LV_SYMBOL_EYE_CLOSE "  Sleep now", LV_SYMBOL_EYE_CLOSE "  马上熄屏" },
 +    { "Turn the screen off after Muse has been idle for:", "空闲多久之后熄屏：" },
++    { "Stay online when asleep", "熄屏后保持联网" },
++    { "On: still reachable over Wi-Fi while dark, at the cost of battery.",
++      "开着时熄屏也连着 Wi-Fi，手机随时能连上；代价是更费电。" },
 +    { "Tap the screen or press either button to wake.", "碰屏幕或按任意键都能唤醒。" },
 +
 +    /* ---------- Battery ---------- */
@@ -3083,10 +3086,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..5cd8e1b
+index 0000000..dd8d4fd
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1041 @@
+@@ -0,0 +1,1062 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3964,7 +3967,13 @@ index 0000000..5cd8e1b
 +     * 密码不印 —— 串口日志会被抄进交接文档，那玩意儿抄一次就是一份凭据。 */
 +    char ssid[MUSE_SSID_MAX + 1], pass[MUSE_PASS_MAX + 1];
 +    muse_settings_wifi(ssid, pass);
-+    printf("@url wifi=%d ssid=%s\n", (int)muse_wifi_connected(), ssid[0] ? ssid : "(none)");
++    /* fails/err：拨不上到底是谁的问题，现场只有这两个数分得开 ——
++     * errno=119 是到不了手机（网的事，keeper 会重新关联），errno=113 是端口没人听
++     * （App 的事），http≠0 才是真有一个服务端把这一轮拒了。 */
++    char err[120];
++    screen_link_last_error(err, sizeof(err));
++    printf("@url wifi=%d ssid=%s fails=%lu%s%s\n", (int)muse_wifi_connected(), ssid[0] ? ssid : "(none)",
++           (unsigned long)screen_link_dial_fails(), err[0] ? " err=" : "", err);
 +    printf("@url built-in=%s  set: >url ws://a.b.c.d:8443  clear: >url clear\n",
 +           CONFIG_SCREEN_LINK_URL);
 +    fflush(stdout);
@@ -4018,6 +4027,21 @@ index 0000000..5cd8e1b
 +    out->linked = s_linked;
 +    out->negotiated = s_negotiated;
 +    out->gap_s = screen_link_state_gap_s();
++}
++
++/*
++ * 给 keeper 的两句。它管这张网卡，而"卡说还连着、其实已经到不了手机"这一种死法
++ * 只有拨号那一侧看得见：esp_wifi 那边仍是 connected，keeper 每轮都判定"什么都不用做"，
++ * 于是每一条拨号都在撞同一个没有路由的地址。keeper 拿这个数决定要不要重新关联。
++ */
++uint32_t carpet_link_dial_fails(void)
++{
++    return screen_link_dial_fails();
++}
++
++void carpet_link_last_error(char *out, size_t cap)
++{
++    screen_link_last_error(out, cap);
 +}
 +
 +/* 开发口：文字和声音一起来。turn_id 两边都用 "audtest" —— 这条的目的就是让
@@ -4079,9 +4103,9 @@ index 0000000..5cd8e1b
 +
 +    /* gap 换算成页面第一行那句中文的规则写在 carpet_page.c 的 tick 里：
 +     * 没网=等网络、没连=未接入、gap 无穷=等首帧、>10s=掉线重连、>3s=卡N秒、否则=已接入。 */
-+    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu\n",
++    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu fails=%lu\n",
 +           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state,
-+           (unsigned long)screen_link_watchdog_fires());
++           (unsigned long)screen_link_watchdog_fires(), (unsigned long)screen_link_dial_fails());
 +    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
 +    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
 +    /* 首屏那条带上的整句：live=还有话挂着，mode=脸现在哪个状态
@@ -4130,10 +4154,10 @@ index 0000000..5cd8e1b
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..d4f7c75
+index 0000000..969c865
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,156 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -4250,6 +4274,13 @@ index 0000000..d4f7c75
 +void carpet_link_url(char *out, size_t n, bool *from_nvs);
 +esp_err_t carpet_link_set_url(const char *url);
 +void carpet_link_url_dump(void);
++/*
++ * 连着拨不上多少次，和最后一条失败的原因（都是 screen_link 那两份的转发，
++ * 屏侧要读的是这两句，不是那个组件的头文件）。给 keeper 判"网还连着但已经到不了手机"，
++ * 理由写在 screen_link.h 的 screen_link_dial_fails 注释里。
++ */
++uint32_t carpet_link_dial_fails(void);
++void carpet_link_last_error(char *out, size_t cap);
 +
 +/*
 + * 开发口：把一句话直接塞进首屏那条带，当它是答句（脸进 speaking、按 2.5 秒一页翻）。
@@ -5221,8 +5252,22 @@ index 0000000..53f5a9a
 +void carpet_page_goto(const char *page_name);
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/muse_app.c b/esp32/components/muse/muse_app.c
+index d27f69e..ccc566a 100644
+--- a/esp32/components/muse/muse_app.c
++++ b/esp32/components/muse/muse_app.c
+@@ -54,6 +54,9 @@ static void on_setting(muse_setting_t what)
+     case MUSE_SETTING_WIFI:
+         muse_wifi_apply();
+         break;
++    case MUSE_SETTING_STAY_ONLINE:
++        muse_wifi_apply();   /* a nap already under way ends on the next pass */
++        break;
+     case MUSE_SETTING_BLE:
+         muse_ble_apply();
+         break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..250d75e 100644
+index 7c579bb..73b16a2 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,13 @@
@@ -5239,7 +5284,50 @@ index 7c579bb..250d75e 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +899,117 @@ static bool console_command(char *line, bool whole)
+@@ -560,11 +567,20 @@ static bool update_power(void)
+  * power arrives; meanwhile nothing reaches the device over the network.
+  * Not while a voice note recorded offline waits to go (for a while). Returns
+  * true while napping.
++ *
++ * "Stay online" (settings, Sleep page) turns the automatic part of this off:
++ * whatever is supposed to reach the screen then finds it at the network,
++ * without anyone touching the screen first. The association is all it gives up
++ * either way - resting already puts the radio in its deepest modem sleep
++ * (muse_voice.c's MUSE_WIFI_REST), so it still wakes for one beacon in ten.
++ * ">nap" on the bench still naps regardless: it is an explicit measurement
++ * request, not this timer.
+  */
++static volatile bool s_napping;   /* 现在正在 nap 吗；`>stay` 回读用 */
++
+ static bool update_wifi_nap(TickType_t now, bool paused)
+ {
+     static TickType_t low_since;
+-    static bool napping;
+     if (!s_cpu_low) {
+         low_since = now;
+     }
+@@ -572,14 +588,15 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+         s_nap_now = false;
+         muse_state_set_as_if_battery(false);
+     }
+-    bool nap = paused && !muse_voice_notes_waiting()
+-               && (s_nap_now || (s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS)));
+-    if (nap != napping) {
+-        napping = nap;
++    bool auto_nap = !muse_settings_stay_online()
++                    && s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS);
++    bool nap = paused && !muse_voice_notes_waiting() && (s_nap_now || auto_nap);
++    if (nap != s_napping) {
++        s_napping = nap;
+         ESP_LOGI(TAG, "Wi-Fi %s", nap ? "napping" : "waking");
+         muse_wifi_nap(nap);
+     }
+-    return napping;
++    return s_napping;
+ }
+ 
+ /* Independent POWER never goes through PTT, AUX's menu or its setup double
+@@ -892,6 +909,139 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -5321,6 +5409,28 @@ index 7c579bb..250d75e 100644
 +        carpet_link_url_dump();
 +        return true;
 +    }
++    /* 熄屏后要不要保持联网 —— 和设置页「自动熄屏」那一格是同一个 NVS key，不是两套状态。
++     * 为什么也给串口一条：这一条只在**电池**上看得见差别，而那会儿通常没有串口可看，
++     * 所以现场要么在电脑前提前把它定下来，要么事后拿这一句证明当时是开着的。
++     * nap=1 = 这会儿真的离开 Wi-Fi 了；插着 USB 它永远是 0（update_wifi_nap 的 paused
++     * 要求 on_battery），别拿"nap=0"当这一条生效的证据。 */
++    if (!strncmp(line, "stay", 4) && (line[4] == '\0' || line[4] == ' ')) {
++        const char *rest = line + 4;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "on")) {
++            muse_settings_set_stay_online(true);
++        } else if (!strcmp(rest, "off")) {
++            muse_settings_set_stay_online(false);
++        } else if (*rest) {
++            printf("@stay 只认 on / off（不带参数=回读）\n");
++            fflush(stdout);
++            return true;
++        }
++        printf("@stay on=%d nap=%d wifi=%d\n", (int)muse_settings_stay_online(),
++               (int)s_napping, (int)muse_wifi_connected());
++        fflush(stdout);
++        return true;
++    }
 +    /* 中文表自检：把这张表里**从没画过**的键逐条打出来，最后报画过几条/共几条。
 +     * 截图只看得见他画出来的那些，这一条看的是剩下的 —— 英文原文被改了个词、表却没跟着改，
 +     * 屏上只是那一行退回英文，看着像"还剩几行没翻译"，只有这条能把它指出来。
@@ -5357,7 +5467,7 @@ index 7c579bb..250d75e 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1044,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1076,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -5439,10 +5549,16 @@ index 46419e6..da1e3bf 100644
  const char *muse_lang_status(const char *en)
  {
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
-index fd499cd..fe85866 100644
+index fd499cd..6270596 100644
 --- a/esp32/components/muse/muse_settings.c
 +++ b/esp32/components/muse/muse_settings.c
-@@ -46,6 +46,7 @@ static struct {
+@@ -41,11 +41,13 @@ static struct {
+     uint16_t sleep_s;
+     bool wifi_on;
+     bool ble_on;
++    bool stay_online;
+     char ssid[MUSE_SSID_MAX + 1];
+     char pass[MUSE_PASS_MAX + 1];
      char host[MUSE_HOST_MAX + 1];
      char vm[MUSE_VM_MAX + 1];
      char token[MUSE_TOKEN_MAX + 1];
@@ -5450,7 +5566,15 @@ index fd499cd..fe85866 100644
  } s = {
      .volume = CONFIG_MUSE_DEFAULT_VOLUME,
      .speaker_on = true,
-@@ -141,13 +142,15 @@ esp_err_t muse_settings_init(void)
+@@ -136,18 +138,23 @@ esp_err_t muse_settings_init(void)
+     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
+         s.ble_on = b;
+     }
++    if (nvs_get_u8(s_nvs, "stay_online", &b) == ESP_OK) {
++        s.stay_online = b;
++    }
+     load_str("ssid", s.ssid, sizeof(s.ssid));
+     load_str("pass", s.pass, sizeof(s.pass));
      load_str("host", s.host, sizeof(s.host));
      load_str("vm", s.vm, sizeof(s.vm));
      load_str("token", s.token, sizeof(s.token));
@@ -5460,15 +5584,15 @@ index fd499cd..fe85866 100644
      s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
      s.brightness = clampi(s.brightness, 10, 100);
 -    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
-+    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s",
++    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s, nap %s",
               s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
 -             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
 +             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token",
-+             s.link_url[0] ? s.link_url : "built-in");
++             s.link_url[0] ? s.link_url : "built-in", s.stay_online ? "stays online" : "leaves wifi");
      return ESP_OK;
  }
  
-@@ -208,6 +211,29 @@ size_t muse_settings_hatch_token_len(void)
+@@ -208,6 +215,29 @@ size_t muse_settings_hatch_token_len(void)
      return n;
  }
  
@@ -5498,8 +5622,29 @@ index fd499cd..fe85866 100644
  void muse_settings_set_volume(int pct)
  {
      s.volume = clampi(pct, 0, 100);
+@@ -258,6 +288,20 @@ void muse_settings_set_ble_on(bool on)
+     notify(MUSE_SETTING_BLE);
+ }
+ 
++bool muse_settings_stay_online(void)
++{
++    return s.stay_online;
++}
++
++void muse_settings_set_stay_online(bool on)
++{
++    s.stay_online = on;
++    save_u8("stay_online", on);
++    // Turning it on should end a nap that is already under way, not wait for
++    // the next wake; muse_input's task recomputes the flag itself.
++    notify(MUSE_SETTING_STAY_ONLINE);
++}
++
+ void muse_settings_set_wifi(const char *ssid, const char *pass)
+ {
+     if (muse_link_wifi_set(ssid ? ssid : "", ssid && ssid[0] && pass ? pass : "")) {
 diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
-index 5788e5b..74ef9d0 100644
+index 5788e5b..3571316 100644
 --- a/esp32/components/muse/muse_settings.h
 +++ b/esp32/components/muse/muse_settings.h
 @@ -33,6 +33,10 @@
@@ -5513,7 +5658,15 @@ index 5788e5b..74ef9d0 100644
  
  #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
  
-@@ -69,6 +73,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
+@@ -46,6 +50,7 @@ typedef enum {
+     MUSE_SETTING_BLE,
+     MUSE_SETTING_HATCH,
+     MUSE_SETTING_VOICE_NOTES,
++    MUSE_SETTING_STAY_ONLINE,   /* keep Wi-Fi associated through the screen's nap */
+ } muse_setting_t;
+ 
+ typedef void (*muse_setting_cb_t)(muse_setting_t what);
+@@ -69,6 +74,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
  void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
  void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
  size_t muse_settings_hatch_token_len(void);
@@ -5525,8 +5678,23 @@ index 5788e5b..74ef9d0 100644
  
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
+@@ -77,6 +87,14 @@ void muse_settings_set_brightness(int pct);
+ void muse_settings_set_sleep_s(int secs);
+ void muse_settings_set_wifi_on(bool on);
+ void muse_settings_set_ble_on(bool on);
++/* Off (the default) is Muse's own power-saving behaviour: on battery, two
++ * minutes after the screen goes dark the device leaves Wi-Fi entirely until
++ * something wakes it, so nothing reaches it over the network while it sleeps.
++ * On, it stays associated in the deepest modem sleep instead, which is what
++ * lets a phone-side server dial-in work without anyone touching the screen.
++ * Polled where it's used (muse_input.c's nap), so no hardware applies it. */
++bool muse_settings_stay_online(void);
++void muse_settings_set_stay_online(bool on);
+ /* A network name is remembered first among the saved ones and joined now;
+  * an empty ssid forgets every saved network. */
+ void muse_settings_set_wifi(const char *ssid, const char *pass);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..a4407b6 100644
+index 20c46d3..8344d33 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -5561,7 +5729,15 @@ index 20c46d3..a4407b6 100644
  
  /* Hatch page. */
  static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
-@@ -166,6 +177,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
+@@ -128,6 +139,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+ static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
+ #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
+ static lv_obj_t *s_sleep_checks[SLEEP_COUNT], *s_sleep_rows[SLEEP_COUNT];
++static lv_obj_t *s_stay_sw;
+ static int s_sleep_shown = -1;
+ 
+ /* Battery page. */
+@@ -166,6 +178,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
      return font;
  }
  
@@ -5595,7 +5771,7 @@ index 20c46d3..a4407b6 100644
  /* A 172 px portrait panel cannot fit an icon, name and status side by side. */
  static bool narrow_panel(void)
  {
-@@ -199,11 +237,17 @@ static int stacked_text_w(void)
+@@ -199,11 +238,17 @@ static int stacked_text_w(void)
      return (s_tiny ? TINY_LIST_W : muse_board->width - 16) - 20;
  }
  
@@ -5614,7 +5790,7 @@ index 20c46d3..a4407b6 100644
      lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
      lv_label_set_text(l, muse_text_showable(text, shown, sizeof(shown)));
      return l;
-@@ -212,7 +256,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
+@@ -212,7 +257,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
  static void set_text(lv_obj_t *l, const char *text)
  {
      char shown[SHOWN_MAX];
@@ -5623,7 +5799,7 @@ index 20c46d3..a4407b6 100644
      if (strcmp(lv_label_get_text(l), text) != 0) {
          lv_label_set_text(l, text);
      }
-@@ -480,6 +524,58 @@ static lv_obj_t *column(lv_obj_t *list)
+@@ -480,6 +525,58 @@ static lv_obj_t *column(lv_obj_t *list)
      return l;
  }
  
@@ -5682,7 +5858,7 @@ index 20c46d3..a4407b6 100644
  /* Label and value, not tappable. */
  static lv_obj_t *info_row(lv_obj_t *list, const char *text)
  {
-@@ -635,7 +731,7 @@ static void on_text_show(lv_event_t *e)
+@@ -635,7 +732,7 @@ static void on_text_show(lv_event_t *e)
      (void)e;
      bool pw = !lv_textarea_get_password_mode(s_text_ta);
      lv_textarea_set_password_mode(s_text_ta, pw);
@@ -5691,7 +5867,7 @@ index 20c46d3..a4407b6 100644
  }
  
  /* Beside the keyboard's field, a button to show a password. */
-@@ -752,7 +848,7 @@ static void build_text_page(lv_obj_t *tile)
+@@ -752,7 +849,7 @@ static void build_text_page(lv_obj_t *tile)
      int top = text_y(98);
      if (narrow_panel()) {
          /* Portrait panels need a header inside the screen, not the round layout. */
@@ -5700,7 +5876,7 @@ index 20c46d3..a4407b6 100644
          single_line(s_text_title, muse_board->width - 16);
          lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
          lv_obj_set_width(s_text_ta, muse_board->width - 60);
-@@ -791,6 +887,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+@@ -791,6 +888,12 @@ static void open_text(const char *title, const char *initial, bool password, int
      lv_textarea_set_max_length(s_text_ta, max_len);
      lv_textarea_set_password_mode(s_text_ta, password);
      lv_textarea_set_text(s_text_ta, initial ? initial : "");
@@ -5713,7 +5889,7 @@ index 20c46d3..a4407b6 100644
      lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
      if (s_text_kp) {
          muse_keypad_reset(s_text_kp, password);
-@@ -944,10 +1046,12 @@ static bool rebuild_scan_list(void)
+@@ -944,10 +1047,12 @@ static bool rebuild_scan_list(void)
          bool saved = is_saved(s_aps[i].ssid);
          saved_seen |= saved;
          char buf[24];
@@ -5728,7 +5904,7 @@ index 20c46d3..a4407b6 100644
          }
          lv_label_set_text(v, buf);
      }
-@@ -973,6 +1077,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -973,6 +1078,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -5762,7 +5938,7 @@ index 20c46d3..a4407b6 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1119,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1120,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -5778,7 +5954,7 @@ index 20c46d3..a4407b6 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1006,27 +1146,29 @@ static void tick_wifi(void)
+@@ -1006,27 +1147,29 @@ static void tick_wifi(void)
      char buf[128];
      switch (w.state) {
      case MUSE_WIFI_OFF:
@@ -5815,7 +5991,7 @@ index 20c46d3..a4407b6 100644
          break;
      }
      set_text(s_wifi_status, buf);
-@@ -1046,6 +1188,23 @@ static void tick_wifi(void)
+@@ -1046,6 +1189,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -5839,7 +6015,7 @@ index 20c46d3..a4407b6 100644
  }
  
  /* ---------- Hatch ---------- */
-@@ -1125,12 +1284,26 @@ static void build_hatch_page(lv_obj_t *tile)
+@@ -1125,12 +1285,26 @@ static void build_hatch_page(lv_obj_t *tile)
      s_link_status = note(list, "");
      button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
      s_hatch_status = note(list, "");
@@ -5872,7 +6048,7 @@ index 20c46d3..a4407b6 100644
                 "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
                 "gadgets.muse.ai; one set here replaces the firmware's. "
                 "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
-@@ -1142,7 +1315,8 @@ static void tick_hatch(void)
+@@ -1142,7 +1316,8 @@ static void tick_hatch(void)
      const char *paired = !muse_link_hatch_linked()    ? "not paired"
                           : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
                                                           : "paired";
@@ -5882,7 +6058,7 @@ index 20c46d3..a4407b6 100644
      set_text(s_link_status, link);
      if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
          s_link_reset_armed_us = 0;
-@@ -1153,9 +1327,13 @@ static void tick_hatch(void)
+@@ -1153,9 +1328,13 @@ static void tick_hatch(void)
      muse_hatch_status(&h);
      char buf[96];
      if (h.detail[0]) {
@@ -5898,7 +6074,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_hatch_status, buf);
      lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-@@ -1218,11 +1396,12 @@ static void tick_ble(void)
+@@ -1218,11 +1397,12 @@ static void tick_ble(void)
          strlcpy(buf, "Off", sizeof(buf));
          break;
      case MUSE_BLE_ADVERTISING:
@@ -5913,7 +6089,7 @@ index 20c46d3..a4407b6 100644
          break;
      }
      set_text(s_ble_status, buf);
-@@ -1235,10 +1414,12 @@ static void tick_ble(void)
+@@ -1235,10 +1415,12 @@ static void tick_ble(void)
  
  /* ---------- Sound ---------- */
  
@@ -5927,7 +6103,35 @@ index 20c46d3..a4407b6 100644
      set_text(l, buf);
  }
  
-@@ -1431,16 +1612,25 @@ static void build_battery_page(lv_obj_t *tile)
+@@ -1378,17 +1560,27 @@ static void on_sleep_now(lv_event_t *e)
+     muse_state_set_asleep(true);
+ }
+ 
++static void on_stay_sw(lv_event_t *e)
++{
++    muse_settings_set_stay_online(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
++}
++
+ static void build_sleep_page(lv_obj_t *tile)
+ {
+     lv_obj_t *list;
+     s_sleep = page(tile, "AUTO-SLEEP", true, &list);
+     s_sleep_shown = -1;
+     note(list, "Turn the screen off after Muse has been idle for:");
++    /* First row, above the five choices: on the round panel the choice list
++     * already fills the tile, and this switch is the one row the demo needs to
++     * be reachable without scrolling. */
++    s_stay_sw = switch_row(list, "Stay online when asleep", muse_settings_stay_online(), on_stay_sw);
+     for (int i = 0; i < SLEEP_COUNT; i++) {
+         s_sleep_rows[i] = row(list, NULL, SLEEP_NAMES[i], &s_sleep_checks[i], on_sleep_choice,
+                               (void *)(intptr_t)i);
+         lv_obj_set_style_text_color(s_sleep_checks[i], lv_color_hex(COLOR_ACCENT), 0);
+     }
++    note(list, "On: still reachable over Wi-Fi while dark, at the cost of battery.");
+     button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
+     note(list, "Tap the screen or press either button to wake.");
+ }
+@@ -1431,16 +1623,25 @@ static void build_battery_page(lv_obj_t *tile)
      s_battery = page(tile, "BATTERY", true, &list);
      s_batt_shown_us = 0;
      s_batt_status = note(list, "");
@@ -5962,7 +6166,7 @@ index 20c46d3..a4407b6 100644
                 "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
  }
  
-@@ -1468,14 +1658,14 @@ static void tick_battery(void)
+@@ -1468,14 +1669,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -5981,7 +6185,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1686,10 @@ static void tick_battery(void)
+@@ -1496,10 +1697,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -5994,7 +6198,7 @@ index 20c46d3..a4407b6 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1706,7 @@ static void tick_battery(void)
+@@ -1516,7 +1717,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -6003,7 +6207,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1733,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1744,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -6021,7 +6225,7 @@ index 20c46d3..a4407b6 100644
      }
      note(list, text);
  }
-@@ -1658,13 +1849,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+@@ -1658,13 +1860,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
  
  #if LV_USE_SNAPSHOT
  static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
@@ -6052,7 +6256,7 @@ index 20c46d3..a4407b6 100644
              return true;
          }
      }
-@@ -1688,6 +1895,22 @@ static void bench_open_pending(void)
+@@ -1688,6 +1906,22 @@ static void bench_open_pending(void)
              PAGES[i]->build(s_tile);
          }
          show(*PAGES[i]->obj);
@@ -6496,7 +6700,7 @@ index 1030652..e8fa4de 100644
              }
              if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..484ccee 100644
+index 0c74b08..6b8aa31 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -6510,7 +6714,20 @@ index 0c74b08..484ccee 100644
  #include "muse_input.h"
  #include "muse_link.h"
  #include "muse_mem.h"
-@@ -490,6 +494,17 @@ static bool none_nearby_lately(void) {
+@@ -72,6 +76,12 @@ static const char *TAG = "link.muse";
+ #define AWAY_MAX_US (10LL * 60 * 1000 * 1000)
+ #define AWAY_FRESH_US (10LL * 1000 * 1000)   // a look this recent that found none stands
+ #define SCAN_MAX 16
++// The screen dials the phone, and a phone hotspot that has quietly dropped this
++// station leaves us associating with no route: every dial dies with ENETUNREACH
++// while the radio still says connected, so none of the backoff above ever touches
++// it. That many dials in a row without one getting through is the sign to
++// re-associate rather than keep dialing from the same dead association.
++#define DIAL_STALL_FAILS 4
+ 
+ _Static_assert(MUSE_WIFI_SAVED_MAX >= WIFI_KNOWN_MAX, "room for every saved network");
+ 
+@@ -490,11 +500,23 @@ static bool none_nearby_lately(void) {
  // leaves Wi-Fi alone instead of dropping a network it has no copy of.
  #define WIFI_OVERRIDE (CONFIG_HOMEHUB_WIFI_SSID[0] != '\0')
  
@@ -6528,7 +6745,13 @@ index 0c74b08..484ccee 100644
  static void keeper_task(void *arg) {
      (void)arg;
      xEventGroupWaitBits(s_ready, BIT_LINK | BIT_MUSE, pdFALSE, pdTRUE, portMAX_DELAY);
-@@ -562,7 +577,7 @@ static void keeper_task(void *arg) {
+     load_creds();
+     uint32_t joined_gen = s_creds_gen;
++    uint32_t stalled_at = 0;    // the dial count a re-join was last tried at
+     int64_t next_try = 0;
+     int64_t backoff = RETRY_MIN_US;
+     int64_t away_backoff = AWAY_MIN_US;
+@@ -562,7 +584,7 @@ static void keeper_task(void *arg) {
                  ESP_LOGI(TAG, "screen off a while; left wifi");
                  napped = true;
              }
@@ -6537,16 +6760,36 @@ index 0c74b08..484ccee 100644
              ESP_LOGI(TAG, "wifi network changed; rejoining");
              wifi_mgr_disconnect();
              next_try = 0;
-@@ -571,7 +586,7 @@ static void keeper_task(void *arg) {
+@@ -571,7 +593,27 @@ static void keeper_task(void *arg) {
              backoff = RETRY_MIN_US;
              away_backoff = AWAY_MIN_US;
              s_away = false;
 -        } else if (!WIFI_OVERRIDE && !s_editing && esp_timer_get_time() >= next_try) {
++#if CONFIG_MUSE_CARPET_CARDS
++            // Connected here only means the association hasn't been torn down. The
++            // dials are what say whether the phone is reachable, so when a whole
++            // ladder of them fails without one getting through, re-associate
++            // instead of dialing from the same dead route forever.
++            uint32_t fails = carpet_link_dial_fails();
++            if (fails < stalled_at) {
++                stalled_at = fails;   // one got through since; the count restarted
++            }
++            if (fails >= DIAL_STALL_FAILS && fails - stalled_at >= DIAL_STALL_FAILS) {
++                stalled_at = fails;
++                char err[120] = "";
++                carpet_link_last_error(err, sizeof(err));
++                ESP_LOGW(TAG, "screen link dialed %lu times with none through (%s); rejoining wifi",
++                         (unsigned long)fails, err[0] ? err : "no error recorded");
++                wifi_mgr_disconnect();
++                next_try = 0;
++                backoff = RETRY_MIN_US;
++            }
++#endif
 +        } else if (!dev_override_now() && !s_editing && esp_timer_get_time() >= next_try) {
              // NVS has Muse's changes (s_editing is clear), so Link joins from
              // the same list the settings show.
              uint32_t gen = s_creds_gen;
-@@ -663,6 +678,11 @@ void muse_glue_start(void) {
+@@ -663,6 +705,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }

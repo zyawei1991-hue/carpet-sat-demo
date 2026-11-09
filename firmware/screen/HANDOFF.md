@@ -1630,3 +1630,105 @@ COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/
 正解在 §13 / `docs/APP-SCREEN-CONNECT.md` §6.1：`s_negotiated` 初值就是上限 3，`send_hello()` 之后
 立刻 `on_connected(s_negotiated)`，不等回执。真正算数的是 `ws 接入` 那行（打在
 `WEBSOCKET_EVENT_CONNECTED`，只在收到 HTTP 101 之后才派）。**对外不许再用 `contract=v3` 当"对面活着"的证据。**
+
+---
+
+## 15. 11-09：「每次要人手点一下屏」的机制是 nap，做成了设置页一个开关；顺带把拨号卡死自愈装上，`has_state=1` 这一轮称到了
+
+### 15.1 结论先给（App 那边那句"必须刷机"不成立）
+
+屏连不到手机，**不是 App 没做，也不是地址写死要重刷**。是 Muse 官方自带的省电行为：
+**电池供电 + 屏幕熄灭满 2 分钟**，屏自己把 Wi-Fi 整个断开（源码里叫 nap），断到下次有东西把它唤醒为止 ——
+断的时候手机侧、PC 侧谁都摸不到它，所以"要点一下屏才连得上"。USB 供电永远不 nap，
+§14.1 那条"零输入拨通"就是插着 USB 称的，两边不矛盾。
+
+现在这件事做成**设置页里的一个开关**（`熄屏后保持联网`）：不用刷机、不用重启、当场生效、重启还留着。
+默认关 = 官方省电行为；开 = 熄屏后仍保持关联（`WIFI_PS_MAX_MODEM` 那档深睡），代价是电池。
+
+### 15.2 屏侧改了哪几处（行号是这一轮读源码读出来的）
+
+- **nap 的闸门**：`esp32/components/muse/muse_input.c:591`
+  ```c
+  bool auto_nap = !muse_settings_stay_online()
+                  && s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS);
+  ```
+  `WIFI_NAP_MS` 还是 120000，`paused` 那条前提（要 `muse_state_on_battery()`）一个字没动 ——
+  所以 USB 那侧行为完全不变，改的只有"电池 + 熄屏"这一条。台架上的 `>nap` 仍然照 nap：
+  那是显式测量请求，不是这个定时器。
+- **开关存哪**：`muse_settings.c:44`（struct 里 `bool stay_online`）、`:141`（NVS `muse/stay_online`，
+  u8，缺键=默认 0）、`:291/:296` 读写函数、`muse_settings.h:96-97` 声明、`:53` 那条 `MUSE_SETTING_STAY_ONLINE`。
+  开机那行日志多带一尾：`..., link %s, nap %s`。
+- **当场生效**：`muse_app.c:57` 收到这个 setting 就 `muse_wifi_apply()`；已经在 nap 的那一次在下一轮重算里结束，
+  不等下一次唤醒。
+- **设置页那一格**：`muse_settings_ui.c:1577`（`switch_row`）+ `:1563` 回调。中文串走现成的表：
+  `carpet/carpet_lang_zh.c` 里 `Stay online when asleep` → `熄屏后保持联网`、那句 note →
+  `开着时熄屏也连着 Wi-Fi，手机随时能连上；代价是更费电。`
+- **台架口**：`muse_input.c:995` 的 `>stay`；`>stay on` / `>stay off` 改，不带参数回读
+  `@stay on=<开关> nap=<此刻在 nap 没> wifi=<连着没>`。
+- **拨号卡死自愈**：`main/muse_glue.c:84` `DIAL_STALL_FAILS 4` + `:601-613` —— Wi-Fi 还连着、
+  但抓屏链路连续 4 次拨号没一次通过，就打一条 W 然后 `wifi_mgr_disconnect()` 走全量重连
+  （重扫 + 重连存过的那张网），不再按退避阶梯死撞同一个 ARP 不到的地址。§14.2 要的第一件事到此做完。
+- **119 和 113 分得开了**：`components/screen_link/screen_link.c:449` `note_dial_error_text()` 从
+  `WEBSOCKET_EVENT_ERROR` 的正文里解析 `transport_error= / errno= / esp_ws_handshake_status_code=`，
+  `:75/:604/:614/:674` 维护 `s_dial_fails`（拨通即清零），`:765/:770` 两个读口；
+  `>url` 第二行、`>carpet` 第一行都带上了 `fails=` / `err=`。§14.2 要的第二件事做完。
+
+### 15.3 称到的（原始回读，全部 COM8，`sercmd_norst.py`/`cap.py` 抓的，不碰线不复位）
+
+1. **开关 + 持久化**：`@stay on=0 nap=0 wifi=1` → `@stay on=1 nap=0 wifi=1` → 复位后仍 `on=1`；
+   这一轮重刷（只动 UI 排布）后开机再读，还是 `@stay on=1 nap=0 wifi=1` —— 刷应用区没动 NVS。
+2. **那一格真上屏、而且不用滚**：`>ui.settings=sleep` 截图 `D:/dev/tmp/shot_sleep2.png`
+   （文件 1398×1398 = 466×466 @3x）。原来这格放在五个时长选项后面，圆屏一屏放不下（滚动条是关的、
+   台架也没有滚动的口），现在提到时长列表**上面第一格**。逐行量墨迹带：
+   `熄屏后保持联网` y=399..443 **h=45**，下面 `从不` y=606..647 **h=42**、`30 秒 / 1 分钟 / 2 分钟` 全在 45 上下 ——
+   同一档字号，没掉进 16 px fallback，也没有一行里大小不一。开关画在右边，紫色轨道 + 白色圆钮在右 = 开。
+   （第一次数到 h=96 那条是把**开关钮**并进了同一个带，不是字大；裁到 1:1 才看清。）
+3. **自愈真的触发过**（上一轮同一份逻辑，行号变了、行为没变）：
+   ```
+   W (15937) link.muse: screen link dialed 4 times with none through
+     (ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0); rejoining wifi
+   ```
+   后面紧跟一次真重新入网（`run -> init`、`reason=8`、扫描、`joining saved network 吨吨吨的Mate 30 5G`、
+   `auth -> assoc -> run`，全程 ~1.4 s）。
+4. **错误读数分得开**：`@url wifi=1 ssid=吨吨吨的Mate 30 5G fails=9 err=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0`
+   —— 119=ENETUNREACH（同网段 ARP 不到手机，问题在网）；113=ECONNREFUSED（对面在、没监听这个口，问题在 App）。
+5. **`has_state=1` 这一轮称到了**（§14 欠的那一条）：屏切到 Mate 60 热点、App 在 8443 上真在听之后，
+   ```
+   @carpet wifi=1 linked=1 contract=v3 gap_s=5 has_state=1 wd=0 fails=0
+   @carpet wifi=1 linked=1 contract=v3 gap_s=3 has_state=1 wd=0 fails=0
+   @carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+   @carpet sat=已锁定 下次3:21
+   ```
+   三次间隔 ~15 s，`gap_s` 一直是 0-5（`state` 1 Hz 在跑），`fails=0` 是"拨通过就清零"那条生效。
+   按 §14.4 的规矩，**算数的是 `has_state=1`，不是那行 `contract=v3`**。
+
+### 15.4 还没称到的，说清卡在哪
+
+1. **"电池 + 熄屏 3 分钟，手机侧仍然连得到"这条没在台上称成**：nap 的前提是
+   `muse_state_on_battery()`，板子插着 USB 就永远不成立，`>nap` 又是显式强制、不走这个开关 ——
+   所以这条只能在现场称。判据（给现场用）：电池供电、开关打开、屏幕熄灭 3 分钟后，
+   **手机热点的已连接设备列表里那块屏还在**，`>stay` 回读 `nap=0`。
+2. 那句 note（`开着时熄屏也连着 Wi-Fi…`）在截图里落在折叠区外、**没拍到像素**。
+   但它过了那道脚本守卫：`firmware/screen/tools/check_zh_table.py` 这轮跑出
+   `entries: 166   noto glyphs: 7240   problems: 0` —— 每个汉字都有字形、百分号/占位符对得上、
+   键还在画图那份文件里、宽度预算也没超，剩下的只有"排版挤不挤"这一条肉眼账。
+3. `snap.py` 一开 COM8 就复位板子那条（§14.3）仍然没修 —— 这一轮所有计数读数都改用
+   `sercmd_norst.py` / `cap.py`（开线前把 dtr/rts 压成 False）拿的，截图那一张是复位后的新会话，
+   所以 `shot_sleep2.png` 里的 UI 状态可信、计数不可信。
+4. **一次没抓到的转换，记下来免得下轮当谜**：`@url ... fails=9`（连的是 `吨吨吨的Mate 30 5G`）之后
+   我抓了 100 秒串口，那 100 秒里**一条 websocket / screen_link 日志都没有**，只有 5 秒一条的 `hb`；
+   再下一次读 `>url` 已经是 `ssid=Mate 60 fails=0 linked=1`。也就是说"换到 Mate 60 + 拨通"这一步
+   发生在两次抓取的缝里，没留下过程证据。`fails` 到 9 就停住不再涨、且 100 秒零次拨号尝试，
+   和退避阶梯（醒着最长 60 秒一档）能对上，但也可能升级那条已经把它接走了 —— **下一轮要称的话，
+   连着抓 3 分钟以上，别拿两段读数中间的空档讲因果**。
+
+### 15.5 同步状态
+
+`muse-carpet.patch` 这一轮重打过：**22 个文件、3826 行新增 / 86 行删，patch 6,803 行**
+（`esp32/components/muse/muse_app.c | 3 +` 是这轮新入列的那一条）。
+在 baseline `cdc169d` 干净 worktree 上 `git apply --check` 过、`git apply` 过，
+字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 对 `muse_glue.c` /
+`muse_settings_ui.c` / `carpet_lang_zh.c` / `sdkconfig.carpet` 四个文件比过，**内容和工作树一致**
+（`diff -rq` 报的那些 boards/*.c 差异全是 autocrlf 的行尾，不是内容 —— 那些文件根本没进 patch）。
+`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`；这一轮把
+`screen_link.c` 和 `include/screen_link.h` 从工作树拷回了本仓库。

@@ -69,6 +69,14 @@ static volatile int64_t s_last_state_us = 0;
  */
 static volatile uint32_t s_wd_fires = 0;
 /**
+ * 连着拨不上多少次（见头文件）。放这里而不是让调用方自己数：退避阶梯只有本文件看得见，
+ * 而"第几条失败才算网已经死了"这句话要连着阶梯一起说才成立。
+ */
+static volatile uint32_t s_dial_fails = 0;
+/** 最后一条拨号失败的原因，一行；写在线程回调里，读在 keeper/UI 任务，所以配一把自旋锁。 */
+static char s_last_err[120];
+static portMUX_TYPE s_err_mux = portMUX_INITIALIZER_UNLOCKED;
+/**
  * 上一帧 state 里手机给的 ts（Unix 毫秒）。0 = 这轮会话还没收到过 state。
  *
  * 这值由链路任务写、UI 任务读，而 S3 上 64 位读写不原子 —— 一次读到"半新半旧"就是
@@ -422,6 +430,51 @@ static void handle_frame(char *raw)
 
 /* ---------------- ws 回调 ---------------- */
 
+/* 一行存进 s_last_err（读的人只有串口回读，不画在屏上，所以不配字体）。 */
+static void store_dial_error(const char *one)
+{
+    taskENTER_CRITICAL(&s_err_mux);
+    strlcpy(s_last_err, one, sizeof(s_last_err));
+    taskEXIT_CRITICAL(&s_err_mux);
+}
+
+/*
+ * 从组件的错误正文里挑出"为什么没通"的三个数，拼成一行。
+ * 为什么要从正文挑：组件在自己的日志那一行里顺手把 transport 的 last error **清掉了**
+ * （esp_tls_get_and_clear_last_error），所以随后那条 DISCONNECTED 的数值位全是 0 ——
+ * 真机称到过：`(ESP_OK errno=0 http=0)`。正文是唯一还带着 errno=119 的地方。
+ * 现场要分的是 119（到不了手机，网的事）/ 113（端口没人听，App 的事）/ http≠0
+ * （真有服务端应答但拒了这一轮），三个数都在这一行里。
+ */
+static void note_dial_error_text(const char *text, int len)
+{
+    if (text == NULL || len <= 0) return;
+    char line[224];
+    snprintf(line, sizeof(line), "%.*s", len > (int)sizeof(line) - 1 ? (int)sizeof(line) - 1 : len, text);
+
+    char code[48] = "";
+    const char *p = strstr(line, "transport_error=");
+    if (p != NULL) {
+        p += 16;
+        int i = 0;
+        while (p[i] != '\0' && p[i] != ',' && i < (int)sizeof(code) - 1) {
+            code[i] = p[i];
+            i++;
+        }
+        code[i] = '\0';
+    }
+    int err_no = 0, http = 0;
+    const char *q = strstr(line, "errno=");
+    if (q != NULL) err_no = atoi(q + 6);
+    const char *h = strstr(line, "esp_ws_handshake_status_code=");
+    if (h != NULL) http = atoi(h + 29);
+
+    if (!code[0] && err_no == 0 && http == 0) return;   /* 不是拨号那一类的错，别覆盖上一条 */
+    char one[120];
+    snprintf(one, sizeof(one), "%s errno=%d http=%d", code[0] ? code : "ws", err_no, http);
+    store_dial_error(one);
+}
+
 /* 签名不是猜的，是对着组件头文件定的：esp_websocket_register_events 收的是
  * IDF 通用 esp_event_handler_t（四个参数），配置结构体里**没有** event_handler 字段，
  * `esp_websocket_event_handle_t` 这个类型也不存在 —— 1.5.0 到 1.8.0 全是这样。
@@ -445,12 +498,27 @@ static void ws_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
          * ERROR 只在有错误正文时才有。2026-11-05 就是被这条日志缺失坑的 —— 串口里 40 秒
          * 一个字没有，分不清"任务活着但在撞防火墙"和"任务压根没建起来"。 */
         ESP_LOGW(TAG, "ws 断开/未接通，下一次按退避阶梯再来");
+        if (evt != NULL && evt->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT
+            && (evt->error_handle.esp_tls_last_esp_err != ESP_OK
+                || evt->error_handle.esp_transport_sock_errno != 0
+                || evt->error_handle.esp_ws_handshake_status_code != 0)) {
+            /* 这一份是数值句柄：有的死法没有错误正文，只有它。有正文时它在 ERROR 之后
+             * 已经被组件清成 0 了，所以上面那一串判空是必须的 —— 否则这条会把
+             * ERROR 里称到的 errno=119 覆盖成 "ESP_OK errno=0"（真机称到过）。 */
+            char one[120];
+            snprintf(one, sizeof(one), "%s errno=%d http=%d",
+                     esp_err_to_name(evt->error_handle.esp_tls_last_esp_err),
+                     evt->error_handle.esp_transport_sock_errno,
+                     evt->error_handle.esp_ws_handshake_status_code);
+            store_dial_error(one);
+        }
         s_up = false;
         xEventGroupSetBits(s_eg, BIT_DOWN);
         break;
     case WEBSOCKET_EVENT_ERROR:
         if (evt->data_len > 0 && evt->data_ptr != NULL) {
             ESP_LOGW(TAG, "ws 错误：%.*s", (int)evt->data_len, (char *)evt->data_ptr);
+            note_dial_error_text((const char *)evt->data_ptr, evt->data_len);
         }
         break;
     case WEBSOCKET_EVENT_DATA: {
@@ -533,6 +601,7 @@ static void link_task(void *arg)
          * 重复 start() 是安全的：create_transport 进来先把上一轮的 transport_list 销毁。 */
         if (esp_websocket_client_start(s_ws) != ESP_OK) {
             if (s_stopping) break;
+            s_dial_fails++;
             sleep_backoff(BACKOFF_S[step]);
             if (step < BACKOFF_STEPS - 1) step++;
             continue;
@@ -542,6 +611,7 @@ static void link_task(void *arg)
         if (bits & BIT_STOP) break;
 
         if (bits & BIT_UP) {
+            s_dial_fails = 0;   /* 真连上过：这一串失败到此为止 */
             s_last_state_us = 0;
             /* 首帧的截止线：连上那一刻。下面只看 s_last_state_us 会瞎 —— 见那里的注释 */
             int64_t up_us = now_us();
@@ -597,6 +667,12 @@ static void link_task(void *arg)
          * 现在两条失败出口共用同一个阶梯。*/
         if (s_stopping) break;
 
+        /* 只有这一轮压根没连上才算「拨不上」；连上之后断掉的不算 —— 那种死法由
+         * state 看门狗和 wd 计数说话，混进这个数里，keeper 要判的"网络是不是已经
+         * 死了"就永远读不到一段真实的连续失败。 */
+        if (!(bits & BIT_UP)) {
+            s_dial_fails++;
+        }
         sleep_backoff(BACKOFF_S[step]);
         if (step < BACKOFF_STEPS - 1) step++;
     }
@@ -684,6 +760,19 @@ uint32_t screen_link_state_gap_s(void)
 uint32_t screen_link_watchdog_fires(void)
 {
     return s_wd_fires;
+}
+
+uint32_t screen_link_dial_fails(void)
+{
+    return s_dial_fails;
+}
+
+void screen_link_last_error(char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) return;
+    taskENTER_CRITICAL(&s_err_mux);
+    strlcpy(out, s_last_err, cap);
+    taskEXIT_CRITICAL(&s_err_mux);
 }
 
 uint32_t screen_link_state_age_ms(void)

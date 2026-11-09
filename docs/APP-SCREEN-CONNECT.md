@@ -323,3 +323,41 @@ I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
 - 任何"不用碰屏"的方案，验收只看屏侧串口两条：`hb ... wifi=up` **且** `@carpet has_state=1`。
   `linked=1` / `contract=v3` 都不算（§6.1）。
 
+## 9. 8.3 那两条已经落地（11-09）：设置页多一个开关，App 侧不用改任何东西
+
+机主定的两件事都做完了：**「两种都要，做成可切换」**（USB 照今天这样永不 nap，电池下靠一个开关保持联网）、
+**「继续用手机热点」**（所以屏侧加的是"拨号连续失败就重新入网"的自愈，不是换路由器）。
+
+- 屏上多的一格：设置 → 熄屏（`AUTO-SLEEP`）→ **`熄屏后保持联网`**，就在五个时长选项**上面第一格**，
+  不用滚。默认**关**（= Muse 官方省电行为）。开了以后熄屏也不再整机离开 Wi-Fi，
+  代价是电池 —— 现场要不要开由机主定，**App 不需要为它加任何按钮或说明**。
+- 串口侧：`>stay` 回读 / `>stay on` / `>stay off`（台架用，现场不需要）。
+- 8.2 那几条行号在这一轮之后有位移，现号见 `firmware/screen/HANDOFF.md` §15.2（闸门在 `muse_input.c:591`）。
+
+### 9.1 给 App 排查用的两个新字段（只是多印几个字，不改行为）
+
+`>url` 第二行和 `>carpet` 第一行现在长这样：
+
+```
+@url wifi=1 ssid=Mate 60 fails=0 err=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+```
+
+- `fails=` = **连续拨号没一次的次数**，拨通即清零。`fails` 一路涨 = 屏在反复撞同一个到不了的地址。
+- `err=` = 最后一次 transport 错误的原文，**现场就靠这三个数分锅**：
+  `errno=119`（ENETUNREACH）→ 屏根本 ARP 不到手机，问题在网（热点把屏踢了 / 屏连的是另一张网），
+  **不是** App 没监听；`errno=113`（ECONNREFUSED）或 `http≠0` → 手机在、但那个口没人听，是 App 侧。
+- 屏侧现在会在 `fails` 到 4 时自己做一次全量重连（断开 → 重扫 → 重连存过的那张网），
+  所以"屏说自己连着、手机却看不见它"这一类不用人手点屏了。
+
+### 9.2 验收（11-09 已在台上称到）
+
+```
+@carpet wifi=1 linked=1 contract=v3 gap_s=5 has_state=1 wd=0 fails=0
+@carpet wifi=1 linked=1 contract=v3 gap_s=3 has_state=1 wd=0 fails=0
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+```
+
+`has_state=1` 且 `gap_s` 稳在 0-5 = App 的 1 Hz `state` 真的在到，§4 / §6.5 那条判据到此满足。
+**电池那条只能现场称**：电池供电 + 开关打开 + 熄屏 3 分钟，热点的已连接设备列表里那块屏还在。
+
