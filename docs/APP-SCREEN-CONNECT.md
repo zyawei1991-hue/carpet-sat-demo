@@ -359,5 +359,7 @@ I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
 ```
 
 `has_state=1` 且 `gap_s` 稳在 0-5 = App 的 1 Hz `state` 真的在到，§4 / §6.5 那条判据到此满足。
+同一轮还拍到了屏上那一行 **`已接入`**（`shot_carpet_live.png`，只在链路 linked 时才画），
+而且是复位之后没碰屏自己回到这个状态的。
 **电池那条只能现场称**：电池供电 + 开关打开 + 熄屏 3 分钟，热点的已连接设备列表里那块屏还在。
 

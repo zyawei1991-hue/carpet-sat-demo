@@ -1701,6 +1701,11 @@ COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/
    ```
    三次间隔 ~15 s，`gap_s` 一直是 0-5（`state` 1 Hz 在跑），`fails=0` 是"拨通过就清零"那条生效。
    按 §14.4 的规矩，**算数的是 `has_state=1`，不是那行 `contract=v3`**。
+6. **复位后零输入自己回到"已接入"，而且拍到了屏**：上面那张截图是 `snap.py` 抓的（它会复位板子，§14.3），
+   复位后不碰屏再读一次：`@carpet wifi=1 linked=1 contract=v3 gap_s=1 has_state=1 wd=0 fails=0`、
+   `@stay on=1 nap=0 wifi=1`。截图 `D:/dev/tmp/shot_carpet_live.png` 里宫格页顶部那行是
+   **`已接入`**（琥珀紫），而这一行只在 `carpet_page.c:853` 那个 linked 分支才画 ——
+   也就是说"重启 → 自己连热点 → 自己拨 8443 → 屏上写出已接入"这一整条，全程没人点屏。
 
 ### 15.4 还没称到的，说清卡在哪
 
