@@ -263,3 +263,63 @@ public void start();
 - 白名单挡掉时：日志有 accept + hello（带那个编号），UI 要说「这台编号不在白名单」，
   不许说「没有屏来连」。
 
+## 8. 「每次要人手点一下屏才连得上」：机制在屏的 nap，不在 App（11-09 实测 + 源码定位）
+
+机主转的那份飞书方案文档（`ocnvqlj4rir4.feishu.cn/wiki/Q5S1wchdAi3TltkuNtkcuxDznPg`）这边打不开
+（302 → 飞书扫码登录），所以这一节先把我这一侧的事实和结论落到仓库；
+如果那份文档里有结论，请 App 侧把它写进本仓库或 Discussion，别只放飞书。
+
+### 8.1 现场实测：插着 USB、全程没碰屏，屏自己连热点、自己拨 8443
+
+被动抓串口（打开端口会顺带复位一次，所以这一轮是从开机开始的；抓在 `D:/dev/tmp/listen1.txt`）：
+
+```
+I (3668) wifi:state: auth -> init (0x200)
+W (3676) link.wifi: station disconnected reason=2 rssi=-49
+I (3684) link.wifi: retry connect (1/3)
+I (41988) link.heartbeat: hb t=41s setup=advertising wifi=up ws=down ...
+W (55450) screen_link: ws ... transport_error=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST, errno=119
+W (55468) screen_link: ws 断开/未接通，下一次按退避阶梯再来
+I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
+@carpet wifi=1 linked=0 contract=v0 gap_s=4294967295 has_state=0 wd=0
+@carpet url=ws://192.168.43.1:8443 src=factory
+```
+
+- `wifi=up` / `@carpet wifi=1`：**没有任何人手点屏**，屏自己关联上了热点。
+- `ws=down` + `errno=119`（ENETUNREACH）：到 `192.168.43.1` 没有路由 —— 手机热点没在应答
+  （App 开关没开、或热点把这个站踢了），**不是屏没连上网**。
+- `has_state=0`：对面一帧 `state` 都没推过来，和 §7 那一轮同一个形状。
+- 开机 3.6 s 那次 `reason=2`（关联被判无效）由屏自己 `retry connect (1/3)` 重试掉了，没让人介入。
+
+所以：**"只操作 App、不碰屏"在今天这套固件上，USB 供电时已经成立。**
+
+### 8.2 「要点一下屏」什么时候才成立：电池 + 屏幕熄灭满 2 分钟
+
+- `muse_input.c:84` —— `#define WIFI_NAP_MS (2 * 60 * 1000)`（注释：低功率满这么久，Wi-Fi 关到结束）。
+- `muse_input.c:583` —— nap 条件 = `paused && !muse_voice_notes_waiting() && (s_nap_now || (s_cpu_low && 到 2 分钟))`。
+- `muse_input.c:541` —— `pause` 要求 `muse_state_on_battery()`；**USB 上不着**，所以插着电永不 nap。
+- nap 一变真，keeper 直接整机离开 Wi-Fi：`muse_glue.c:572-578` `app_wifi_nap()`，
+  拨号停在原地；直到屏幕唤醒或 USB 到位才回来（`muse_glue.c:226-228` `op_wifi_nap` → `keeper_kick(KEEP_WIFI)`）。
+
+这是 SDK 里故意的省电行为（注释原话：keeping it associated costs more than the rest of the chip），
+**App 侧任何改法都修不了它**。
+
+### 8.3 「不碰屏」的三条路，按代价排
+
+1. **演示机走 USB 供电**：不刷机、不改 App，永不 nap（8.2）。今天就能演示。代价：拖线或带充电宝。
+2. **电池下也不碰屏**：nap 时不再整机离开 Wi-Fi，而是保持关联、把 modem sleep 拉满
+   （`muse_link.c:203-207` 的 `MUSE_WIFI_REST` → `WIFI_PS_MAX_MODEM` 已经是这个语义）。
+   我这边倾向把它做成设置页里一条可开关的项（默认保持现在的省电行为），
+   这样换策略不用重刷 —— **代价是熄屏待机电流上升，要不要接受由机主定**。
+3. **BLE 喊屏**（不碰屏地叫它重连）：不划算 —— CMD 特征带 `WRITE_ENC | WRITE_AUTHEN`
+   （`muse_ble.c:233-251`），要先按键配对；这一轮 `hb ... setup=advertising ble=advertising`
+   说明这台还没配对。
+
+### 8.4 两句要先纠正的（别把这两条算到屏上，也别拿它当必须刷机的理由）
+
+- **「必须刷机才能改地址」不成立**：地址走屏自己的设置页 Wi-Fi 那一格（串口 `>url` 可读写、
+  NVS `muse/link_url` 覆盖编译期默认值），8.1 的回读 `url=ws://192.168.43.1:8443 src=factory` 就是证据。
+  刷机只在 8.3-2 那条省电策略上才是必要的，而且是一次性的，之后换网络仍然只动设置页。
+- 任何"不用碰屏"的方案，验收只看屏侧串口两条：`hb ... wifi=up` **且** `@carpet has_state=1`。
+  `linked=1` / `contract=v3` 都不算（§6.1）。
+
