@@ -1932,15 +1932,79 @@ I (1066) muse_pmu: AXP2101 ready (hardware PWR hold-off 10 s, COMMON_CFG 34, PWR
 现场可用的结论（已经称到的那半边）：**充电宝 / USB 一直在，就没有这一档风险**——
 §15.1 那一轮之后所有插着 USB 的熄屏、nap、拨号、断网恢复都跑过了，没出现过重启。
 
-### 15.8 同步状态
+### 15.12 §15.11 那一问换的仪器：把"死之前那一刻"写进 NVS，断电也翻得出来（11-09 深夜，已刷上板，校准称过）
 
-`muse-carpet.patch` 这一轮（11-09 晚，§15.7 那两个 RAM 计数）重打过：
-**22 个文件、3848 行新增 / 86 行删，patch 6,825 行**
-（相对上一版只动了 `muse_input.c`：168 → 190）。
+按拍板那条「追根因（要再刷一版加诊断）」做的。为什么只能这么绕：§15.7 那台 RAM 仪器
+（`naps=`/`drops=`）在**整机断电**这一档上必然失效 —— 电一断 RAM 就归零，插回来只剩一个"重启过"。
+NVS 是这台机器上唯一扛得过断电的东西，所以每个可疑转折点当场落一条。
+
+新文件 `esp32/components/muse/carpet/carpet_diag.c`（226 行）/ `.h`（41 行），
+命名空间 `cdiag`，环 24 条，每条长这样（原始回读，非拼接）：
+
+```
+b4 t=0 rst=11 usb usb=1 mv=4123 pct=100 off=00 cfg=34 pen=06 key=a0 kl=a0 k1=10
+e0 t=120 dark usb=1 mv=4123 pct=100 off=00 cfg=34 pen=06 key=a0 kl=a0 k1=10
+```
+
+`b`=开机 / `e`=转折 / `t`=低功耗期间每 30 秒一条兜底。落的点（`muse_input.c`，都在
+`CARPET_DIAG()` 那两个宏后面，carpet 之外的构建是空话）：`power_off()` 最顶（`OFF!`）、
+`set_asleep()`（`dark`/`lit`）、`update_power()` 三档（`low+`/`pause+`/`full`）、
+`update_wifi_nap()`（`nap+`/`nap-`）、POWER 键 press/long/release（`key+`/`keyL`/`key-`）、
+输入循环每 2 秒那次电量读里的 **USB 通断**（`usb+`/`usb-`）。
+寄存器那几格来自新加的 `muse_pmu_diag_regs()`（纯读七个：0x00/0x01/0x10/0x21/0x22/0x27/0x49），
+`kl=`/`k1=` 是 `muse_pmu_init()` **清 INTSTS 之前**抄下来的那两格（不抄就永远看不到）。
+串口口：`>diag` 翻，`>diag clear` 抹空。
+
+三个校准发现，都是这一轮实测撞出来的，不是读代码读出来的：
+
+1. **开机那两条一开始根本落不上**：第一版刷完 `>diag` 回读 `seq=0`、翻出 0 条。
+   根因 `carpet_link_start()` 跑在 `muse_settings_init()`（也就是 `nvs_flash_init()`）之前，
+   `nvs_open` 当场失败被 `ensure_open()` 静默咽掉 —— 就是 §2 里那条
+   「在 `carpet_link_start()` 里 `url_read()` 会撞 `xQueueSemaphoreTake` 死循环」同一个坑的温和版。
+   改成"开机信息先在 RAM 里存着（复位原因、唤醒原因、PMU 那两格锁存都在），等 NVS 写得动了再补"，
+   `>diag` 和每条新记录都会先补欠着的这两条。
+2. **复位原因那张名字表我一开始是自己编的，编错了**：`rst=11` 被打成 `unknown`。
+   真正的枚举是 `ESP_RST_*`（`ESP_RST_USB=11`），现在直接抄 `muse_battery.c:562` 那个 `reset_name()`，
+   并把数字一起写（`rst=11 usb`）—— 这样这一条和 `@power` 里的 `"boot"` 说同一种话，
+   §15.11 那种"power on 还是 usb"的判读以后能互相对账。
+3. **环的大小和兜底间隔是算过的**：20 秒一条 × 5 分钟 = 15 条，会把 `usb-`/`dark` 那两条顶出环，
+   而那两条正是"什么时候拔的线""死在熄屏之前还是之后"的唯一时间戳。所以 30 秒一条、环 24 条。
+
+称到的部分（这一轮的原始回读，COM8，`sercmd_norst.py`，不复位不碰线）：
+
+```
+@diag cleared → @diag seq=0 slots=24 / 翻出 0 条      ← 抹空有效
+（刷完那次开机）
+I (15546) carpet.diag: b4 t=0 rst=11 usb ... kl=a0 k1=10
+I (15550) carpet.diag: b5 t=0 wake=0 ...
+@diag seq=6 slots=16 → 六条全翻出来，其中两条是**上一次开机**留下的 e0/e3 t=120 dark
+@stay    on=1 nap=0 naps=0 drops=0 wifi=1
+@status  ..."sleep":120, ssid "Mate 60"...
+@carpet  wifi=1 linked=1 contract=v3 gap_s=4 has_state=1 wd=0 fails=0
+```
+
+`e0/e3 t=120 dark` 这一对同时证明了两件事：**熄屏那一刻确实被记下来了**（120 秒自动熄屏，
+`>status` 里那格就是它），以及**记录真的扛得过重启**（这两条是重启之前写的）。
+
+一条仪器自身的风险，先说在前面别把它当成结论：**这一版每 30 秒往 flash 写一次**，
+flash 写入是电流尖峰。如果 §15.11 那个断电的根因是供电撑不住，这台仪器有可能自己就是那一下。
+所以那一趟的结果要和"没诊断时两次都死"（§15.11）对着看：**死得比原来快 = 仪器参与了，不能算根因**；
+死的位置和原来一致 = 这一条才是它死之前最后走到的那一步。
+
+还没称到的（就是这一趟本身，需要人手）：**拔掉 USB、让它自己熄屏放 5 分钟以上、再插回来读 `>diag`**。
+判读口径已经定好：环里最后一条是 `usb-` 之后没 `dark` → 死在亮屏阶段，和熄屏无关；
+最后是 `dark` 没有 `low+` → 死在显示暂停那一步；最后是 `low+` 或几条 `t=low` → 死在 light sleep 里，
+再看下一次开机那条 `rst=`（`brownout` 与 `power on` 是两个不同的故事）和 `kl=`（不是 00 就是按键那条路）。
+
+### 15.13 同步状态
+
+`muse-carpet.patch` 这一轮（11-09 深夜，§15.12 那台断电验尸仪器）重打过：
+**26 个文件、4217 行新增 / 86 行删，patch 7,290 行**
+（相对上一版 +4 个文件：`carpet/carpet_diag.c` / `.h` / `muse_pmu.c` / `muse_pmu.h`；
+`muse_input.c` 190 → 243，`carpet_link.c` 1062 → 1067，`CMakeLists.txt` 22 → 23）。
 在 baseline `cdc169d` 干净 worktree 上 `git apply --check` 过、`git apply` 过，
-字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 这轮对 `muse_input.c` /
-`muse_glue.c` / `muse_settings_ui.c` / `carpet_lang_zh.c` / `carpet_link.c` /
-`sdkconfig.carpet` 六个文件比过，**内容和工作树一致**
+字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 这轮对这一轮动过的七个文件 ——
+`carpet_diag.c` / `carpet_diag.h` / `carpet_link.c` / `CMakeLists.txt` / `muse_input.c` /
+`muse_pmu.c` / `muse_pmu.h` —— 逐个比过，**七个全 SAME，内容和工作树一致**
 （`diff -rq` 报的那些 boards/*.c 差异全是 autocrlf 的行尾，不是内容 —— 那些文件根本没进 patch）。
-`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`；这一轮把
-`screen_link.c` 和 `include/screen_link.h` 从工作树拷回了本仓库。
+`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`。

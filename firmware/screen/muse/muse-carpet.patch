@@ -1,14 +1,15 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..679e06a 100644
+index b478d5e..e884d6c 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -46,6 +46,22 @@ if(CONFIG_MUSE_ENABLED)
+@@ -46,6 +46,23 @@ if(CONFIG_MUSE_ENABLED)
      else()
          list(APPEND srcs "muse_ui.c" "muse_menu.c" "muse_settings_ui.c" "muse_keypad.c" "muse_lv_mem.c")
      endif()
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
-+        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c")
++        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c"
++                         "carpet/carpet_diag.c")
 +        # Chinese for the settings pages and the menu, when CONFIG_MUSE_UI_LANG_ZH
 +        # picks it. The table itself is only read then; the file costs nothing
 +        # otherwise, and keeping it out of muse_lang.c keeps the host test
@@ -25,7 +26,7 @@ index b478d5e..679e06a 100644
      if(CONFIG_MUSE_HATCH)
          list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
-@@ -192,7 +208,11 @@ set(muse_priv_requires
+@@ -192,7 +209,11 @@ set(muse_priv_requires
      esp_driver_pcnt efuse
      # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
      # before Kconfig values exist, so these can't depend on it; only the code does.
@@ -543,6 +544,285 @@ index 0000000..f1ee8d7
 +
 +/* `>carpet` 回读里那一行：收了几个字节、总共说多少、放到哪、电平、丢过几次。 */
 +void carpet_audio_dump(void);
+diff --git a/esp32/components/muse/carpet/carpet_diag.c b/esp32/components/muse/carpet/carpet_diag.c
+new file mode 100644
+index 0000000..fe24c28
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_diag.c
+@@ -0,0 +1,226 @@
++/*
++ * 断电验尸（见 carpet_diag.h 顶部那段）。
++ *
++ * 一条记录长这样：
++ *   b3 t=4 OFF! usb=1 mv=4098 pct=100 off=20 cfg=34 pen=06 key=00 kl=08
++ *   t = 开机到现在多少秒   usb/mv/pct = PMU 眼里的供电
++ *   off = REG_PWROFF_STATUS(0x21)「上一次是谁关的电」   cfg/pen = 那两条按键关机使能
++ *   key = 现在锁存的按键事件   kl = **开机那一刻** PMU 已经锁存着的按键事件
++ *        （muse_pmu_init() 会把它清掉，所以只能在被清之前抄一份 —— 这一格才是"是不是按键把电关了"的答案）
++ *
++ * 写的是 NVS（`nvs` 分区，命名空间 `cdiag`），因为现场那次是整机断电，RAM 和日志都留不下东西。
++ * 环形 16 条：跑一趟 5 分钟大概十几条，正好装得下，也不至于把 flash 写穿。
++ */
++
++#include "carpet_diag.h"
++
++#include <inttypes.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "esp_log.h"
++#include "esp_sleep.h"
++#include "esp_system.h"   /* esp_reset_reason() + ESP_RST_* */
++#include "esp_timer.h"
++#include "nvs.h"
++
++#include "muse_pmu.h"
++#include "muse_state.h"
++
++static const char *TAG = "carpet.diag";
++
++#define SLOTS 24            /* 环里几条：一趟 5 分钟大概十几条，宁可装得下整趟 */
++#define TICK_MS 30000       /* 低功耗期间多少秒兜一条（20 秒会把 usb-/dark 那两条顶出环） */
++#define NS "cdiag"
++
++static nvs_handle_t s_nvs;
++static bool s_open;
++static uint32_t s_seq;
++static uint8_t s_latched_key;      /* PMU 清掉之前抄的那两份 */
++static uint8_t s_latched_irq1;
++static TickType_t s_last_tick;
++
++/* 开机那两条的"待发"副本。为什么要绕这一道：`carpet_link_start()` 跑在
++ * `muse_settings_init()`（也就是 `nvs_flash_init()`）之前 —— 同一个坑本仓库已经记过一次
++ * （carpet_link.c:762 那段：在那一步读设置会撞 `xQueueSemaphoreTake` 的 NULL 锁死循环）。
++ * 实测到第一版就是这么没的：刷完开机 `>diag` 回读 `seq=0`，两条开机记录当场写不进去。
++ * 所以开机信息先在 RAM 里存着（复位原因、唤醒原因、PMU 那两份锁存都在），
++ * 等第一条写得动的记录（或 `>diag`）把 NVS 打开时再补写，顺序仍按最旧排。 */
++static bool s_boot_pending;
++static uint32_t s_boot_t;
++static char s_boot_why[24];
++static char s_boot_wake[24];
++
++static bool ensure_open(void)
++{
++    if (s_open) {
++        return true;
++    }
++    if (nvs_open(NS, NVS_READWRITE, &s_nvs) != ESP_OK) {
++        return false;   /* 没 flash 就认了：诊断不该把机器弄死 */
++    }
++    s_open = true;
++    if (nvs_get_u32(s_nvs, "n", &s_seq) != ESP_OK) {
++        s_seq = 0;
++    }
++    return true;
++}
++
++/* 落一条：kind 是这条属于哪一类（b 开机 / e 转折 / t 低功耗兜底），tag 短到 6 个字符以内，
++ * secs 是"这一刻是开机后第几秒"—— 开机那两条传的是攒下来的那一刻，其余传现在。
++ * 寄存器按写这一刻读：对转折和兜底本来就该如此；对补写的开机两条，值钱的那两格
++ * （kl=/k1=）是 RAM 里的开机锁存，不受补写时机影响。 */
++static void write_line(char kind, const char *tag, uint32_t secs)
++{
++    if (!ensure_open()) {
++        return;
++    }
++    uint8_t r[MUSE_PMU_DIAG_REGS] = { 0 };
++    bool have = muse_pmu_diag_regs(r, sizeof r) == ESP_OK;
++    muse_power_t p = { .battery_pct = -1, .battery_mv = 0 };
++    if (muse_pmu_read_power(&p) != ESP_OK) {
++        p.battery_pct = -1;
++    }
++    char buf[160];
++    int n = snprintf(buf, sizeof buf,
++                     "%c%" PRIu32 " t=%" PRIu32 " %s usb=%d mv=%" PRId32 " pct=%d"
++                     " off=%02x cfg=%02x pen=%02x key=%02x kl=%02x k1=%02x",
++                     kind, s_seq, secs,
++                     tag ? tag : "-", (int)p.usb, (int32_t)p.battery_mv, p.battery_pct,
++                     have ? r[3] : 0, have ? r[2] : 0, have ? r[4] : 0,
++                     have ? r[6] : 0, s_latched_key, s_latched_irq1);
++    if (n <= 0 || (size_t)n >= sizeof buf) {
++        return;
++    }
++    char key[8];
++    snprintf(key, sizeof key, "r%" PRIu32, s_seq % SLOTS);
++    if (nvs_set_str(s_nvs, key, buf) == ESP_OK) {
++        nvs_set_u32(s_nvs, "n", s_seq + 1);
++        nvs_commit(s_nvs);
++    }
++    s_seq++;
++    ESP_LOGI(TAG, "%s", buf);
++}
++
++/* 开机那两条，等到 NVS 写得动再补；补不成（还是早）就留着，下次再试。 */
++static void flush_boot(void)
++{
++    if (!s_boot_pending || !ensure_open()) {
++        return;
++    }
++    s_boot_pending = false;
++    write_line('b', s_boot_why, s_boot_t);
++    write_line('b', s_boot_wake, s_boot_t);
++}
++
++/* 记录本身：转折（e）和兜底（t）走这里，顺手把欠着的开机两条先补上，顺序才对。 */
++static void record(char kind, const char *tag)
++{
++    flush_boot();
++    write_line(kind, tag, (uint32_t)(esp_timer_get_time() / 1000000));
++}
++
++/* 复位原因的名字：和 muse_battery.c:562 那张表**一模一样**，因为 `@power` 里的 "boot"
++ * 就是它给的 —— 两台仪器必须说同一种话，不然 §15.11 那种"power on 还是 usb"的对不上
++ * 就成了新的疑点。数字一起写，将来发现表里没有的取值还能事后认。 */
++static const char *reset_name(esp_reset_reason_t r)
++{
++    switch (r) {
++    case ESP_RST_POWERON: return "power on";
++    case ESP_RST_SW: return "restart";
++    case ESP_RST_PANIC: return "panic";
++    case ESP_RST_INT_WDT:
++    case ESP_RST_TASK_WDT:
++    case ESP_RST_WDT: return "watchdog";
++    case ESP_RST_DEEPSLEEP: return "deep sleep";
++    case ESP_RST_BROWNOUT: return "brownout";
++    case ESP_RST_USB: return "usb";
++    case ESP_RST_JTAG: return "jtag";
++    default: return "other";
++    }
++}
++
++void carpet_diag_pmu_latched(uint8_t intsts2, uint8_t intsts1)
++{
++    s_latched_key = intsts2;
++    s_latched_irq1 = intsts1;
++}
++
++void carpet_diag_boot(void)
++{
++    /* 开机这一条最值钱：它带的 off=/kl= 就是"上一次是怎么没的"。
++     * 复位原因 / 唤醒原因另起一条，因为塞不进同一行。
++     * 这一步通常还写不进 NVS（早于 nvs_flash_init），所以先存 RAM，写得动的时候再补。 */
++    esp_reset_reason_t why = esp_reset_reason();
++    snprintf(s_boot_why, sizeof s_boot_why, "rst=%d %s", (int)why, reset_name(why));
++    /* 能从 light sleep 醒过来是因为谁：按键 / 定时器 / 网络，一条就够。 */
++    snprintf(s_boot_wake, sizeof s_boot_wake, "wake=%d", (int)esp_sleep_get_wakeup_cause());
++    s_boot_t = (uint32_t)(esp_timer_get_time() / 1000000);
++    s_boot_pending = true;
++    flush_boot();
++}
++
++void carpet_diag_event(const char *tag)
++{
++    record('e', tag);
++}
++
++void carpet_diag_tick(TickType_t now, bool low_power)
++{
++    if (!low_power) {
++        s_last_tick = 0;
++        return;
++    }
++    if (s_last_tick && now - s_last_tick < pdMS_TO_TICKS(TICK_MS)) {
++        return;
++    }
++    s_last_tick = now;
++    record('t', "low");
++}
++
++void carpet_diag_clear(void)
++{
++    if (!ensure_open()) {
++        printf("@diag NVS 打不开\n");
++        fflush(stdout);
++        return;
++    }
++    char key[8];
++    for (uint32_t i = 0; i < SLOTS; i++) {
++        snprintf(key, sizeof key, "r%" PRIu32, i);
++        nvs_erase_key(s_nvs, key);
++    }
++    s_seq = 0;
++    s_boot_pending = false;
++    nvs_set_u32(s_nvs, "n", 0);
++    nvs_commit(s_nvs);
++    printf("@diag cleared\n");
++    fflush(stdout);
++}
++
++void carpet_diag_dump(void)
++{
++    flush_boot();   /* 到这一步 NVS 一定写得动了：把欠着的开机两条先补上再翻 */
++    if (!ensure_open()) {
++        printf("@diag NVS 打不开\n");
++        fflush(stdout);
++        return;
++    }
++    uint32_t newest = s_seq;
++    uint32_t from = newest > SLOTS ? newest - SLOTS : 0;
++    char key[8], buf[176];
++    size_t cap;
++    int shown = 0;
++    printf("@diag seq=%" PRIu32 " slots=%d\n", newest, SLOTS);
++    for (uint32_t i = from; i < newest; i++) {
++        snprintf(key, sizeof key, "r%" PRIu32, i % SLOTS);
++        cap = sizeof buf - 1;
++        buf[0] = '\0';
++        if (nvs_get_str(s_nvs, key, buf, &cap) == ESP_OK) {
++            printf("  %s\n", buf);
++            shown++;
++        }
++    }
++    printf("@diag 翻出 %d 条；b=开机 e=转折 t=低功耗兜底 kl/k1=开机时 PMU 还锁着的按键/其它中断\n", shown);
++    fflush(stdout);
++}
+diff --git a/esp32/components/muse/carpet/carpet_diag.h b/esp32/components/muse/carpet/carpet_diag.h
+new file mode 100644
+index 0000000..4c3b867
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_diag.h
+@@ -0,0 +1,41 @@
++/*
++ * 断电验尸：把"死之前那一刻机器的样子"写进 NVS，下次开机能翻出来。
++ *
++ * 为什么要这么绕：现场的症状是"电池 + 熄屏放 5 分钟，回来插 USB 才醒"（HANDOFF §15.11），
++ * 也就是**整机断过电**。断过电之后串口日志全没了，RAM 里的计数也全没了，
++ * 光靠 `@stay` / `@power` 只能看出"重启过"，看不出**死在哪一步、死的时候 PMU 说什么**。
++ * NVS 是唯一能扛过断电的东西，所以每个可疑的转折点都当场落一条，宁可写得土一点。
++ *
++ * 每条记录都带同一组 PMU 原始寄存器（`off=` 那句就是 `REG_PWROFF_STATUS 0x21`，
++ * "上一次是谁把它关掉的"）—— 这一组是这次要认的东西本身，不是我猜出来的线索。
++ *
++ * 只在 CONFIG_MUSE_CARPET_CARDS 里；这块诊断是台架仪器，演示固件交付时按 carpet_diag.c
++ * 顶部那段把它摘掉。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "freertos/FreeRTOS.h"
++
++/* PMU 在自己清 IRQ 锁存之前，先让它把"开机那一刻已经锁存的按键事件"递过来。
++ * 早于 NVS 就绪，所以只存到 RAM，第一条 boot 记录再一起写出去。 */
++void carpet_diag_pmu_latched(uint8_t intsts2, uint8_t intsts1);
++
++/* 开机补一条：复位原因 + 唤醒原因 + 那两份锁存。从 carpet_link_start() 叫，NVS 那时已经好了。 */
++void carpet_diag_boot(void);
++
++/* 一个转折点：tag 要短（记录进 flash，一条越短越经得起翻）。传 NULL 就是 "-"。 */
++void carpet_diag_event(const char *tag);
++
++/* 低功耗期间的定心丸：low_power 为真时每 20 秒一条，为假就不写。
++ * 这条的作用是"那一段时间里它确实还活着"，所以宁少勿多。 */
++void carpet_diag_tick(TickType_t now, bool low_power);
++
++/* `>diag`：从最旧到最新打出来，最后报一共几条、掉过几次电。 */
++void carpet_diag_dump(void);
++
++/* `>diag clear`：把环抹空、序号归零。跑那一趟之前清一次，读出来才只有这一趟。 */
++void carpet_diag_clear(void);
 diff --git a/esp32/components/muse/carpet/carpet_font.ttf b/esp32/components/muse/carpet/carpet_font.ttf
 new file mode 100644
 index 0000000000000000000000000000000000000000..4404f5f486d302fe9327de1ce10abc76e3353531
@@ -3086,10 +3366,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..dd8d4fd
+index 0000000..f63341a
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1062 @@
+@@ -0,0 +1,1067 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3117,6 +3397,7 @@ index 0000000..dd8d4fd
 +
 +#include "cJSON.h"
 +#include "carpet/carpet_audio.h"
++#include "carpet/carpet_diag.h"
 +#include "carpet/carpet_page.h"
 +#include "driver/gpio.h"
 +#include "esp_log.h"
@@ -4007,6 +4288,10 @@ index 0000000..dd8d4fd
 +void carpet_link_start(void)
 +{
 +    if (s_gate) return;
++    /* 开机补的两条（复位原因 + 唤醒原因 + PMU 在 init 里被清掉之前抄来的按键锁存）。
++     * 放在这里而不是 app_main：这会儿 NVS 已经挂上，PMU 也已经 init 过（那一步早于建 UI），
++     * 两个前提同时满足的只有这一点。 */
++    carpet_diag_boot();
 +    /* 先建锁再建任务：链路回调和 UI 的 tick 都从这一把锁后面碰 s_state */
 +    if (!s_lock) s_lock = xSemaphoreCreateMutex();
 +    if (!s_cmdq) s_cmdq = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
@@ -5267,24 +5552,65 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..b971825 100644
+index 7c579bb..a987768 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -48,6 +48,13 @@
+@@ -48,6 +48,24 @@
  #include "muse_ui.h"
  #include "muse_voice.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"
 +#include "carpet/carpet_page.h"
++#include "carpet/carpet_diag.h"
 +#if CONFIG_MUSE_UI_LANG_ZH
 +#include "carpet/carpet_lang_zh.h"
 +#endif
 +#endif
++/* 断电验尸（carpet_diag.h 顶部）。症状见 HANDOFF §15.11：电池 + 熄屏放几分钟，回来是**整机断过电**
++ * —— 串口日志和 RAM 计数全没了，`>nap` 那套仪器在这一趟上失效。所以每个可疑转折点当场落一条 NVS，
++ * 断电也留得住。carpet 之外的构建里这两个宏是空话，一行行为都不改。 */
++#if CONFIG_MUSE_CARPET_CARDS
++#define CARPET_DIAG(tag) carpet_diag_event(tag)
++#define CARPET_DIAG_TICK(now, low) carpet_diag_tick((now), (low))
++#else
++#define CARPET_DIAG(tag) do {} while (0)
++#define CARPET_DIAG_TICK(now, low) do {} while (0)
++#endif
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -560,11 +567,35 @@ static bool update_power(void)
+@@ -140,6 +158,9 @@ static bool update_power(void);
+ 
+ static void power_off(void)
+ {
++    /* 落在这之前的最后一条，就是"它自己按了关机"。这一条要放在最顶上、
++     * 连 `!muse_board->power_off` 那个 return 之前——那条路径是物理开关，同样会断电。 */
++    CARPET_DIAG("OFF!");
+     if (!muse_board->power_off) {
+         return;   /* a physical switch powers it off */
+     }
+@@ -170,6 +191,9 @@ static void set_asleep(bool asleep, const char *why)
+ {
+     if (asleep != muse_state_asleep()) {
+         ESP_LOGI(TAG, "%s (%s)", asleep ? "sleeping" : "waking", why);
++        /* 熄屏那一刻是这一趟的分界线：断电只在它之后发生。why（power button / serial /
++         * idle…）留进日志，环里那条只记"暗/亮"，够对齐时间了。 */
++        CARPET_DIAG(asleep ? "dark" : "lit");
+         muse_state_set_asleep(asleep);
+ #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+         if (asleep) {
+@@ -551,6 +575,9 @@ static bool update_power(void)
+     ESP_LOGI(TAG, "%s", s_cpu_low ? "low power: display paused"
+                         : paused  ? "display paused (USB host: CPU at full speed)"
+                                   : "full power");
++    /* 三个档位各一条。low+ 之后才允许 light sleep，所以它是"进入危险区"的门；
++     * 环里若停在 dark → low+ 之后没有下一条，就是它睡下去再没醒来。 */
++    CARPET_DIAG(s_cpu_low ? "low+" : paused ? "pause+" : "full");
+     return paused;
+ }
+ 
+@@ -560,11 +587,35 @@ static bool update_power(void)
   * power arrives; meanwhile nothing reaches the device over the network.
   * Not while a voice note recorded offline waits to go (for a while). Returns
   * true while napping.
@@ -5321,7 +5647,7 @@ index 7c579bb..b971825 100644
      if (!s_cpu_low) {
          low_since = now;
      }
-@@ -572,14 +603,18 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -572,14 +623,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
          s_nap_now = false;
          muse_state_set_as_if_battery(false);
      }
@@ -5338,6 +5664,7 @@ index 7c579bb..b971825 100644
 +            s_nap_events++;
 +        }
          ESP_LOGI(TAG, "Wi-Fi %s", nap ? "napping" : "waking");
++        CARPET_DIAG(nap ? "nap+" : "nap-");
          muse_wifi_nap(nap);
      }
 -    return napping;
@@ -5345,7 +5672,54 @@ index 7c579bb..b971825 100644
  }
  
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
-@@ -892,6 +927,143 @@ static bool console_command(char *line, bool whole)
+@@ -589,6 +645,7 @@ static bool s_power_down, s_power_swallow;
+ static void power_release(void)
+ {
+     if (!s_power_down) return;
++    CARPET_DIAG("key-");
+     s_power_down = false;
+     if (!s_power_swallow) set_asleep(true, muse_board->power_button);
+     s_power_swallow = false;
+@@ -603,12 +660,14 @@ static void dedicated_buttons(unsigned ev)
+         release = false;
+     }
+     if (!s_power_down && (ev & MUSE_BTN_POWER_PRESS)) {
++        CARPET_DIAG("key+");
+         s_power_down = true;
+         s_power_swallow = muse_state_asleep();
+         muse_state_poke();
+         if (s_power_swallow) set_asleep(false, muse_board->power_button);
+     }
+     if (s_power_down && !s_power_swallow && (ev & MUSE_BTN_POWER_LONG)) {
++        CARPET_DIAG("keyL");
+         s_power_swallow = true;   /* no sleep on release after shutdown/failure */
+         if (s_talk_down) talk_button(MUSE_BTN_TALK_RELEASE);
+         power_off();
+@@ -721,12 +780,23 @@ static void input_task(void *arg)
+             if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
+                 muse_state_set_power(&p);
+                 muse_battery_note_power(&p, muse_state_on_battery());
++                /* 把"USB 走了/回来了"当场落一条：这一条是那一趟的**起点**。
++                 * 没有它，环里最后一条 `dark` 到底发生在拔线后多久说不清（亮屏时每 2 秒读一次电，
++                 * 所以 `usb-` 的 t= 和拔的瞬间差不到 2 秒）；有了它，"撑了多久死的"才算得出来。 */
++                static bool last_usb;
++                if (last_usb != p.usb) {
++                    last_usb = p.usb;
++                    CARPET_DIAG(p.usb ? "usb+" : "usb-");
++                }
+             }
+         }
+ 
+         paused = update_power();
+         bool napping = update_wifi_nap(now, paused);
+         muse_battery_note_state(muse_state_asleep(), s_cpu_low);
++        /* 低功耗期间每 20 秒兜一条：环里最后一条 t=low 的 t= 就是"它最后一次证明自己还活着"
++         * 是开机后第几秒，和下一次开机那条 b* 的 off=/kl= 对着看才知道断电发生在哪一步。 */
++        CARPET_DIAG_TICK(now, s_cpu_low);
+         /* Paused, anything but a button (a pairing prompt, an image) is
+          * noticed within REST_WAIT_MS. Napping, nothing comes over the
+          * network; USB power arriving is noticed within NAP_WAIT_MS. */
+@@ -892,6 +962,161 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -5485,11 +5859,29 @@ index 7c579bb..b971825 100644
 +        fflush(stdout);
 +        return true;
 +    }
++    /* 断电验尸：把 NVS 里那一圈记录从最旧到最新打出来（carpet_diag.c）。
++     * 为什么不能用 `>stay` / `>power` 代替：那两台仪器都在 RAM 里，而 §15.11 那一趟是**整机断电**，
++     * 插回来时它们已经归零了（`@power.saved` 还是断电前那一份，正是归零的证据）。
++     * 每一行都带 PMU 原始寄存器：off=<0x21>「上一次是谁关的电」、kl=<开机时锁存的按键>、
++     * cfg/pen = 那两条按键关机使能。b=开机 e=转折 t=低功耗兜底。 */
++    if (!strncmp(line, "diag", 4) && (line[4] == '\0' || line[4] == ' ')) {
++        const char *rest = line + 4;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "clear")) {
++            carpet_diag_clear();
++        } else if (*rest) {
++            printf("@diag 只认 clear（不带参数=回读）\n");
++            fflush(stdout);
++        } else {
++            carpet_diag_dump();
++        }
++        return true;
++    }
 +#endif
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1098,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1151,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -5570,6 +5962,79 @@ index 46419e6..da1e3bf 100644
  #else
  const char *muse_lang_status(const char *en)
  {
+diff --git a/esp32/components/muse/muse_pmu.c b/esp32/components/muse/muse_pmu.c
+index 57edbf8..c6563dd 100644
+--- a/esp32/components/muse/muse_pmu.c
++++ b/esp32/components/muse/muse_pmu.c
+@@ -19,6 +19,10 @@
+ #include "esp_check.h"
+ #include "esp_log.h"
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_diag.h"
++#endif
++
+ static const char *TAG = "muse_pmu";
+ 
+ #define AXP2101_ADDR 0x34
+@@ -90,6 +94,15 @@ esp_err_t muse_pmu_init(i2c_master_bus_handle_t bus, bool key_irqs)
+ 
+     if (key_irqs) {
+         ESP_RETURN_ON_ERROR(rd(REG_INTEN2, &v), TAG, "read inten2");
++#if CONFIG_MUSE_CARPET_CARDS
++        /* 断电验尸：这三格在下面就被清掉了，而"断电前那一刻 PMU 锁存了什么按键"
++         * 正是 §15.11 那条"电池 + 熄屏会整机断电"要认的东西。先抄给诊断，再清。 */
++        uint8_t latched2 = 0, latched1 = 0;
++        if (rd(REG_INTSTS2, &latched2) == ESP_OK) {
++            (void)rd(REG_INTSTS1, &latched1);
++            carpet_diag_pmu_latched(latched2, latched1);
++        }
++#endif
+         ESP_RETURN_ON_ERROR(wr(REG_INTEN2, v | PKEY_ALL), TAG, "enable key irqs");
+         ESP_RETURN_ON_ERROR(wr(REG_INTSTS2, PKEY_ALL), TAG, "clear key irqs");
+     } else {
+@@ -229,3 +242,25 @@ esp_err_t muse_pmu_power_off(void)
+     ESP_LOGI(TAG, "powering off");
+     return wr(REG_COMMON_CFG, v | 0x01);
+ }
++
++#if CONFIG_MUSE_CARPET_CARDS
++/* 断电验尸用的那一列（顺序和 muse_pmu.h 上那句注释一致）。纯读，不动任何寄存器。 */
++esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n)
++{
++    static const uint8_t regs[MUSE_PMU_DIAG_REGS] = {
++        REG_STATUS1, REG_STATUS2, REG_COMMON_CFG, REG_PWROFF_STATUS,
++        REG_PWROFF_EN, REG_IRQ_LEVEL, REG_INTSTS2,
++    };
++    if (!s_dev || !out) {
++        return ESP_ERR_INVALID_STATE;
++    }
++    if (n > MUSE_PMU_DIAG_REGS) {
++        n = MUSE_PMU_DIAG_REGS;
++    }
++    for (unsigned i = 0; i < n; i++) {
++        out[i] = 0;
++        ESP_RETURN_ON_ERROR(rd(regs[i], &out[i]), TAG, "diag read");
++    }
++    return ESP_OK;
++}
++#endif
+diff --git a/esp32/components/muse/muse_pmu.h b/esp32/components/muse/muse_pmu.h
+index 238ee4f..205198c 100644
+--- a/esp32/components/muse/muse_pmu.h
++++ b/esp32/components/muse/muse_pmu.h
+@@ -57,3 +57,11 @@ esp_err_t muse_pmu_read_power(muse_power_t *out);
+ 
+ /* Soft power-off: the AXP2101 cuts every rail. PWR turns the board back on. */
+ esp_err_t muse_pmu_power_off(void);
++
++#if CONFIG_MUSE_CARPET_CARDS
++/* 台架诊断（carpet_diag.c）：一次读回固定那一列寄存器，顺序是
++ * STATUS1 / STATUS2 / COMMON_CFG / PWROFF_STATUS / PWROFF_EN / IRQ_LEVEL / INTSTS2。
++ * 只为"断电之后还能问它一句：上一次是谁把电关掉的"，不改任何行为。 */
++#define MUSE_PMU_DIAG_REGS 7
++esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n);
++#endif
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
 index fd499cd..6270596 100644
 --- a/esp32/components/muse/muse_settings.c
