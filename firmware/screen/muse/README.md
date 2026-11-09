@@ -141,7 +141,23 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     没有一条能合成一次 tap），折上的分组就永远拍不到展开态；`+` 只在 `#if LV_USE_SNAPSHOT`
     里、只把折上的那一组打开、从不反过来折，所以不带 `+` 的名字拍到的仍是用户默认看到的那一屏。
     折叠状态不落 NVS：子页返回时整个销毁重建（`show()` 里 `drop(prev)`），重启天然回到默认折上。
-  重打命令（**`components/screen_link` 必须排除**，
+  - 2026-11-10 熄屏的叫醒这轮（`HANDOFF.md` §15.14）—— 干净树 `git apply --check --binary` 过、
+    真 `git apply` 解出来 27 个文件 / `carpet_link.c` 1135 行 / `carpet_diag.c` 226 行 /
+    `carpet_lang_zh.c` 314 行 / 字库 154,528 字节。
+    **而且这一轮在干净 worktree 里真编过一遍**：照 §3 那四步走完 `Project build complete`、
+    `esp-idf/screen_link/libscreen_link.a` 在、`muse-gadget.bin` 3,346,432 字节 = 刷进板子那次的写入量；
+    `diff --strip-trailing-cr` 比 `carpet_link.c` / `muse_input.c` / `muse_input.h` 等工作树，全 SAME。
+    `:core:test --rerun-tasks` 305 条 0 失败（含 `SchemaDriftTest` 13 条 ——
+    它硬比 `CommandType` ↔ schema 的 `cmd` 集合相等，所以 schema 加 `wake` 就必须连着 Kotlin 一起加）。
+    **板上称到**：三趟 `>nap` → 叫醒全过，`waking (ws say)` → `carpet.diag: eN t=… lit` →
+    `carpet: woke by link, carpet_cmd 还剩 3732 字节` → `nap-` → `@stay … nap=0 wifi=1`，
+    没有溢出、没有复位。新落下的是 `esp32/components/muse/muse_input.h` 里那条
+    `muse_input_wake(const char *why)`（POWER 键那条 `set_asleep(false, …)` 的公开口）。
+    `cmd_task` 的栈从 4096 字提到 **6144 字**，是称出来的：4096 那版峰值吃到 3675 字，
+    6144 那版量到 5211 字、剩 933 字（约 3.7 KB）—— 注意 `usStackDepth` 是**字数**不是字节数。
+    **这一轮还没称的**：`on_command` 里真认 `cmd:"wake"` 那一行走的是 ws，要一个拨得通的服务器，
+    这台 PC 和屏在华为热点上互不通，留到现场由 App 那一头发。
+  - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
@@ -504,6 +520,23 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 是去怀疑链路，其实那只是历史。要么重启之后称，要么称一段前后各读一次 `>carpet` 比差值。
 PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/linkcheck.mjs … --voice`：
 92 块 / 233,740 字节 ≈ 7.3 秒、seq 连续、最大帧 3570 字节 < 预算 3800）。
+
+### 5.8 叫醒熄屏的屏（契约 v3 第三条下行，11-10 屏侧已落地）
+
+`command{cmd:"wake"}`，不带参数。屏收到走的是 **POWER 键那条路**：熄屏清掉、面板起来、
+Wi-Fi 立刻重连（不等拨号退避）。**不回 ack、不重试、不排队** —— 醒了下一步它自己会推
+`state` / `page_report`，那才是证据；发出去 3 秒这条连接没动静就按「没叫醒」跟用户说话。
+
+什么时候发：**手机侧的唤醒词命中**那一下，或者用户点「叫醒圆屏」。**答句不要额外发** ——
+`dialog{dir:"down"}` 在屏侧本来就会点亮（11-10 起 `face_offer` 自己会递这一次叫醒）。
+
+为什么唤醒词不在屏上：熄屏进 rest 时麦克风/codec/功放是**断了电**的，而这套 SDK 里没有
+esp-sr / WakeNet。要"屏一直听着"就得推倒现在的功耗模型 —— 见 `HANDOFF.md` §15.14。
+
+**硬前提：那条 WebSocket 还活着。** 电池上熄屏满 2 分钟屏会 `nap`（关 Wi-Fi），那时这一帧送不到，
+而且不报错。所以这一条只在设置页「熄屏后保持联网」开着时成立；
+App 侧配套要改的四条（发帧、partial WakeLock、退出别停服务、`acceptScreens` 跟守护联动）
+写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
 
 ## 6. 现场怎么连（拓扑与地址）
 

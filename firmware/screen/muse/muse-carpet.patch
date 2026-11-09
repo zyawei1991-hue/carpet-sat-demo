@@ -3366,10 +3366,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..f63341a
+index 0000000..05bf211
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1067 @@
+@@ -0,0 +1,1135 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3410,6 +3410,7 @@ index 0000000..f63341a
 +#include "muse_audio.h"
 +#include "muse_board.h"      /* 屏幕几何：宽、高、是不是圆、有没有触摸、对角线 */
 +#include "muse_chat_priv.h"   /* muse_hatch_caption_at()：按屏当前的 cols×lines 分页 */
++#include "muse_input.h"       /* muse_input_wake()：App 那头发来的"叫醒"走按键同一条路 */
 +#include "muse_settings.h"
 +#include "muse_state.h"
 +#include "muse_wifi.h"
@@ -3430,10 +3431,19 @@ index 0000000..f63341a
 + * 也**不动 CMD_NAMES** —— core 的 SchemaDriftTest 拿那张表和契约比，多一条就红。 */
 +#define CMD_PAGE (CMD_COUNT + 1)
 +
++/* CMD_WAKE 同样不是要发出去的命令，它只在队列里存在，所以也不动 CMD_NAMES。
++ * 为什么叫醒屏要绕这个队列而不是在 `on_command()` 里直接办：那是 esp_websocket_client
++ * 的事件任务，`muse_input_wake()` 底下是 set_asleep(false) —— 要点面板、要往 flash 的环里
++ * 落一条、没连上时还要 muse_wifi_apply() 重连，这些不该压进 ws 回调；而屏打盹的时候
++ * UI 任务在 update_sleep() 那里就 return 了（muse_ui.c:1996），voice 任务在
++ * muse_state_wait_awake() 里睡着（60 秒一次兜底，太慢），**这个队列的消费者是熄屏期间
++ * 唯一一个能被来帧立刻叫醒的上下文**，所以落地在它这里。 */
++#define CMD_WAKE (CMD_PAGE + 1)
++
 +typedef struct {
 +    int cmd;          /* CMD_NAMES 下标 + 1，0 表示空 */
 +    int dir;          /* 只有 card_next 用 */
-+    char page[16];    /* 只有 CMD_PAGE 用 */
++    char page[16];    /* 只有 CMD_PAGE 用；CMD_WAKE 借这一格带"谁叫的醒"（ws wake / ws say） */
 +} cmd_msg_t;
 +
 +#define CMD_QUEUE_LEN 8
@@ -3718,6 +3728,8 @@ index 0000000..f63341a
 + * 写上屏的那几笔都在锁里：三份缓冲跨了两个任务（这句在链路任务、翻页在 UI 任务），
 + * 出了锁再读 `s_face_shown` 就可能读到对面写了一半的那页。muse_state 自己那把是自旋锁，
 + * 顺序永远是我们这把 → 它那把，反过来的路径不存在，所以嵌套安全。 */
++static void queue_wake(const char *why);   /* 定义在下面 on_command 之前；face_offer 先用到 */
++
 +static void face_offer(const char *text, bool answer, const char *turn_id)
 +{
 +    if (!text || !text[0] || !s_lock) return;
@@ -3752,7 +3764,9 @@ index 0000000..f63341a
 +    s_face_level = 0;
 +    s_face_live = true;
 +
-+    muse_state_poke();   /* 屏打盹时这句得把它叫醒 */
++    muse_state_poke();   /* 醒着的时候：这一句把自动熄屏的钟拨回去 */
++    queue_wake("ws say");/* 打盹的时候：poke 只延长时间、不叫醒（muse_state.c:253 就一行时间戳），
++                            所以这一句得另外走一次真正的唤醒 —— 答句不该冻在第一页等有人戳屏 */
 +    muse_state_set_caption("%s", s_face_shown);
 +    face_set_mode(answer ? MUSE_MODE_SPEAKING : MUSE_MODE_THINKING);
 +    ESP_LOGI(TAG, "face page 0/%u: %s", (unsigned)strlen(s_face_text), s_face_shown);
@@ -3763,9 +3777,11 @@ index 0000000..f63341a
 + * 露的正是脸那一格时也得翻）。
 + * 已知边界：屏打盹时 muse_ui 的 UI 任务在 update_sleep() 那里就 return 了，这条 tick
 + * 跟着停 —— 那句答页冻在第一页不动（2026-11-05 上板实测：`>say` 之后 16 秒 at 一直 0，
-+ * 发个 'w' 叫醒就接着翻）。poke 只延长时间、不叫醒打盹的屏，所以彩排时要么先戳一下屏，
-+ * 要么让答句发生在有人正看着的时候。真要把答句叫醒屏幕，得动 muse_ui 的休眠那条路，
-+ * 这份不改上游。 */
++ * 发个 'w' 叫醒就接着翻）。poke 只延长时间、不叫醒打盹的屏，所以那一版彩排时要么先戳一下屏，
++ * 要么让答句发生在有人正看着的时候。
++ * 2026-11-10 更新：这一条已经不是这样了。face_offer 现在除了 poke 还递一次 CMD_WAKE
++ * （muse_input_wake() = POWER 键同一条 set_asleep(false)），答句自己就把屏叫回来，
++ * 不用先戳。下面那句"tick 停"的机制仍然成立 —— 屏没醒，tick 就不跑，醒过来才接着翻页。 */
 +void carpet_link_face_tick(void)
 +{
 +    if (!s_face_live || !s_lock) return;
@@ -3968,6 +3984,18 @@ index 0000000..f63341a
 +    }
 +}
 +
++/* 把"叫醒屏"递给 carpet_cmd 那条任务去落地，不在 ws 回调里办（原因见 CMD_WAKE 那段）。
++ * `why` 塞进 page 那一格（15 字够了），落到 muse_input_wake() 的日志和断电环里。 */
++static void queue_wake(const char *why)
++{
++    if (!s_cmdq) return;
++    cmd_msg_t m = { .cmd = CMD_WAKE, .dir = 0 };
++    snprintf(m.page, sizeof m.page, "%s", why ? why : "ws");
++    if (xQueueSend(s_cmdq, &m, 0) != pdTRUE) {
++        ESP_LOGW(TAG, "command queue full, dropped wake");
++    }
++}
++
 +/* v3 的下行指令。`t=command` 这一列里只有 audio_chunk 是**手机→屏**的，
 + * 其余（card_next / poke / page_report …）全是屏→手机的请求，不会从这条回调进来。
 + *
@@ -3978,6 +4006,19 @@ index 0000000..f63341a
 +    if (cmd && strcmp(cmd, "audio_chunk") == 0) {
 +        /* 为什么这段不要，carpet_audio 自己会留一行（采样率 / seq / 容量 / 解码） */
 +        carpet_audio_on_chunk(args);
++        return;
++    }
++    if (cmd && strcmp(cmd, "wake") == 0) {
++        /* 现场那一问的便宜解法：屏熄着的时候只要「熄屏后保持联网」开着，Wi-Fi 关联是**不断**的
++         * （rest 只把无线放进最深 modem sleep，muse_wifi.h：MUSE_WIFI_REST "up to a second"），
++         * 所以这一帧收得到 —— 缺的从来不是"能不能收到"，是收到之后没人把显示叫回来
++         * （muse_state_poke() 只盖一个最后活动的时间戳，muse_state.c:253）。
++         * 走的是 POWER 键同一条 set_asleep(false)：面板起来、`lit` 落进断电环。
++         * **这一条只在关联还活着的时候有用**：nap 之后 socket 本来就没了一条下行帧都进不来，
++         * 那时能叫醒屏的只有按键 —— 所以演示现场那个开关必须是开的（§15.2 那条）。
++         * args 现在没人看，留着以后带原因。 */
++        ESP_LOGI(TAG, "下行 wake：点亮屏幕（关联没断才收得到这条）");
++        queue_wake("ws wake");
 +        return;
 +    }
 +    ESP_LOGW(TAG, "没听过这条下行指令：%s", cmd ? cmd : "(空)");
@@ -4008,6 +4049,20 @@ index 0000000..f63341a
 +    (void)arg;
 +    cmd_msg_t m;
 +    while (xQueueReceive(s_cmdq, &m, portMAX_DELAY) == pdTRUE) {
++        if (m.cmd == CMD_WAKE) {
++            /* 落在这条任务栈上，不落在 ws 回调上（原因见上面 CMD_WAKE 那段）。
++             * 剩下的栈一次性打出来：叫醒这条会走 NVS 写 + 重连，4096 够不够是**称出来的**，
++             * 不是猜的 —— 下面那行高水位就是证据。 */
++            muse_input_wake(m.page[0] ? m.page : "ws");
++            /* 单位按仓库自己的规矩来（main/stack_monitor.c:25）：这个 kernel 的高水位是**字**，
++             * 一个 StackType_t 四字节，所以这里乘回来才念成字节。实测（6144 字那版，三次
++             * nap → 叫醒）：剩 3732 字节 = 933 字，峰值吃到 5211 字；栈大小那条注释里有
++             * 和 4096 那版的对照。这一行留在叫醒分支里不是装饰——现场要说"这一版到底够不够"，
++             * 靠的就是它后面那个数。 */
++            ESP_LOGI(TAG, "woke by link, carpet_cmd 还剩 %u 字节",
++                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
++            continue;
++        }
 +        if (m.cmd < 1 || m.cmd > CMD_PAGE) continue;
 +        const char *name = m.cmd == CMD_PAGE ? "page_report" : CMD_NAMES[m.cmd - 1];
 +        cJSON *args = NULL;
@@ -4296,7 +4351,20 @@ index 0000000..f63341a
 +    if (!s_lock) s_lock = xSemaphoreCreateMutex();
 +    if (!s_cmdq) s_cmdq = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
 +    if (!s_link_mtx) s_link_mtx = xSemaphoreCreateMutex();
-+    if (xTaskCreate(cmd_task, "carpet_cmd", 4096, NULL, 4, &s_cmd_task) != pdPASS) {
++    /* 6144 **字**（这个 kernel 的 usStackDepth 是字数不是字节数，FreeRTOS-Kernel
++     * task.h:315 + esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配）= 24 KB。
++     * 为什么从 4096 提到这里，是称出来的不是猜的：叫醒那条分支（set_asleep(false) →
++     * 往 flash 的环里落一条 `lit` → 可能还有 muse_wifi_apply()）在 4096 字上跑完，
++     * 高水位连着三次都是 1684 字节剩余（421 字），也就是峰值吃到 3675 字 —— 4096 字
++     * 那条路本来就没剩多少，再叠一条日志或 NVS 多一层就是栈溢出，而溢出发生在熄屏的叫醒上，
++     * 现场只会看到"屏叫不醒"。
++     * 6144 字上重跑同一套（三次 nap → 叫醒，全过，无溢出无复位）：**剩 3732 字节 = 933 字**，
++     * 峰值吃到 5211 字。比 4096 那次测到的峰值还深 1536 字 —— 说明上一次那三趟没走到最深
++     * 的那条分支（叫醒会顺带把 Wi-Fi 的整条重连派下去，栈吃到多深取决于那一刻链路停在哪一步），
++     * 4096 字真跑那条是会溢出的，这就是把它抬到 6144 的依据。现在余量 933 字（约 3.7 KB）。
++     * 没往 PSRAM 放：这条任务要写 flash，写的时候 cache 会关，栈在 PSRAM 的任务不能干这个
++     * （muse_voice.c:1305 给语音任务用 MUSE_BIG_CAPS 时特意注明"this task never writes flash"）。 */
++    if (xTaskCreate(cmd_task, "carpet_cmd", 6144, NULL, 4, &s_cmd_task) != pdPASS) {
 +        s_cmd_task = NULL;
 +        ESP_LOGE(TAG, "cmd task out of memory");
 +    }
@@ -5552,7 +5620,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..a987768 100644
+index 7c579bb..83d53a4 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,24 @@
@@ -5894,6 +5962,32 @@ index 7c579bb..a987768 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
+@@ -1028,3 +1259,8 @@ void muse_input_request_power_off(void)
+ {
+     s_power_off_requested = true;
+ }
++
++void muse_input_wake(const char *why)
++{
++    set_asleep(false, why ? why : "remote");
++}
+diff --git a/esp32/components/muse/muse_input.h b/esp32/components/muse/muse_input.h
+index be1d6cf..f9813de 100644
+--- a/esp32/components/muse/muse_input.h
++++ b/esp32/components/muse/muse_input.h
+@@ -85,3 +85,12 @@ void muse_input_touch_talk(bool pressed);
+ 
+ /* Plays the goodbye animation and powers off (from the input task). */
+ void muse_input_request_power_off(void);
++
++/*
++ * Wakes a dark screen from outside the button path, with `why` for the log
++ * (and for the carpet power-loss ring). This is the POWER button's own route,
++ * not a lighter one: it clears asleep, runs the panel back up, and rejoins
++ * Wi-Fi immediately instead of sitting out the dial backoff. Safe to call from
++ * any task that already calls muse_wifi_apply().
++ */
++void muse_input_wake(const char *why);
 diff --git a/esp32/components/muse/muse_lang.c b/esp32/components/muse/muse_lang.c
 index 46419e6..da1e3bf 100644
 --- a/esp32/components/muse/muse_lang.c

@@ -2081,15 +2081,97 @@ e24 t=1 usb+
 它**没有死得比原来快**（原来 §15.11 两次都在 5 分钟窗口里死；这一趟活到至少 7.9 分钟），
 所以按 §15.12 定好的口径，这一条不算"仪器把板子搞死了"，`low` 那一片就是它死之前最后走到的状态。
 
-### 15.14 同步状态
+### 15.14 11-10：熄屏的屏怎么被叫醒 —— 一条下行 `wake`，落地是 POWER 键那条路；唤醒词放手机侧
 
-`muse-carpet.patch` 这一轮（11-09 深夜，§15.12 那台断电验尸仪器）重打过：
-**26 个文件、4217 行新增 / 86 行删，patch 7,290 行**
-（相对上一版 +4 个文件：`carpet/carpet_diag.c` / `.h` / `muse_pmu.c` / `muse_pmu.h`；
-`muse_input.c` 190 → 243，`carpet_link.c` 1062 → 1067，`CMakeLists.txt` 22 → 23）。
-在 baseline `cdc169d` 干净 worktree 上 `git apply --check` 过、`git apply` 过，
-字库解出来 154,528 字节一致；`diff --strip-trailing-cr` 这轮对这一轮动过的七个文件 ——
-`carpet_diag.c` / `carpet_diag.h` / `carpet_link.c` / `CMakeLists.txt` / `muse_input.c` /
-`muse_pmu.c` / `muse_pmu.h` —— 逐个比过，**七个全 SAME，内容和工作树一致**
-（`diff -rq` 报的那些 boards/*.c 差异全是 autocrlf 的行尾，不是内容 —— 那些文件根本没进 patch）。
+owner 那一句是「你能不能做一个语音唤醒，就算圆屏在熄屏状态下，我用语音唤醒它是不是可以迅速回连」。
+这一节是屏侧那一半，**已刷上板、已称到**。
+
+**为什么不能在屏上放唤醒词**（这一条先钉死，后面所有取舍都从它出发）：熄屏进 rest 的时候
+麦克风、codec、功放是**断了电**的 —— `muse_voice.c` 里 `rest = asleep && battery && …`
+→ `set_resting(rest)` → `muse_audio_power(!rest)`。"屏一直听着"要先让它不睡，那是把现在这一整套
+功耗模型推倒重画。另一半原因更硬：这套 SDK 里根本没有唤醒词引擎，esp-sr / WakeNet / MultiNet
+一个都不在（grep 过依赖树）。**所以唤醒词放手机侧，屏只负责被叫醒**，owner 拍板选的就是这一条。
+
+**做法**：`command{cmd:"wake"}`，v3 里第二条下行 `command`（为什么骑在 `command` 上而不新开 `t`，
+理由和 `audio_chunk` 是同一条 —— 组件收到不认识的 `t` 是**关连接**，收到不认识的 `cmd` 只是丢帧）。
+屏侧落地的不是"轻一点的亮一下"，是 **POWER 键自己那条路** `set_asleep(false, why)`
+（新公开的 `muse_input_wake()`，`muse_input.h`），因为要的就是它顺手做的两件事：面板重新起来、
+Wi-Fi **立刻**重连而不是坐着等拨号退避。`muse_state_poke()` 不够 —— 它只改 `s_last_poke_us`，
+叫不醒已经睡下去的屏。
+
+不在 WebSocket 回调里办：回调里不能干重活（README §5 那条红线），而熄屏那一刻 UI 任务是停着的
+（`muse_ui.c` 的 `update_sleep()` 提前返回），语音任务在 `muse_state_wait_awake(60000)` 里等 ——
+**能立刻接住这一帧的只有命令队列那条任务**，所以 `queue_wake()` 把它递给 `carpet_cmd`。
+顺带把 `face_offer`（答句上屏那条）也接了同一口：以前那句"poke 叫不醒打盹的屏，彩排时要先戳一下"
+现在不成立了，答句自己就会点亮。
+
+**契约上这条不回 ack、不重试、不排队**，手机要按「没叫醒」处理：发出去 3 秒内这条连接没动静就说话，
+别静默。**硬前提是关联还活着** —— nap 之后 socket 已经没了，这一帧送到空气里，只有 POWER 键叫得醒。
+所以它只在设置页「熄屏后保持联网」开着时才成立。
+
+**契约那三处一起同步了，一处都不能少**：`protocol/screen-link.schema.json` 的 `cmd` enum、
+`protocol/screen-link.md` v3 那一节、`core/src/main/kotlin/.../protocol/ScreenLink.kt:112` 的
+`CommandType`。最后那一处不是可选项 —— `SchemaDriftTest` 里有一条
+`assertEquals(CommandType 的集合, schema 的 cmd 集合)`，只改 schema 会把 `:core:test` 跑红。
+`DemoRuntime.handleScreenCommand` 那条 `when` 带 `else -> false`，加取值编得过、也不用给它加分支
+（`wake` 永远不该由屏发上来）；`ScreenLinkServer.deliverable` 也不为它加版本档 ——
+老固件收到不认识的 `cmd` 只是丢这一帧，那正是想要的降级方式。
+
+**上板称到**（COM8，`cmd_task` 栈 6144 字那一版，连着三趟 `>nap` → 叫醒，原文一条没改）：
+
+```
+I (106454) carpet.diag: e2 t=105 nap+
+@stay on=1 nap=1 naps=1 drops=1 wifi=0
+I (111318) muse_input: waking (ws say)
+I (111322) carpet.diag: e3 t=110 lit
+I (111325) carpet: woke by link, carpet_cmd 还剩 3732 字节
+I (111439) muse_input: Wi-Fi waking
+I (111443) carpet.diag: e5 t=110 nap-
+@stay on=1 nap=0 naps=1 drops=1 wifi=1
+```
+
+三趟的 `还剩 3732 字节` 一模一样，全程没有溢出、没有复位。第二、三趟是 `naps=2/drops=2`、`naps=3/drops=3`，
+每趟都从 `nap=1 wifi=0` 回到 `nap=0 wifi=1`。
+抓这一轮用的脚本是 `D:/dev/tmp/wake_tries.py`（一个串口会话里跑完整个序列，中途不开第二次口 ——
+开第二次口就是复位，见 §15.12 那条坑）。
+
+**栈这一处是称出来的，不是猜的，中间犯过一次单位错**：`xTaskCreate` 的 `usStackDepth`
+在这个 kernel 里是**字**不是字节（FreeRTOS-Kernel `task.h:315` +
+`esp_additions/idf_additions.c:50` 按 `* sizeof(StackType_t)` 分配），我一开始当字节读，
+"把 4096 提到 8192"其实是提了一倍字节数的一半。真正的测量顺序是这样的：
+4096 字那一版三趟叫醒之后高水位都是 `1684 字节剩余`（= 421 字，峰值吃到 3675 字）；
+抬到 6144 字重跑同一套，剩 3732 字节（= 933 字，**峰值 5211 字**）。
+6144 上量到的峰值比 4096 上量到的深 1536 字 —— 说明上一轮那三趟没走到最深那条分支
+（叫醒会顺带把整条 Wi-Fi 重连派下去，栈吃到多深取决于那一刻链路停在哪一步），
+而 4096 字真撞上那条就是溢出，溢出的表现是"屏叫不醒"，正是这一条要防的事。
+现在余量 933 字 ≈ 3.7 KB。没往 PSRAM 放栈：这条任务要写 flash，写的时候 cache 会关，
+栈在 PSRAM 的任务不能干这个（`muse_voice.c:1305` 给语音任务用 `MUSE_BIG_CAPS` 时特意注明
+"this task never writes flash"）。内部 RAM 在这一版没有塌：开机心跳 `int=16K/7K min=7K psram=3550K`。
+
+**没称到的那一条，要说清**：`on_command` 里真认 `cmd:"wake"` 那一行**还没在真链路上走过**。
+上面三趟走的是串口 `>say`（它调 `face_offer`，从那里进同一个 `queue_wake`），
+`wake` 那一条分支要有一个能拨得通的 ws 服务器才测得到，而这台 PC 和屏在华为热点上互相不通
+（§15.6 记过这个误判来源），在 Windows 上开一个热点属于动网络，没批准就不动。
+**现场补这一条的方法**：App 那边把 10.2 第 1 条接上之后，熄屏 → 发一帧 `wake` → 屏亮，
+串口侧应看到 `waking (ws wake)`（`why` 带的是 `ws wake`，和 `ws say` 区分得开）。
+App 侧整包要求写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
+
+### 15.15 同步状态
+
+`muse-carpet.patch` 这一轮（11-10，§15.14 那条叫醒）重打过：
+**27 个文件（26 个文本 + 那份字库二进制）、4299 行新增 / 86 行删，patch 7384 行**
+（相对上一版多一个文件 = `muse_input.h`，那条 `muse_input_wake()` 的公开声明；
+`carpet_link.c` 1067 → 1135 新增行，`muse_input.c` 237 → 242）。
+**这轮验到的是"能干净解出来 + 解出来的东西就是工作树"**：baseline `cdc169d` 干净 worktree
+`git apply --check` 过、真 `git apply` 过，解出来 27 个文件、`carpet_link.c` 1135 行、
+`carpet_diag.c` 226 行、`carpet_lang_zh.c` 314 行、字库 154,528 字节（和上一轮同一个数）。
+`diff --strip-trailing-cr` 逐个比过这轮关心的八个文件 —— `carpet_link.c` / `carpet_diag.c` /
+`carpet_lang_zh.c` / `muse_input.c` / `muse_input.h` / `muse_settings.c` /
+`devices/sdkconfig.carpet` / `main/app.c` —— **全 SAME，解出来的就是板上在跑的那一份**。
+**这一轮干净 worktree 是从头编过的**（不只是 `--check`）：按 §3 那四步（`cp -r components/screen_link` +
+删 `idf_component.yml` + 换 §4 那份 CMakeLists + 四层 defaults 先 `reconfigure` 再 `build`）走下来
+`Project build complete`、`esp-idf/screen_link/libscreen_link.a` 真在、出来的 `muse-gadget.bin`
+**3,346,432 字节 —— 和刷进板子那次 esptool 报的写入量一个数**。
+**`:core:test --rerun-tasks` 同轮跑过：305 条、0 失败 0 错误**（含 `SchemaDriftTest` 13 条 ——
+它就是逼着 `CommandType` 和 schema 的 `cmd` 一起加 `wake` 的那条，只改 schema 会直接红）。
 `components/screen_link/` 不进 patch，走 §3 那条 `cp -r`。

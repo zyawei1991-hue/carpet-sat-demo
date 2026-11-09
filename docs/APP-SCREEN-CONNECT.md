@@ -388,3 +388,96 @@ I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
 **别用电脑去 ping 屏**——这台华为热点上电脑→屏本来就不通，屏明确在线（`linked=1 has_state=1`）的时候
 照样 ping 不到，用它判断会把"仪器不通"读成"屏掉线"（屏侧 HANDOFF §15.6 记了这次误判）。
 
+
+## 10. 语音叫醒熄屏的圆屏 + 手机熄屏还在提供服务（11-10 提给 App 侧）
+
+owner 那两句话拆成两个问题：**熄屏状态下能不能用语音把圆屏叫醒**、**手机自己熄屏时 App 还在不在服务**。
+两条都不靠"再加一个按钮"解决：第一条靠一条下行帧（屏侧已经做完并上板称到），第二条靠一条从没真正
+拿过的 WakeLock 和"守护在跑就别停服务"。
+
+### 10.1 屏侧已经做完的那一半（不需要 App 配合）
+
+- 屏收到 `command{cmd:"wake"}` 走的是 **POWER 键自己那条路**（`muse_input.c` 的 `set_asleep(false, …)`），
+  不是更轻的一条：熄屏清掉、面板重新起来、Wi-Fi 立刻重连，不等拨号退避那几档。
+  实现落在 `carpet_link.c` 的命令队列任务上，不在 WebSocket 回调里办（回调里不能干重活）。
+- **上板称到**（COM8，`cmd_task` 栈 6144 字那一版，连着三趟 `>nap` → 叫醒，原文）：
+
+  ```
+  I (111318) muse_input: waking (ws say)
+  I (111322) carpet.diag: e3 t=110 lit
+  I (111325) carpet: woke by link, carpet_cmd 还剩 3732 字节
+  I (111439) muse_input: Wi-Fi waking
+  @stay on=1 nap=0 naps=1 drops=1 wifi=1
+  ```
+
+  三趟的 `还剩 3732 字节` 一模一样，全程没有溢出、没有复位。
+- **屏上不做常驻唤醒词**，这一条是硬件定的，不是省事的取舍：熄屏进 rest 的时候麦克风、codec、功放
+  是**断了电**的（`muse_voice.c` 里 `rest` → `set_resting(rest)` → `muse_audio_power(!rest)`），
+  而这套 SDK 里根本没有唤醒词引擎（esp-sr / WakeNet / MultiNet 一个都不在）。要做"屏一直听着"，
+  等于推倒现在这一整套功耗模型重画。**唤醒词放手机侧**，屏只负责被叫醒。
+- **这一条的硬前提：那条 WebSocket 还得活着。** 屏在电池上熄屏满 2 分钟会 `nap`
+  （`muse_input.c` 的 `WIFI_NAP_MS`），Wi-Fi 一关 socket 就没了，这一帧送到空气里，而且
+  **不报错** —— 只有按 POWER 能叫醒它。所以 §9 那条「熄屏后保持联网」不开着，
+  语音叫醒这一整条就不成立；别把它实现成"发出去就算成功"。
+
+### 10.2 要 App 改的四条（都不许变成新的按钮或开关）
+
+1. **发那一帧。** `wake` 已经加进 `core/protocol/ScreenLink.kt:112` 的 `CommandType`
+   （屏侧这轮连着 schema 一起同步的，`SchemaDriftTest` 那条 "CommandType 和 schema 的 cmd 对不上"
+   是硬比集合相等，所以这一格不加，`:core:test` 直接红）。
+   **App 侧要写的只是发送点**：唤醒词命中那一刻，或者用户点「叫醒圆屏」那一下。
+   `DemoRuntime.handleScreenCommand` 那条 `when` 有 `else -> false`，加一个取值不会编不过，
+   也不用去那儿给 `wake` 加分支 —— 它永远不该由屏发上来。
+   `ScreenLinkServer.deliverable`（162 行）也不用为它加档：老固件收到不认识的 `cmd` 只是丢这一帧，
+   那正是想要的降级方式。
+   **答句的时候不要额外发** —— `dialog{dir:"down"}` 在屏侧本来就会点亮屏幕。
+   契约里这条**不回 ack、不重试、不排队**（理由见 `protocol/screen-link.md` 的 v3 那节）：
+   屏真醒了下一步会自己把 `state` / `page_report` 推过来，那才是证据。
+   所以判定要反过来写：**发出去 3 秒内这条连接上没有任何动静，就当没叫醒，并把这句话报给用户**，
+   别静默 —— 静默的失败在现场看起来就是"屏坏了"。
+2. **守护在跑的那段时间持一条 partial WakeLock。**
+   `apps/android/src/main/AndroidManifest.xml:10` 声明了 `WAKE_LOCK`，但**全仓没有任何地方 acquire 它**
+   （grep `WakeLock` 只命中 manifest 和 build 目录里的合并产物）。
+   `DemoGuardService.kt:91` 现在已经在自己承认这件事的后果：「守护没能常驻…锁屏后会被系统冻住」。
+   要的是 `PARTIAL_WAKE_LOCK`（只保 CPU，不点屏幕），拿在 `DemoGuardService` 起来那一刻、
+   释在 `onDestroy`（155 行那条），跟着守护的生命周期走。
+   不拿的后果是具体的一条链：手机锁屏 → CPU 进 doze → 1 Hz 的 `state` 发不出去 →
+   屏侧 3 s 变灰、10 s 判超时重连 → 而 ws 服务器就在手机上，doze 期间连 `accept` 都起不来。
+3. **不要一退出就把服务停掉。** `MainActivity.kt:50` 是 `if (isFinishing) state.setGuard(false)`，
+   而 `setGuard(false)`（`AppRuntime.kt:576`）连着 `DemoGuardService.stop` 和 `runtime.stop()`。
+   表现：用户划掉卡片或返回键退干净，8443 那个监听就没了，屏从此连不上，直到有人再打开 App。
+   要的状态是「**守护开着 = 服务在**」，Activity 的生死不该动那个监听。
+4. **`acceptScreens` 跟着守护走**（11-10 拍板：守护开着就默认接受）。
+   它默认 false（`AppRuntime.kt:98`），关着的时候白名单外一律
+   `conn.close(CLOSE_POLICY, "demo lock")`（`ScreenLinkServer.kt:91`）。
+   守护一起来就把它置 true，别让现场还要有人去设置里找那个开关。
+   这一条和第 3 条是同一扇门的两半：第 3 条保证门不会自己关上，这一条保证门开着的时候屏进得来。
+
+### 10.3 华为那一侧的手动步骤（代码改不了，只能写进现场清单）
+
+`apps/android` 里没有 `TetheringManager`，热点不是 App 开的，所以我们既不能让它开也不能阻止它关。
+现场要在手机上手动确认四项：**自启动**、**后台活动**、**电池优化豁免**、**热点不因无人连接而自动关闭**。
+前两项和第三项对应 10.2 第 2 条（WakeLock 在国产 ROM 上要配合电池豁免才真拿得住），
+第四项对应 10.1 那条硬前提：热点关了，屏那条 ws 一样没了。
+
+**这条是推断，没称过**：空闲自动关热点和屏的 nap 会互相放大 —— 屏没人碰就熄、熄满 2 分钟断 Wi-Fi，
+热点那边看到的是"长时间没有设备连着"，于是更想关。要证或证伪都在同一趟里（下面 10.4 那条顺序）。
+
+### 10.4 还没称过的，和现场那一次验收
+
+**手机熄屏以后 App 还在不在服务，从来没测过**：`apps/android/build.gradle.kts:95` 那行注释说得很明白，
+这台机器上没有手机也没有 emulator。10.2 第 2、3 两条是按源码读出来的推断，不是称到的结论。
+
+一次跑完的验收（按这个顺序，别跳）：
+
+1. 屏：设置页里那一行「**熄屏后保持联网**」打开（英文原文 `Stay online when asleep`；
+   等价串口 `>stay on`，同一个 NVS key）。
+2. App：开守护。
+3. 什么都不碰，等屏自己熄（默认 120 秒）。
+4. **锁屏手机，放 3 分钟。**
+5. 说一句唤醒词（或点「叫醒圆屏」）→ 屏要亮。
+6. App 首页那一格要出现 `has_state=1`；屏侧对应的读数是串口 `>carpet` 那行的
+   `linked=1 … has_state=1` 和 `>stay` 那行的 `nap=0`。
+
+第 5、6 步哪一步不动，就把那一步的原始读数抄回来，别只说"连不上"：
+屏亮但 `has_state=0` = 手机那侧没在服务；屏不亮且 `>stay` 显示 `nap=1` = 第 1 步那条没生效或者热点关了。
