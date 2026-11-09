@@ -2034,11 +2034,26 @@ e24 t=1 usb+
    没电的时候自然停，事后看不出差别）；**(b) 插回 USB 那一下把正在断电/临界供电的板子撞没了**。
    分开的唯一办法是**掐表那一趟**：拔 → 精确 3 分钟 → 插回来，同时 COM8 上开一个循环重开的实时抓取，
    把 panic 的 backtrace 和断的那一刀抓住。这一趟还没跑。
+   抓取那台仪器已经写好并校准过：`D:/dev/tmp/capwait.py <port> <secs> <out> [cmd]` —— 端口不在就 50 毫秒
+   一次轮询等它出现，一出现立刻开、开一次记一条 `#### +X.Xs OPEN #n`，板子被拔走就记 `CLOSED` 接着等，
+   全程**只读不写**（除非给 cmd，且只在窗口最后 6 秒发一次），`dtr/rts` 在 `open()` 之前压成 False，
+   所以不会脉冲 EN/IO0（`snap.py` 那个坑，§14.3）。实测挂 5 秒回读到 `hb t=581s`、`uptime` 没归零 = 没复位。
+   为什么必须循环重开而不是 `cap.py`：`cap.py` 只开一次，板子一拔端口没了它当场退出，
+   正好错过"插回来到第一次 panic 之间"那一段 —— 那一段才是这一趟要抓的东西。
 3. **插回来之后第一次开机 panic 了**（`b22 rst=4 panic`，t=1 才落上 `usb+`，说明它启动约 1 秒就崩、
    然后自己重启）。这是**第二个故障**，跟供电那问无关，而且**它就在恢复路径上**：现场"拔插电源之后
    屏自己回得来"（§15.10）如果每次回来都要先 panic 一次，那 ~3 分钟里多了一段不确定。
    目前只称到"panic 过"这一条事实，**backtrace 一条都没抓到**，所以还判不了原因。
    下一趟带实时抓取就是为了抓它。
+   顺带排除了一条我以为能走的路：**"下次开机时把上次 panic 的原因打出来"在这套 IDF 里没有现成 API**
+   （`esp_diag_reset_reason` 在 6.0.1 和 5.5.2 两棵源码树里 grep 都是零命中；6.0.1 的
+   `esp_debug_helpers.h` 只有 `esp_backtrace_print*`，`panic_info_t` 只在 `esp_private/panic_internal.h` 里）。
+   所以抓 backtrace 只能靠当场有人在串口另一头听，事后翻 NVS 翻不出来 —— 这就是上面那台 `capwait.py` 存在的全部理由。
+   （`esp_system` 也没有用户可注册的 panic 钩子：`panic_handler_register` / `PANIC_USER_DEFINED` 两处 grep 都零命中，
+   Kconfig 只有 `PRINT_HALT` / `PRINT_REBOOT` / `SILENT_REBOOT` / `GDBSTUB` 和 `PANIC_REBOOT_DELAY_SECONDS`。）
+   如果掐表那一趟还是没抓到（比如 panic 比 USB 枚举还早），下一档只能上 **coredump 到 flash**
+   （`components/espcoredump` 在这棵树里是有的）—— 代价是分区表要加一格 data、要整片重刷、解码要 ELF 和
+   `esp-coredump` 那套工具；这一条只记成"备胎"，可行性这一轮**没有验证过**。
 
 对照着看的两台仪器都支持"这一趟里板子确实重启过、而且电池窗口没闭合"：
 
