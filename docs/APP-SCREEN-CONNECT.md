@@ -362,4 +362,6 @@ I (82015) link.heartbeat: hb t=81s setup=advertising wifi=up ws=down ...
 同一轮还拍到了屏上那一行 **`已接入`**（`shot_carpet_live.png`，只在链路 linked 时才画），
 而且是复位之后没碰屏自己回到这个状态的。
 **电池那条只能现场称**：电池供电 + 开关打开 + 熄屏 3 分钟，热点的已连接设备列表里那块屏还在。
+**别用电脑去 ping 屏**——这台华为热点上电脑→屏本来就不通，屏明确在线（`linked=1 has_state=1`）的时候
+照样 ping 不到，用它判断会把"仪器不通"读成"屏掉线"（屏侧 HANDOFF §15.6 记了这次误判）。
 
