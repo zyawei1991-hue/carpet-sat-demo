@@ -149,6 +149,118 @@
   只有按 POWER 能叫醒它。所以这一条只在设置页「熄屏后保持联网」开着时才有效；
   App 侧的要求写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
 
+## 上行音频通道（契约 v4 · 设计，未实现）
+
+「对着屏说话」才需要这一档。屏已经是嘴（`audio_chunk` 放音），这一节给它装耳朵：屏采的裸 PCM
+推到手机，手机做转写，答句照旧走 `dialog{dir:"down"}`。方向反过来了，但帧的形状**刻意和 v3 下行做成同一套**——
+同骑 `command`、同一组 `args` 键、同样 2560 字节一块，只为让两侧只剩一套分块代码。
+
+```
+按住（屏生成 turn_id = s-<开机随机段>-<自增>，此后这一轮所有帧都用它）
+     → command{cmd:mic_chunk, args:{turn_id,seq,total,rate,b64}} × N   每 80 ms 一帧
+     → 手机转写 → dialog{dir:"up", turn_id:同一个, text:转写出来的那句}    这句是屏该显示的
+     → 手机照旧答 dialog{dir:"down"}（+ 可选 audio_chunk）
+```
+
+- **`turn_id` 由屏在按下的那一刻生成，手机不许另起一个。** 它是这一轮的唯一编号：`mic_chunk` 靠它拼段，
+  `dialog` 靠它去重，答句靠它配对。手机换号的表现是"声音和文字对不上、同一句话画两遍"。
+  上行那句走 `dir:"up"`，语义仍按对话面那套 —— 它是**记录**，不是请求手机重答一遍。
+- **为什么又是 `command` 而不是新开 `t`**：和 v3 那条"唯一不能反过来决定的决定"同一条理由，一字不改。
+
+### 第一条要求不是音频，是「让屏先知道对面是几版」
+
+v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成立，手机那边正好相反**。
+`CommandType` 是 Kotlin 严格枚举（`core/.../protocol/ScreenLink.kt:112`），枚举外的值在
+`ScreenMessage.decode` 里抛 `SerializationException`；入站解码整个包在 `runCatching` 里，失败分支是
+`conn.close(CLOSE_POLICY, "bad contract")`（`core/.../screen/ScreenLinkServer.kt:97-102`），
+而且 `Json { ignoreUnknownKeys = true }` 救不了枚举取值 —— 它只管多余的键。
+**所以对着现在装在手机上的 v3 App 发一条 `mic_chunk`，表现是链路当场被手机关掉、一句话不说**，
+和「App 无法连接圆屏」那两次现场故障同一个观感。
+
+屏又**没法自己算出对面是几版**：协商号是服务端算的，`ack` 帧里没有版本字段可以回读，
+固件只能取自己申报的那一档（`components/screen_link/screen_link.c:59-63`，
+`s_negotiated = SCREEN_LINK_CONTRACT_MAX`）。这条不对称是 v1 时就写进注释的已知代价，
+上行音频正好踩在它上面。
+
+所以 v4 的第一条是**加性地把协商号回读**：
+
+- `AckPayload` 多一个可选整数字段 `protocols`（`ScreenLink.kt:433`），hello 的回执里带上服务端
+  实际支持的档位。老固件用 cJSON 读 ack，多出来的键直接看不见，不掉线。
+- 固件收到后**只用它给"上行"这一路把闸**：申报号缺失或低于 4 时，屏不许发任何 `cmd`。
+  **不要拿它去覆盖现有的 `s_negotiated`** —— 那个变量现在管的是 `screen_link_dialog_ready()` 这类
+  "屏能不能说话/能不能收"的判断，而收这一路对着老 App 本来就是安全的、已经跑着的；把它清零换来的
+  是一台好使的屏突然连答句都不画了。风险是不对称的：**下行错了屏只是丢帧，上行错了手机关链**，
+  所以这道新闸只管上行，别的都不动。
+- **没有这个键就当"不许上行"**。这里"缺了 = 不发"是安全默认，
+  和 `SatState.module_ok` 那条"缺了必须当不知道"的反面教训不冲突 —— 那条是显示字段，省略会被读成假值；
+  这一条控的是**发不发**，误判方向是沉默而不是炸链。
+- **发布顺序是硬的，不能倒**：先让 App 会申报、并且认识 `mic_chunk`，装机之后才允许固件发这一帧。
+  反过来的话，一块新固件能把一台没更新的手机当场踢下线，那比"屏不能说话"重得多。
+
+### 帧预算与屏侧的取数位置
+
+- 采到的就是现成的：`idle_capture()` 每 20 ms 从 `muse_audio_read` 拿 320 帧（16k/单声道/s16le = 640 字节），
+  喂 `s_pre` 预滚环和设置页那个音量条。**2560 字节 = 4 个 20 ms 块 = 80 ms** → base64 3416 字符 → 整帧约 3.5 KB，
+  压在 `SCREEN_LINK_MAX_FRAME 4096`（同时是 `ws_cfg.buffer_size`）里，和 v3 下行同一个数。
+- **12.5 帧/秒 ≈ 43 KB/s 的入站 JSON**。下行那条文档里写了"22 KB/s 没实测过"；上行这条更糟，
+  是**手机作为服务端从没被这块屏压过任何持续入站流量**。第一次真跑要在手机上看到收帧序号连续，
+  在屏上看到发送侧没有阻塞。
+- **不许在 `voice_task` 里直接发帧**：那条任务的 20 ms 读取就是它的节拍，`esp_websocket_client_send_text`
+  一旦因为 tx 队列满而阻塞，掉的是**采到的音频**而不是某一帧。要做的是生产者/消费者切开：
+  `voice_task` 写 PSRAM 环，独立上行任务取环、组帧、发。环满了丢什么必须先写死再实现 ——
+  按 v3 下行那条同款的规矩，**整段作废比"后半句没了"好**，但上行的整段作废意味着这一轮白说，
+  所以屏侧要给一个"这轮没送出去"的反馈，别静默。
+- 「按住说」8 s 上限 = 256 KB PCM = 100 帧。和下行那个 2 MB(=64 s) 的段上限是两个数，别混。
+
+### 屏侧现状：那条「录音通路坏了」要先改判
+
+之前量到的"自测过了（-54.9 dBFS）之后所有 `muse_audio_read` 全失败"，
+现在有一个**更便宜的解释，而且它把结论翻过来**：
+
+- 那句 `i2s_common: i2s_channel_read(1410): The channel is not enabled` 不是状态位，是**拿令牌的超时**。
+  IDF 那边读一次要借一次二进制信号量，通道 enable 时给、disable 时收（`i2s_common.c`）；
+  esp_codec_dev 读默认等 1000 ms。所以任何**第二个读者**都会等满 1 秒、然后打这一行一模一样的错。
+- `muse_audio_read` 自己不加锁（锁只在 `muse_audio_power` 里），所以两个读者就是纯竞争。
+- `voice_task` 在不 rest 的时候**每一圈都在读麦克风**（`idle_capture()`，注释写着"The 20 ms read paces this loop"），
+  而 `rest = asleep && battery`。**在 USB 供电的台子上 rest 永远为假**，也就是说麦克风一直是被 voice_task 占着的。
+  我之前那个从串口任务发起的探针，正是撞上去的第二个读者。
+- 顺带把"强制 `muse_audio_power(false)` 卡住"也解释了：`Pending out channel for in channel running`
+  是配对逻辑在等一个被在途读者拿着的令牌（`portMAX_DELAY`），不是硬件坏了。
+
+**这不是结论，是改判的方向。** 证伪它只要十秒钟、不用改代码：**USB 供电，进屏的设置页翻到声音那一栏，
+对着麦克风拍手** —— 那一条电平条（`s_mic_bar`）和它旁边的 dBFS 数字读的就是 `muse_voice_monitor_db()`，
+而喂它的正是 `idle_capture()` 同一条读（只有那一页可见时才采，`muse_settings_ui.c:1940`）。
+动了 = 通路本来是好的、上行只需要**在 voice_task 里取它已经拿到的那块**，屏侧根本没有 bug 要修；
+不动 = 竞争说只是解释了探针失败，通路另有真问题，得按原计划插 `i2s_channel_get_status` 上板翻。
+开机自测那一条（-54.9 dBFS）**不能当反证**：它跑在 voice_task 开始循环之前。
+
+只有代码量出来才知道的那一半，现在也别当成已定：谁在稳态持有令牌、以及 `s_open` 是不是被某次
+`set_fmt` 内部 disable 留在了错的状态。
+
+### 手机那一侧要做的事（写在契约里，由 apps/android 那棵树实现）
+
+1. `AckPayload` 加 `protocols`（见上），`CONTRACT_VERSION`/`SUPPORTED_VERSIONS` 从 3 走到 4
+2. `CommandType` 加 `mic_chunk`，入站解码把这一帧当成"音频段"而不是聊天帧；
+   按 `turn_id` 攒段、`seq` 不连续就整段丢、超上限整段丢 —— **和 `AudioChunks` 下行那套是同一条规则**
+3. **转写**：现有 `OpenAiCompatProvider` 走不了这一条 —— 它把 `/chat/completions` 硬拼在 baseUrl 后面、
+   只发 JSON body（`core/.../ai/Providers.kt:99-104`），multipart 的 `/audio/transcriptions` 在它里面没有形状。
+   要的是一个独立的上传客户端。**HTTPS 是硬要求**：`network_security_config.xml` 的 base-config 全局禁明文，
+   域名白名单那几条全是注释状态
+4. **落屏**：转写出来的那句回 `dialog{dir:"up", turn_id:屏给的那个}`，屏显示它 —— 这是"我听到你说的是这句"的凭据
+5. 转写喂 `DialogBridge.ask(question, via = "screen", turnId)`，答句照旧走下行那两帧
+6. `DialogBridge.onAnswer` 现在在 `AppRuntime.kt:375-384` **根本没接**（构造参数里没有它）。
+   接上它不只关系这一节 —— 它是 v3 那条 `audio_chunk` 至今没声音的同一个缺口。
+   **未定项，要机子上称**：Mate 60 没有 GMS，`TextToSpeech` 引擎在不在得实测；云端 `/audio/speech`
+   有没有对应端点也得看齿轮面板里 `ai_url` 是哪家
+
+### 还没称过的（别按已实现讲）
+
+- 43 KB/s 入站：一次都没压过
+- `mic_chunk` 的失败模式：v4 的申报回读落地前，它是**会关链的**，不是会丢帧的
+- 云转写在展台上的可用性：现场手机走不走蜂窝、`ai_url` 是哪家、那家有没有 `/audio/transcriptions` —— 三个都还没答
+- 端到端时长：按住说完到答句上屏，估 5~8 s，纯算式没实测
+- 屏上采集与放音同时进行（回声、以及同一根 I2S 总线上的双向）：**没碰过**
+
 ## 保活与断线
 
 - App 每 1 Hz 发 `state`，这本身就是心跳。**3 s 没收到 state，展示端把链路图标变灰**；10 s 没收到则重连
@@ -326,7 +438,11 @@
 
 - [x] App 侧服务选型：定了 Java-WebSocket，只做 WebSocket。批量面等真需要轨迹时再议
 - [x] 契约 v2：加 `dialog` 帧 + 按 `hello.protocols` 协商，逐连接过滤（v1 固件只看不说，不用升级）
-- [ ] 展示端固件的对话通道：`screen.html` 那套冒充件已经按 v2 在跑（`node simulator/screencheck.mjs` 22 条断言，其中 11 条是对话面；`node simulator/linkcheck.mjs` 11 条，跑之前先把彩排台起起来：`./gradlew :simulator:run --args="--hold 9"` —— **`--hold` 是步号不是秒数**，传之外的值以前会让进程活着但 1Hz 停掉），真固件那边要补的是录音 → ASR 这一段
+- [ ] 展示端固件的对话通道：`screen.html` 那套冒充件已经按 v2 在跑（`node simulator/screencheck.mjs` 22 条断言，其中 11 条是对话面；`node simulator/linkcheck.mjs` 11 条，跑之前先把彩排台起起来：`./gradlew :simulator:run --args="--hold 9"` —— **`--hold` 是步号不是秒数**，传之外的值以前会让进程活着但 1Hz 停掉），真固件那边要补的是录音 → ASR 这一段。**这一段现在有了形状，见上面「上行音频通道（契约 v4）」**：
+      第一步不是录音，是让 `ack` 把服务端的契约号回读给屏 —— 屏现在算不出对面是几版，而手机解不开陌生 `cmd` 的处理是**关连接**
+- [ ] **契约 v4（对着屏说话）**：`mic_chunk` 上行 + `ack.protocols` 回读 + 手机端 multipart 转写客户端 + `DialogBridge.onAnswer` 接线。
+      四张表（schema / `CommandType` / 固件 `CMD_NAMES` / 组件 `ALLOWED`）由 `SchemaDriftTest` 逼着一起改。
+      **发布顺序不许倒**：App 先会申报，固件才许发第一帧
 - [ ] 展示端接入配对：现在是出厂烧死 `screen_id`，演示现场改不了。要不要换成一次性配对码，D8 被推翻时一起定
 - [ ] 展示端固件的 WebSocket 客户端：小智固件已依赖 `esp_websocket_client`，复用，不引新库
 - [ ] 轨迹点数组的压缩：1 Hz 采样 2 小时 = 7200 点，JSON 太大，考虑抽稀到 30s 或走二进制
