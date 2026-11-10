@@ -571,10 +571,32 @@ PCM 得从屏推到手机，手机转写成字再走已有的问答面。**形�
 这一条不只是 v4 需要 —— **它是 v3 那条 `audio_chunk` 至今在屏上没声音的同一个缺口**：
 文字答句早就上屏了，但没有任何代码去合成、去切块、去发。接上它，屏的喇叭才有东西可放。
 
-未定，需要机子上称，别当成已具备：Mate 60 没有 GMS，`android.speech.tts` 的引擎在不在得实测；
-云端 `/audio/speech` 有没有对应端点取决于齿轮面板里 `ai_url` 是哪家。**另外有一条已经和代码对不上的观测**：
-owner 反馈"手机确实出声念了答案"，但仓库 main（92c6031）里没有任何 Android 音频 API、`onAnswer` 没接。
-在查清那句话是谁念的之前，别在手机上再加第二个发声源 —— 展台上两个声音同时念同一句是事故。
+**2026-11-10 把这条查到底了，结论要改判：手机 App 里一行放音代码都没有。**
+不是"`onAnswer` 没接所以没声音"，是**整棵树上根本没有发声的那一半**：
+
+- `grep -rn "TextToSpeech|MediaPlayer|AudioTrack|SoundPool|MediaCodec|MediaExtractor|android.media|android.speech|ExoPlayer"`
+  扫 `apps/android/src` + `core/src/main` → **只命中两行注释**（`core/.../ai/AudioChunks.kt:15`、
+  `core/.../ai/DialogBridge.kt:47`，两处都写着"手机上换成 `android.speech.tts`"，是设想不是实现）
+- 再扫 `setDataSource|RingtoneManager|ACTION_VIEW|setSound|.play(|prepareAsync|ToneGenerator|Vibrator` → **零命中**
+- `apps/android/build.gradle.kts:114-136` 没有任何媒体/TTS 依赖；`libs/` 只有
+  `protocollibrary_1.0.0.aar`（卫星协议）和 `ephemerislibrary-release.aar`（星历），都不含放音
+- `AndroidManifest.xml` 没有音频权限、没有播放器组件；`res/` 下没有 `raw/`、没有 `assets/`、没有 HTML/JS
+- `onAnswer` 那条原判**是对的**：`DialogBridge.kt:53` 是 `private val onAnswer: (DialogPayload) -> Unit = {}`
+  （默认空实现，而且是 `private val`，事后无法赋值），`:159` 才调它；
+  `AppRuntime.kt:375-384` 只传了 `gateway/facts/push/launch/note/screenScene`，全仓库只有这一个 App 侧实例
+- 唯一真会合成的是**彩排台那台 Windows**：`simulator/.../VoiceTts.kt:42-45` 调 `tools/tts-say.ps1`
+  （edge-tts `zh-CN-XiaoyiNeural`，退回 `System.Speech` Huihui），而且它 `SetOutputToWaveFile` **不在本机放音**，
+  产出的 PCM 是发给屏的；开关是 CLI 的 `--voice`（`DemoDriver.kt:231`）
+
+**所以 owner 听到的那个声音，代码上不可能来自这个 App。** 最可能的来源是**圆屏自己在念** ——
+`firmware/screen/muse/README.md:700-702` 写着"屏侧「听/说」现在是 Muse 自己那条云链路，和我们自己的 App 无关"，
+屏上有 ES8311+NS4150B 喇叭，就摆在手机旁边。**这条要靠一个实验定性，不是靠读代码**：
+**把手机媒体音量调到 0，再在 App 里问一句** —— 还有声音 = 屏在念（或手机上别的东西），没声音 = 手机侧另有来源。
+在这个实验做完之前，"手机会念答案"不能当成已具备的能力写进任何验收项。
+
+**两个声音的风险因此换了位置**：不在手机上，**在屏上那一只喇叭** —— 我们的 `audio_chunk` 和 Muse 自己那条云 TTS
+会抢同一个输出。`DialogBridge.kt:121-125` 对 `foreignCloud` 那几轮只记日志、**不会去闭 Muse 的嘴**。
+真做 v4 的时候，屏侧必须先定"我们的音频进来时 Muse 那条链路要不要静音"，这是固件侧的活。
 
 ### 12.4 两个要 owner 先答的问题（答不了这条就没法定实现）
 
@@ -587,12 +609,14 @@ owner 反馈"手机确实出声念了答案"，但仓库 main（92c6031）里没
    `POST /v1/audio/transcriptions`、`/v1/audio/speech`、`/v1/asr`、`/v1/stt`、`/v1/tts`、`/v1/audio`
    → **全部 `404 page not found`，和随手编一个路径的回话一字不差**；对照组 `/v1/embeddings`、`/v1/messages`
    回 `400`（路由在、body 不对）—— 所以那六个 404 是"真没有"，不是"我用错了方法"。
-   **结论：契约 v4 的 ASR 落点不在这一家**，要么再加一家只做转写的供应商（要第二个账号/key），
-   要么用手机上本地识别（不花钱、不出网，但 Mate 60 上有没有可用的中文离线识别**没称过**，先称它）。
+   **结论：契约 v4 的 ASR 落点不在这一家。** 后续 owner 选了"再加一家只做转写的云供应商"，
+   并在 §12.8 因为"APK 不许长大"否掉了手机本地模型那一档，**最终落在硅基流动，key 已到手、端点已真称过（§12.9）**。
+   **hanbao 不换，它继续只当对话面那一家** —— 两家分工：它答话，硅基流动听写（和合成，如果用收费那档）。
    **key 一律不进仓库、不进文档**，只存在手机那一格里；owner 贴过一次，之后自己决定要不要换。
 
-第 2 条的答案是"这家没有语音"，所以 12.2 那一节**仍然不要动工**，它现在卡的是"ASR 换哪家/换不换成本地识别"
-这一个决策，不是技术问题。12.1 不受它影响，可以先到手就做——它同时也是防止新版本把老版本踢下线的那道闸。
+第 2 条已经答完，所以 12.2 那一节**不再卡决策，可以动工**；但动工顺序仍然是硬的：
+**先 12.1（`ack.protocols` 申报 + 认识 `mic_chunk`）装机，固件才允许发上行帧**（§12.1、`protocol/screen-link.md` v4）。
+反过来一块新固件能把没更新的手机当场踢下线。12.1 同时也是防止新版本把老版本踢下线的那道闸。
 
 ### 12.5 与 v4 无关、但现在就该修的一条：对话面已经压着读超时
 

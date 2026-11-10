@@ -97,6 +97,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     而 `muse_audio_power(true)` 因 `s_open` 仍为 true 原地返回；强行 `power(false)+power(true)` 重开
     会改成不返回（日志停在 `I2S_IF: Pending out channel for in channel running`），串口开发口那条任务
     （3584 字节栈）从此读不到任何命令。所以探针只放音，不读麦克风。
+    **【2026-11-10 改判：这一段保留作历史观测，但结论作废。】** 那两次失败都是**探针自己撞上了
+    `voice_task` 的常驻读取**：`muse_audio_read` 不加锁，第二个读者会等满 esp_codec_dev 的 1000 ms 令牌
+    然后打出同一行 `The channel is not enabled`（超时日志，不是状态位）；`power(false)` 卡住也是在等
+    被在途读者拿着的令牌（`portMAX_DELAY`），不是硬件坏。**判据已称到**：设置页声音那一栏对着麦克风拍手，
+    电平条/dBFS 有反应 ⇒ 录音通路本来是好的。详见 §8 第 7 条和 `protocol/screen-link.md` v4 那一节。
   - 2026-11-06 契约 v3（`carpet_audio.c` + `on_command` + `hello.screen` + `UI_CARD` 补 maint）这轮 ——
     干净树（`git worktree add --detach … cdc169d`）`git apply --check` 过、解出来
     `carpet_link.c` 804 行 / `carpet_audio.c` 368 行 / `carpet_page.c` 849 行 / 字库 154,528 字节 /
@@ -698,9 +703,20 @@ App 侧配套要改的四条（发帧、partial WakeLock、退出别停服务、
    - **说（服务端合成 → 屏放）这一半代码已经写完**（§5.7 + 契约 v3），PC 那半在真链路上称过
      92 块 / 7.3 秒一条不少，**屏这一半还没上板**，所以这里仍然不算"做完"。
    - **听（屏上的麦克风 → ASR → 我们 App 的答题）这一半完全没有**：屏侧"听/说"现在是 Muse 自己
-     那条云链路，**和我们自己的 App 无关**；要让它走我们 App 的服务端，得先看 Muse 的 endpoint
-     能不能被屏上那四个字段改掉。而且 §2 记过一条硬坑：`muse_audio_read()` 开机 5.7 秒之后一律失败，
-     强行重开会挂死串口任务 —— 真要做"听"，那一本账先还掉。
+     那条云链路，**和我们自己的 App 无关**。
+     **2026-11-10 更新：做法不再依赖"改 Muse 的 endpoint"。** 契约 v4（`protocol/screen-link.md`
+     「上行音频通道」）定的是**在 `voice_task` 里取它已经拿到的那 20 ms 块**，经 `mic_chunk` 推给我们手机，
+     手机转写 + 答题，答句照旧走 v3 下行。Muse 那条云链路不动、也不改它的四个字段。
+     **原来记在这里的那条硬坑已改判**：`muse_audio_read()`"开机 5.7 秒之后一律失败"不是通路坏了 ——
+     `voice_task` 在不 rest 时每 20 ms 常驻读麦克风，而 `muse_audio_read` 自己不加锁，
+     串口探针是**第二个读者**，等满 esp_codec_dev 那 1000 ms 令牌超时后打出
+     `The channel is not enabled`（那是超时日志，不是状态位）。判据已称到：进设置页声音那一栏对着麦克风拍手，
+     **电平条和 dBFS 有反应**（owner 实测）→ 通路本来是好的。所以**上行不许新开读者**。
+   - **新增一条屏侧必须先定的事：喇叭只有一只。** 我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
+     ES8311+NS4150B 输出，手机侧对 `foreignCloud` 那几轮只记日志、不会来闭 Muse 的嘴
+     （`core/.../ai/DialogBridge.kt:121-125`）。**v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**。
+     顺带一条已查清的事实：**手机 App 里没有任何放音代码**，owner 听到的声音最可能就是屏自己在念
+     （详见 `docs/APP-SCREEN-CONNECT.md` §12.3，定性实验是"手机媒体音量归零再问一句"）。
 8. 屏幕上的第三块 tile **还没有目视确认过**（判据见 §9）。
 
 ## 9. 已经实测到的 / 还差的（2026-11-04 这一轮）

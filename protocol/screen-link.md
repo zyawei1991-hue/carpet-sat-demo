@@ -264,8 +264,18 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
      解码用 Android 自带的 `MediaExtractor`/`MediaCodec`，**不引第三方库，APK 不长大**
    - 它家 TTS 是**收费**的（价格页 `¥0.05/1k chars`），免费那条是 §12.7 称过的 edge-tts（同样出 MP3，
      同样要解码重采样）。**用哪条是 owner 的决策，不是技术阻塞** —— 两条的落地代码是同一套
-   - **仍然没称到的**：Mate 60 没有 GMS，`TextToSpeech` 引擎在不在；以及 owner 说的"手机确实出声念了答案"
-     到底是谁在念（`onAnswer` 没接，代码上不该有声音）—— 这条不查清，合成接上去可能出现两个声音
+   - **2026-11-10 查清了，这条要改判**：手机 App 里**一行放音代码都没有**（`apps/android/src` + `core/src/main`
+     扫遍 `TextToSpeech`/`MediaPlayer`/`AudioTrack`/`SoundPool`/`MediaCodec`/`android.media`/`android.speech`
+     只命中两行注释；`build.gradle.kts` 无媒体依赖；两个 `.aar` 是卫星协议和星历；manifest 无音频权限；
+     `res/` 无 `raw/`、无 `assets/`）。`onAnswer` 没接这条原判是对的
+     （`DialogBridge.kt:53` 是 `private val … = {}`，`:159` 才调；`AppRuntime.kt:375-384` 没传它）。
+     **所以 owner 听到的声音代码上不可能来自这个 App**，最可能是**圆屏自己在念**（Muse 那条云链路，
+     `firmware/screen/muse/README.md:700-702`："和我们自己的 App 无关"）。定性靠一个实验：
+     **手机媒体音量归零再问一句**，还有声音就是屏在念。详见 `docs/APP-SCREEN-CONNECT.md` §12.3
+   - **于是"两个声音"的风险换了位置：在屏上那一只喇叭，不在手机上。** 我们的 `audio_chunk` 和 Muse 自己的云 TTS
+     抢同一个 ES8311+NS4150B 输出，而 `DialogBridge.kt:121-125` 对 `foreignCloud` 那几轮只记日志、不会去闭 Muse 的嘴。
+     **v4 落地时屏侧必须先定"我们的音频进来时 Muse 那条链路要不要静音"** —— 这是固件侧的活，不是手机侧的
+   - **仍然没称到的**：Mate 60 没有 GMS，系统 `TextToSpeech` 引擎在不在（不过按上一条，手机侧本来也不打算用它放音）
 
 ### 转写端点实测（2026-11-10，拿到 key 之后真打的，不是估的）
 
