@@ -1630,3 +1630,669 @@ COM8 的 RTS 接 EN；不像 `firmware/screen/tools/sercmd_norst.py` 先把 dtr/
 正解在 §13 / `docs/APP-SCREEN-CONNECT.md` §6.1：`s_negotiated` 初值就是上限 3，`send_hello()` 之后
 立刻 `on_connected(s_negotiated)`，不等回执。真正算数的是 `ws 接入` 那行（打在
 `WEBSOCKET_EVENT_CONNECTED`，只在收到 HTTP 101 之后才派）。**对外不许再用 `contract=v3` 当"对面活着"的证据。**
+
+---
+
+## 15. 11-09：「每次要人手点一下屏」的机制是 nap，做成了设置页一个开关；顺带把拨号卡死自愈装上，`has_state=1` 这一轮称到了
+
+### 15.1 结论先给（App 那边那句"必须刷机"不成立）
+
+屏连不到手机，**不是 App 没做，也不是地址写死要重刷**。是 Muse 官方自带的省电行为：
+**电池供电 + 屏幕熄灭满 2 分钟**，屏自己把 Wi-Fi 整个断开（源码里叫 nap），断到下次有东西把它唤醒为止 ——
+断的时候手机侧、PC 侧谁都摸不到它，所以"要点一下屏才连得上"。USB 供电永远不 nap，
+§14.1 那条"零输入拨通"就是插着 USB 称的，两边不矛盾。
+
+现在这件事做成**设置页里的一个开关**（`熄屏后保持联网`）：不用刷机、不用重启、当场生效、重启还留着。
+默认关 = 官方省电行为；开 = 熄屏后仍保持关联（`WIFI_PS_MAX_MODEM` 那档深睡），代价是电池。
+
+### 15.2 屏侧改了哪几处（行号是这一轮读源码读出来的）
+
+- **nap 的闸门**：`esp32/components/muse/muse_input.c:591`
+  ```c
+  bool auto_nap = !muse_settings_stay_online()
+                  && s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS);
+  ```
+  `WIFI_NAP_MS` 还是 120000，`paused` 那条前提（要 `muse_state_on_battery()`）一个字没动 ——
+  所以 USB 那侧行为完全不变，改的只有"电池 + 熄屏"这一条。台架上的 `>nap` 仍然照 nap：
+  那是显式测量请求，不是这个定时器。
+- **开关存哪**：`muse_settings.c:44`（struct 里 `bool stay_online`）、`:141`（NVS `muse/stay_online`，
+  u8，缺键=默认 0）、`:291/:296` 读写函数、`muse_settings.h:96-97` 声明、`:53` 那条 `MUSE_SETTING_STAY_ONLINE`。
+  开机那行日志多带一尾：`..., link %s, nap %s`。
+- **当场生效**：`muse_app.c:57` 收到这个 setting 就 `muse_wifi_apply()`；已经在 nap 的那一次在下一轮重算里结束，
+  不等下一次唤醒。
+- **设置页那一格**：`muse_settings_ui.c:1577`（`switch_row`）+ `:1563` 回调。中文串走现成的表：
+  `carpet/carpet_lang_zh.c` 里 `Stay online when asleep` → `熄屏后保持联网`、那句 note →
+  `开着时熄屏也连着 Wi-Fi，手机随时能连上；代价是更费电。`
+- **台架口**：`muse_input.c:995` 的 `>stay`；`>stay on` / `>stay off` 改，不带参数回读
+  `@stay on=<开关> nap=<此刻在 nap 没> wifi=<连着没>`。
+- **拨号卡死自愈**：`main/muse_glue.c:84` `DIAL_STALL_FAILS 4` + `:601-613` —— Wi-Fi 还连着、
+  但抓屏链路连续 4 次拨号没一次通过，就打一条 W 然后 `wifi_mgr_disconnect()` 走全量重连
+  （重扫 + 重连存过的那张网），不再按退避阶梯死撞同一个 ARP 不到的地址。§14.2 要的第一件事到此做完。
+- **119 和 113 分得开了**：`components/screen_link/screen_link.c:449` `note_dial_error_text()` 从
+  `WEBSOCKET_EVENT_ERROR` 的正文里解析 `transport_error= / errno= / esp_ws_handshake_status_code=`，
+  `:75/:604/:614/:674` 维护 `s_dial_fails`（拨通即清零），`:765/:770` 两个读口；
+  `>url` 第二行、`>carpet` 第一行都带上了 `fails=` / `err=`。§14.2 要的第二件事做完。
+
+### 15.3 称到的（原始回读，全部 COM8，`sercmd_norst.py`/`cap.py` 抓的，不碰线不复位）
+
+1. **开关 + 持久化**：`@stay on=0 nap=0 wifi=1` → `@stay on=1 nap=0 wifi=1` → 复位后仍 `on=1`；
+   这一轮重刷（只动 UI 排布）后开机再读，还是 `@stay on=1 nap=0 wifi=1` —— 刷应用区没动 NVS。
+2. **那一格真上屏、而且不用滚**：`>ui.settings=sleep` 截图 `D:/dev/tmp/shot_sleep2.png`
+   （文件 1398×1398 = 466×466 @3x）。原来这格放在五个时长选项后面，圆屏一屏放不下（滚动条是关的、
+   台架也没有滚动的口），现在提到时长列表**上面第一格**。逐行量墨迹带：
+   `熄屏后保持联网` y=399..443 **h=45**，下面 `从不` y=606..647 **h=42**、`30 秒 / 1 分钟 / 2 分钟` 全在 45 上下 ——
+   同一档字号，没掉进 16 px fallback，也没有一行里大小不一。开关画在右边，紫色轨道 + 白色圆钮在右 = 开。
+   （第一次数到 h=96 那条是把**开关钮**并进了同一个带，不是字大；裁到 1:1 才看清。）
+3. **自愈真的触发过**（上一轮同一份逻辑，行号变了、行为没变）：
+   ```
+   W (15937) link.muse: screen link dialed 4 times with none through
+     (ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0); rejoining wifi
+   ```
+   后面紧跟一次真重新入网（`run -> init`、`reason=8`、扫描、`joining saved network 吨吨吨的Mate 30 5G`、
+   `auth -> assoc -> run`，全程 ~1.4 s）。
+4. **错误读数分得开**：`@url wifi=1 ssid=吨吨吨的Mate 30 5G fails=9 err=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0`
+   —— 119=ENETUNREACH（同网段 ARP 不到手机，问题在网）；113=ECONNREFUSED（对面在、没监听这个口，问题在 App）。
+5. **`has_state=1` 这一轮称到了**（§14 欠的那一条）：屏切到 Mate 60 热点、App 在 8443 上真在听之后，
+   ```
+   @carpet wifi=1 linked=1 contract=v3 gap_s=5 has_state=1 wd=0 fails=0
+   @carpet wifi=1 linked=1 contract=v3 gap_s=3 has_state=1 wd=0 fails=0
+   @carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+   @carpet sat=已锁定 下次3:21
+   ```
+   三次间隔 ~15 s，`gap_s` 一直是 0-5（`state` 1 Hz 在跑），`fails=0` 是"拨通过就清零"那条生效。
+   按 §14.4 的规矩，**算数的是 `has_state=1`，不是那行 `contract=v3`**。
+6. **复位后零输入自己回到"已接入"，而且拍到了屏**：上面那张截图是 `snap.py` 抓的（它会复位板子，§14.3），
+   复位后不碰屏再读一次：`@carpet wifi=1 linked=1 contract=v3 gap_s=1 has_state=1 wd=0 fails=0`、
+   `@stay on=1 nap=0 wifi=1`。截图 `D:/dev/tmp/shot_carpet_live.png` 里宫格页顶部那行是
+   **`已接入`**（琥珀紫），而这一行只在 `carpet_page.c:853` 那个 linked 分支才画 ——
+   也就是说"重启 → 自己连热点 → 自己拨 8443 → 屏上写出已接入"这一整条，全程没人点屏。
+
+### 15.4 还没称到的，说清卡在哪
+
+1. **"电池 + 熄屏 3 分钟，手机侧仍然连得到"这条没在台上称成**：nap 的前提是
+   `muse_state_on_battery()`，板子插着 USB 就永远不成立，`>nap` 又是显式强制、不走这个开关 ——
+   所以这条只能在现场称。判据（给现场用）：电池供电、开关打开、屏幕熄灭 3 分钟后，
+   **手机热点的已连接设备列表里那块屏还在**，`>stay` 回读 `nap=0`。
+   这一条的仪器在 11-09 晚换过一次，原因和现在的期望读数见 §15.7 —— 别再拿 `nap=0` 单独当证据，
+   它当场只说明"此刻不在 nap"，要看的是 `naps=` / `drops=` 这两个累计数。
+   **11-09 更晚：这一趟跑了两次，两次都在窗口里被重启毁掉（§15.9、§15.11）——
+   电池本身是好的、确实在供电（§15.10 撤回了我当时那句"没有电池"），
+   但"电池 + 熄屏"这条路上整机会断电，所以它撑不到能称 nap 的那 3 分钟。这一条仍然是没称到的，
+   而且现在排在"电池 + 熄屏会断电"后面。**
+   **11-09 深夜再更正：§15.11 那句"撑不到 3 分钟"被 §15.13 那趟推翻了 —— 带诊断仪器它在电池 +
+   熄屏里连续跑了 7.9 分钟（`low` 心跳一条没断，VBAT 只掉 18 mV）。所以这一条不再是"物理上撑不到"。
+   而且 RAM 那台仪器（`naps=`/`drops=`）在这个路线上还是用不了：读数必须在电池上拿，电池上没有串口。
+   能用的仪器只剩 §15.12 那台 NVS 的 —— 它已经埋了 `nap+`/`nap-` 两个转折点，
+   所以下一趟掐 3 分钟那一趟真正要读的是**环里有没有出现过 `nap+`**（开关打开 = 期望一条都没有）。
+   注意这半边证据只说明"那 3 分钟没进 nap"，"手机热点列表里屏还在"那一半仍然只能在插回 USB 之后用
+   `@carpet ... has_state=1` 补称。这一条现在排在"断电发生在哪一刻"后面，同一趟能一起称掉。**
+2. 那句 note（`开着时熄屏也连着 Wi-Fi…`）在截图里落在折叠区外、**没拍到像素**。
+   但它过了那道脚本守卫：`firmware/screen/tools/check_zh_table.py` 这轮跑出
+   `entries: 166   noto glyphs: 7240   problems: 0` —— 每个汉字都有字形、百分号/占位符对得上、
+   键还在画图那份文件里、宽度预算也没超，剩下的只有"排版挤不挤"这一条肉眼账。
+3. `snap.py` 一开 COM8 就复位板子那条（§14.3）仍然没修 —— 这一轮所有计数读数都改用
+   `sercmd_norst.py` / `cap.py`（开线前把 dtr/rts 压成 False）拿的，截图那一张是复位后的新会话，
+   所以 `shot_sleep2.png` 里的 UI 状态可信、计数不可信。
+4. **一次没抓到的转换，记下来免得下轮当谜**：`@url ... fails=9`（连的是 `吨吨吨的Mate 30 5G`）之后
+   我抓了 100 秒串口，那 100 秒里**一条 websocket / screen_link 日志都没有**，只有 5 秒一条的 `hb`；
+   再下一次读 `>url` 已经是 `ssid=Mate 60 fails=0 linked=1`。也就是说"换到 Mate 60 + 拨通"这一步
+   发生在两次抓取的缝里，没留下过程证据。`fails` 到 9 就停住不再涨、且 100 秒零次拨号尝试，
+   和退避阶梯（醒着最长 60 秒一档）能对上，但也可能升级那条已经把它接走了 —— **下一轮要称的话，
+   连着抓 3 分钟以上，别拿两段读数中间的空档讲因果**。
+
+### 15.6 一条仪器坑：电脑 ping 不通屏，即使在屏明确在线的时候（11-09 晚，我自己踩了并据此下过错结论）
+
+电池 + 熄屏 3 分钟那一次，我从这台电脑判"屏不在这张热点上"，用的是
+`ping -n 20 -w 3000 192.168.43.13`（真回复 0 条，20 条全是本机自己报"无法访问目标主机"）
+加整段 `192.168.43.1-254` 扫描（邻居表里只剩 `192.168.43.1` 手机自己）。
+**这套判据是废的**，因为把 USB 插回来、屏自己报告明确在线的同一时刻，它照样 ping 不通：
+
+```
+@carpet wifi=1 linked=1 contract=v3 gap_s=6 has_state=1 wd=0 fails=0   ← 链路此刻是活的
+@stay   on=1 nap=0 wifi=1
+ping -n 6 -w 2000 192.168.43.13 → 已发送 6，已接收 1（那条是本机的不可达回显），丢失 5
+```
+
+也就是说这台华为热点上 **电脑→屏 这条路本来就不通**（客户端隔离，或者 S3 在省电下根本不应 ICMP/ARP），
+和 nap 无关。所以：
+
+- **不许再用"电脑 ping 得到屏"当现场判据**，它连"屏现在在线"都证不出来。
+- 电池那条的正确仪器在**手机侧**：热点的「已连接设备」列表（站一掉就消失），或者 App 里屏的在线状态。
+  现场流程：拔 USB → 让它熄屏 3 分钟 → 在手机上那块屏还在不在列表里。全程不碰屏。
+- 这一条到此仍是**没称到**，作废的原因是仪器不对，不是屏不对。
+- 顺带一条实测到的好事：USB 插回来之后屏自己恢复到 linked 并继续收 `state`，
+  冷启动那两遍也是 8 秒内起来（§15.3 第 5、6 条），没有任何人工输入。
+
+### 15.7 电池那一趟换的仪器：nap 计数记在 RAM 里，拔电期间也能事后读（11-09 晚）
+
+§15.6 把 ping 那条作废之后，"屏在电池上打没打盹"只剩两种问法：问手机（热点的已连接设备列表，
+我没实测过它掉站之后多久刷新），或者**插回 USB 之后再问屏自己**。后一条成立的前提是拔 USB 期间屏不断电
+—— 它确实不断：拔掉 USB 只是没了串口，MCU 由电池继续跑，**RAM 里的东西还在**。所以计数放 RAM 里就够了：
+
+- `muse_input.c:585-586` 两个 `volatile uint32_t`：`s_nap_events` = nap 真的开始过几次，
+  `s_wifi_drops` = Wi-Fi 从"连着"变成"没连着"几次（`update_wifi_nap()` 里 `was_up && !up` 那一条，`:593-598`）。
+  开机清零，不需要 NVS —— 要证的本来就是"这一趟"，不是"这台机器一辈子"。
+- `>stay` 回读从 `on=%d nap=%d wifi=%d` 变成 `on=%d nap=%d naps=%lu drops=%lu wifi=%d`（`:1028-1030`）。
+- 一个真踩过的坑，记下来免得再犯：`was_up` 的初值一开始写成 `true`，而刷完那一刻 Wi-Fi 本来就没起来，
+  于是刚开机就白记一次掉线，实测读到 `@stay on=1 nap=0 naps=0 drops=1 wifi=0`。
+  改成 C 的零初值（`static bool was_up;`）之后重刷，基线才是 `naps=0 drops=0`。
+- 判据：跑完「拔 USB → 让它自己熄屏 3 分钟 → 插回来」这一趟之后读一次，
+  **`on=1` 期望 `naps=0 drops=0`**（开关生效 = 根本没打盹，也就没掉网）。
+  对照组（关掉开关应该看到 `naps≥1`）**只能在同一趟电池里做**，原因见下面"台架上永远走不到自动 nap"那一条。
+- **仪器自己先证过一次**（就在这一轮，电脑前，不需要热点）：`>nap` 走的是 `s_nap_now` 那条显式口，
+  当场让它 nap，`naps` 立刻从 0 变 1；`w` 醒过来之后 `nap` 归 0、累计数留着。
+  所以 `naps=0` 不是"这个数永远是 0"：
+
+```
+@stay on=1 nap=0 naps=0 drops=0 wifi=0      ← 刷完的基线，没人碰过
+>nap  →  I (732876) muse_input: display paused (USB host: CPU at full speed)
+          I (732881) muse_input: Wi-Fi napping
+@stay on=1 nap=1 naps=1 drops=0 wifi=0      ← 计数器是活的
+w     →  @stay on=1 nap=0 naps=1 drops=0 wifi=0   ← nap 结束，累计数留在 RAM 里
+```
+
+  `drops` 那一次仍是 0，不是仪器坏：nap 那一刻 Wi-Fi **本来就没连着**（`was_up` 为假），
+  而 `drops` 只数"连着 → 断了"这一个转换。这一半要有网之后再断才数得到 ——
+  也正是那一趟电池要顺带称的东西。
+- **台架上永远走不到"自动 nap"这一条**，这是这一轮读代码读出来的硬事实：
+  `muse_input.c:543` 是 `want_low = pause && !muse_console_host()`，而 `auto_nap` 要求 `s_cpu_low`
+  （`:607`）。**插着 USB 跟电脑说话时 `s_cpu_low` 恒假 ⇒ 自动 nap 恒不发生**，
+  跟开关开没开没有关系。所以"开关挡住了自动 nap"这半条在电脑前一次也测不出来，
+  要么拔电（就是那一趟），要么用 `>nap` —— 而 `>nap` 故意绕开开关，拿它验开关是验不出来的。
+  §15.4 第 1 条那句"只能在现场称"到这里才算说死。
+- 顺手一条 bench 坑：`>sleep` 只认 `SLEEP_CHOICES = {0,30,60,120,300,600}` 里**当前档位之后**的值，
+  我发 `>sleep 30`（当时是 120）拿到的是 `sleep 30: error: unknown command or bad value`，
+  而且 `set_asleep(false, "serial")` 藏在报错那条路径里 —— **报错顺带把屏叫醒了**。
+  别拿 `>sleep` 当"让它熄屏"的工具，要用 `z` 或者真等自动熄屏。这一轮之后 `>status` 里 `"sleep":120` 原样还在。
+- **那一趟仍然没跑成**：卡在这台 Mate 60 的热点当前不在空中 ——
+  `link.wifi: scan complete, 0 APs found`，`no saved wifi network nearby`（同一次扫描在别的时间点能找到 3 个邻居，
+  说明扫描本身好的，只是 `Mate 60` 不在）。`wifi=0` 的时候"熄屏 3 分钟"测的是"没网时会不会打盹"，
+  不是要测的那件事。热点开起来、`wifi=1 linked=1` 之后再做这一趟才有意义。
+  **（后面这一句成立，但那趟跑完之后结论变了 —— 这块屏撑不到"测的那件事"，见 §15.9。）**
+
+### 15.9 那趟 5 分钟的电池测试跑完了：板子在那一趟里确实重启过（11-09 晚；本节"这块板没有电池"那句已被 §15.10 撤回）
+
+**这一节的硬件判读已经在 §15.10 撤回**：电池是好的、确实在供电。留下来仍然有效的是那两条现象
+—— 这一趟里板子**真的重启过**（`naps` 1→0、复位原因 `power on`），以及重启之后不碰屏也能自己连上。
+"为什么那一次重启、后面那次没重启"的差别在 §15.10 里重新对过。
+
+热点开了之后我先把基线拉到 `wifi=1 linked=1`（`>stay off` + `>stay on` 踢一下 keeper，
+`muse_wifi_apply()` 立刻重新入网），然后跑完「拔 USB 5 分钟 → 插回来」，读到的原始回读：
+
+```
+基线（拔之前）：
+@stay   on=1 nap=0 naps=1 drops=0 wifi=1
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0    ← 连读三次一样
+插回来之后：
+@stay   on=1 nap=0 naps=0 drops=0 wifi=1
+@power  {"boot":"power on","uptime":76,"battery_boots":0,"started":false,"running":false,
+         "battery_pct":[-1,-1],"battery_mv":[0,0], ...}
+@carpet wifi=1 linked=1 contract=v3 gap_s=0 has_state=1 wd=0 fails=0
+I (288153) link.heartbeat: hb t=287s ... wifi=up
+```
+
+**判读：`naps` 从 1 变回 0 = RAM 被清零 = 这块板重启过。**（这一句仍然成立，是这一节留下的事实。）
+当时我接着把它解释成"这块屏没有可用的电池"——**那个解释错了，错在哪见下面第二条的更正**，
+正确的对照实验和结论在 §15.10。
+
+- 复位原因是 `ESP_RST_POWERON`（`muse_battery.c:565` 把它印成 `power on`）—— 板子确实断过电。
+  不是串口造成的：这一轮所有读数都走 `sercmd_norst.py` / `cap.py`（开线前把 dtr/rts 压成 False），
+  而且 `uptime=76` 落在"他插回来"那一刻，不是我读的时候。
+- 当时那条"没有电池"的推理（**保留下来当反面教材：读数都对，结论是错的**）：
+  `battery_pct:[-1,-1]`、`battery_boots:0` 就断定电量这一路没有数，再引
+  `boards/board_waveshare_s3_175c.c:78` 那句 `"PMU unavailable (%s): battery status disabled"`
+  说 PMU 读不到。**错在两处**：那句 W 这次开机日志里根本没打出来（打的是 `AXP2101 ready`），
+  而 `battery_pct` 只在"电池窗口"里才被采 —— 插着 USB 去读永远是 `[-1,-1]`，它不是"没电池"的证据。
+- 真正剩下的问题当时被我读反了：`muse_state.c:239-243` 是
+  `on_battery = s_as_if_battery || (!p.usb && p.battery_pct >= 0)`，窗口一开 `battery_pct` 就有数，
+  **所以 nap 在这台机器上是会真的发生的**，那一趟之所以没留下读数，是因为板子重启把 RAM 清了，
+  不是因为这条路径不存在。
+
+所以那一趟的账要这么记：
+
+- **那一趟什么都没称到** —— 判据要的 `naps` / `drops` 被重启清了 RAM，读到的 0 是"开机以来的 0"。
+  当时我据此写的"这块屏没有电池那一档"是错的，对照实验和更正见 §15.10。
+- 称到的那条仍然算数：**断电重启之后，没人碰屏，它自己连上了**
+  （上面 `@carpet` 那行 `has_state=1`；时间尺度见 §15.3 第 5、6 条，8 秒内 linked）。
+- `熄屏后保持联网` 这个开关的现场意义没有被推翻：电池是有的、`on_battery` 会真的成立、
+  nap 会真的发生，所以那一趟**还得重跑一次**才算称到。
+
+### 15.10 §15.9 那句"这块板没有电池"撤回；同时称到"拔插电源之后屏自己回得来，但要 ~3 分钟"（11-09 深夜）
+
+改成 10 秒的短拔、**并且让屏一直亮着**，再对着 flash 里那条电池窗口读数看：
+
+```
+肉眼：拔掉 USB 屏一直亮，插回来还是亮着
+@stay  on=1 nap=0 naps=0 drops=2 wifi=1
+@power {"boot":"usb","uptime":206,...,"secs":12,"battery_pct":[100,100],
+        "battery_mv":[4121,4090],"screen_off":0.0}
+开机日志：I (1066) muse_pmu: AXP2101 ready (hardware PWR hold-off 10 s, COMMON_CFG 34, PWROFF_EN 06, last off 20)
+```
+
+**电池是好的，在供电。** 三条互相独立的读数凑在一起才算数：PMU 上线（不是 §15.9 引的那句
+`PMU unavailable`，那句这次根本没打出来）、12 秒窗口里 `4121 → 4090 mV` 的**带载压降**
+（`muse_pmu.c:212-217` 是寄存器实读，编不出这种数）、以及 `uptime` 从 58 涨到 206 没归零
+—— 那一趟 10 秒里板子**没有重启**。所以 §15.9 的判读作废，`on_battery` 在这台机器上是能真的成立的
+（`muse_state.c:239-243` 要的那句 `battery_pct >= 0`，窗口一开就有数）。
+
+那 §15.9 那趟 5 分钟是真的重启过（`naps` 1→0、复位原因 `power on`）。两次只剩一个差别：
+**那一次屏熄了 3 分钟，这一次屏一直亮。** 于是新的怀疑是「电池 + 熄屏 = 走进 light sleep 那条路会重启」，
+`@power` 的 locks 里那条 `{"name":"usb_serial_jtag","type":"NO_LIGHT_SLEEP","held":100.0}`
+给了它一个可能的形状：**插着 USB 时这条锁 100% 压着不让睡，拔掉之后就没人压了。**
+这只是假设，**没称**，别当结论用。
+
+顺带这一趟称到一条现场用得上的正面证据——**拔插电源之后屏自己回得来，全程没碰屏**：
+
+```
+W (345908) link.muse: screen link dialed 12 times with none through (ESP_OK errno=119 http=0); rejoining wifi
+W (345933) link.wifi: station disconnected reason=8 rssi=-37
+I (346930) link.wifi: starting wifi scan (ch=12, one network)...
+I (347354) link.wifi: got IP 192.168.43.13
+I (377951) screen_link: ws 接入 ws://192.168.43.1:8443
+I (377954) carpet: linked, contract v3
+@stay   on=1 nap=0 naps=0 drops=3 wifi=1
+@carpet wifi=1 linked=1 contract=v3 gap_s=1 has_state=1 wd=0 fails=0     ← 连读两次一样
+```
+
+判读三条：
+
+- 断的方向是 `errno=119`（路由没了，不是 App 端口没人听），升级重连那一条按设计接住了它，
+  重新入网 3 秒内拿到 IP，然后 `linked, contract v3`、`has_state=1`。
+- **代价是时间**：从升级触发（345.9 s）到拨通（377.95 s）32 秒，而升级本身要等
+  `dialed 12 times` 才动手 —— 现场如果中途拔插了电源，App 侧要有"大概三分钟自己就好"的预期。
+  嫌慢的话有现成的旋钮：让 `errno=119` 这种"路由都没有"的失败立刻升级，别攒够 12 次。
+- `drops` 从 2 涨到 3 就是这一次升级重连的断开 —— §15.7 那台仪器在真实事件上动过，仍然有效；
+  `naps` 全程 0（屏亮着，本来也轮不到 nap）。
+
+### 15.11 电池 + 熄屏 = 整机会断电，两次都这样（11-09 深夜，重跑那一趟的结果）
+
+按 §15.10 的判据把那一趟原样重跑（拔 USB，让它自己熄屏，5 分钟以上，再插回来）：
+
+```
+@stay   on=1 nap=0 naps=0 drops=0 wifi=1
+@power  {"boot":"power on","uptime":56,"battery_boots":0,"started":false,"running":false,
+         "secs":0,"battery_pct":[-1,-1],"battery_mv":[0,0],"screen_off":0.0}
+@power.saved {"boot":"usb","uptime":150,...,"secs":12,"battery_pct":[100,100],
+              "battery_mv":[4121,4090],"screen_off":0.0}      ← 还是上一轮那条 12 秒的旧记录
+@carpet wifi=1 linked=1 contract=v3 gap_s=2 has_state=1 wd=0 fails=0   ← 插回来自己恢复了
+下一次开机（我复位抓日志）：
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x2b (SPI_FAST_FLASH_BOOT)
+I (1066) muse_pmu: AXP2101 ready (hardware PWR hold-off 10 s, COMMON_CFG 34, PWROFF_EN 06, last off 00)
+```
+
+判读，一条一条对着 §15.10 那台仪器看：
+
+- **这一趟又是重启**：新会话复位原因 `power on`、`uptime` 只有 56 秒、`naps` / `drops` 全被清零。
+- **而且不是"插回来那一下抖的"**：`@power.saved` 里那条电池窗口记录**还是上一轮 12 秒的旧数**
+  （`secs:12`、`4121 → 4090`）。窗口是"合上时才写"的（`USB back after N s on battery` 那一条），
+  它没被更新 = **这一趟的电池窗口根本没合上，板子在窗口里就死了**。
+  再对上 §15.10 那次"插回来 uptime 从 58 涨到 206 没归零"——插拔本身不重启板子，是板子先没了。
+- **和 §15.10 那次唯一的差别就是熄屏**：那次按我说的让屏一直亮（`screen_off:0.0`），12 秒好过；
+  这次让屏自己熄，5 分钟撑不住。**两次重复，方向一致。**
+- 所以 §15.4 第 1 条那件"nap 称没称到"的事，现在排在后面：这台机器在电池上**到不了**
+  "熄屏 3 分钟还活着"那一步。开关本身的效果另说，`>nap` 那半条（§15.7）是称过的。
+- 有一条我看到了但不敢用：PMU 那句 `last off` 从上一轮的 `20` 变成这一轮的 `00`
+  （`REG_PWROFF_STATUS 0x21`，`muse_pmu.c:28` 注释只写"what powered it off last"）。
+  **我没有这张寄存器的位表，0x20 / 0x00 各是什么不认**，所以它只是线索，不是结论；
+  真要认，要么拿到 AXP2101 那份定义，要么在断电之前把状态自己写进 NVS。
+
+现场可用的结论（已经称到的那半边）：**充电宝 / USB 一直在，就没有这一档风险**——
+§15.1 那一轮之后所有插着 USB 的熄屏、nap、拨号、断网恢复都跑过了，没出现过重启。
+
+### 15.12 §15.11 那一问换的仪器：把"死之前那一刻"写进 NVS，断电也翻得出来（11-09 深夜，已刷上板，校准称过）
+
+按拍板那条「追根因（要再刷一版加诊断）」做的。为什么只能这么绕：§15.7 那台 RAM 仪器
+（`naps=`/`drops=`）在**整机断电**这一档上必然失效 —— 电一断 RAM 就归零，插回来只剩一个"重启过"。
+NVS 是这台机器上唯一扛得过断电的东西，所以每个可疑转折点当场落一条。
+
+新文件 `esp32/components/muse/carpet/carpet_diag.c`（226 行）/ `.h`（41 行），
+命名空间 `cdiag`，环 24 条，每条长这样（原始回读，非拼接）：
+
+```
+b4 t=0 rst=11 usb usb=1 mv=4123 pct=100 off=00 cfg=34 pen=06 key=a0 kl=a0 k1=10
+e0 t=120 dark usb=1 mv=4123 pct=100 off=00 cfg=34 pen=06 key=a0 kl=a0 k1=10
+```
+
+`b`=开机 / `e`=转折 / `t`=低功耗期间每 30 秒一条兜底。落的点（`muse_input.c`，都在
+`CARPET_DIAG()` 那两个宏后面，carpet 之外的构建是空话）：`power_off()` 最顶（`OFF!`）、
+`set_asleep()`（`dark`/`lit`）、`update_power()` 三档（`low+`/`pause+`/`full`）、
+`update_wifi_nap()`（`nap+`/`nap-`）、POWER 键 press/long/release（`key+`/`keyL`/`key-`）、
+输入循环每 2 秒那次电量读里的 **USB 通断**（`usb+`/`usb-`）。
+寄存器那几格来自新加的 `muse_pmu_diag_regs()`（纯读七个：0x00/0x01/0x10/0x21/0x22/0x27/0x49），
+`kl=`/`k1=` 是 `muse_pmu_init()` **清 INTSTS 之前**抄下来的那两格（不抄就永远看不到）。
+串口口：`>diag` 翻，`>diag clear` 抹空。
+
+三个校准发现，都是这一轮实测撞出来的，不是读代码读出来的：
+
+1. **开机那两条一开始根本落不上**：第一版刷完 `>diag` 回读 `seq=0`、翻出 0 条。
+   根因 `carpet_link_start()` 跑在 `muse_settings_init()`（也就是 `nvs_flash_init()`）之前，
+   `nvs_open` 当场失败被 `ensure_open()` 静默咽掉 —— 就是 §2 里那条
+   「在 `carpet_link_start()` 里 `url_read()` 会撞 `xQueueSemaphoreTake` 死循环」同一个坑的温和版。
+   改成"开机信息先在 RAM 里存着（复位原因、唤醒原因、PMU 那两格锁存都在），等 NVS 写得动了再补"，
+   `>diag` 和每条新记录都会先补欠着的这两条。
+2. **复位原因那张名字表我一开始是自己编的，编错了**：`rst=11` 被打成 `unknown`。
+   真正的枚举是 `ESP_RST_*`（`ESP_RST_USB=11`），现在直接抄 `muse_battery.c:562` 那个 `reset_name()`，
+   并把数字一起写（`rst=11 usb`）—— 这样这一条和 `@power` 里的 `"boot"` 说同一种话，
+   §15.11 那种"power on 还是 usb"的判读以后能互相对账。
+3. **环的大小和兜底间隔是算过的**：20 秒一条 × 5 分钟 = 15 条，会把 `usb-`/`dark` 那两条顶出环，
+   而那两条正是"什么时候拔的线""死在熄屏之前还是之后"的唯一时间戳。所以 30 秒一条、环 24 条。
+
+称到的部分（这一轮的原始回读，COM8，`sercmd_norst.py`，不复位不碰线）：
+
+```
+@diag cleared → @diag seq=0 slots=24 / 翻出 0 条      ← 抹空有效
+（刷完那次开机）
+I (15546) carpet.diag: b4 t=0 rst=11 usb ... kl=a0 k1=10
+I (15550) carpet.diag: b5 t=0 wake=0 ...
+@diag seq=6 slots=16 → 六条全翻出来，其中两条是**上一次开机**留下的 e0/e3 t=120 dark
+@stay    on=1 nap=0 naps=0 drops=0 wifi=1
+@status  ..."sleep":120, ssid "Mate 60"...
+@carpet  wifi=1 linked=1 contract=v3 gap_s=4 has_state=1 wd=0 fails=0
+```
+
+`e0/e3 t=120 dark` 这一对同时证明了两件事：**熄屏那一刻确实被记下来了**（120 秒自动熄屏，
+`>status` 里那格就是它），以及**记录真的扛得过重启**（这两条是重启之前写的）。
+
+一条仪器自身的风险，先说在前面别把它当成结论：**这一版每 30 秒往 flash 写一次**，
+flash 写入是电流尖峰。如果 §15.11 那个断电的根因是供电撑不住，这台仪器有可能自己就是那一下。
+所以那一趟的结果要和"没诊断时两次都死"（§15.11）对着看：**死得比原来快 = 仪器参与了，不能算根因**；
+死的位置和原来一致 = 这一条才是它死之前最后走到的那一步。
+
+还没称到的（就是这一趟本身，需要人手）：**拔掉 USB、让它自己熄屏放 5 分钟以上、再插回来读 `>diag`**。
+（这一趟 11-09 深夜跑完了，结果在 §15.13 —— 结论是这一节下面那句"死在等待期间"的模型被推翻，
+剩下"断在哪一刻"和"panic 的 backtrace"两问没称到。）
+判读口径已经定好：环里最后一条是 `usb-` 之后没 `dark` → 死在亮屏阶段，和熄屏无关；
+最后是 `dark` 没有 `low+` → 死在显示暂停那一步；最后是 `low+` 或几条 `t=low` → 死在 light sleep 里，
+再看下一次开机那条 `rst=`（`brownout` 与 `power on` 是两个不同的故事）和 `kl=`（不是 00 就是按键那条路）。
+
+### 15.13 §15.12 那台仪器跑完了那一趟：板子在电池 + 熄屏里活了 7.9 分钟；断电发生在插回来之后，而且第一次开机 panic 了（11-09 深夜）
+
+owner 那趟：拔 USB，不碰屏不按按键，放了 5 分钟以上，再插回电脑（**具体几分钟还没问到的数**）。
+插回来读 `>diag`，`seq=25`，环里从 t=1026 到 t=1500 每 30 秒一条心跳一条没断：
+
+```
+e1  t=1026 low   usb=0 mv=4120 pct=100 ... kl=a0 k1=00
+...（中间每 30 秒一条，全在 low）...
+t18 t=1500 low   usb=0 mv=4102 pct=98  ... kl=a0 k1=00
+b19 t=0 rst=1 power on usb=1 mv=4178 pct=95 ... kl=a0 k1=00
+b20 t=0 wake=0
+e21 t=1 usb+
+b22 t=0 rst=4 panic
+b23 t=0 wake=0
+e24 t=1 usb+
+```
+
+三件事，按证据强弱排：
+
+1. **§15.11 那句"电池 + 熄屏 5 分钟撑不住"被这一趟推翻了**（至少把"死在等待期间"这个模型推翻）。
+   环里 t=1026→1500 是**连续的**：7.9 分钟、电池供电（`usb=0`）、熄屏、`low`（light sleep 里）、
+   VBAT 4102–4120 mV 只掉 18 mV、pct 100→98。断电不是"放着放着自己在电池上死了"。
+2. **断电发生在插回 USB 之后**（`b19 rst=1 power on` 是这一趟之后第一条开机记录）。
+   `rst=1 power on` + `usb=1` = 芯片上电复位，也就是**真的整机电没了**，不是 `rst=11 usb`（插线复位）
+   也不是 `rst=9 brownout`。环里看不到"什么时候断的"，只能看到"断完之后第一次开机是 power on"。
+   所以剩下两个还没分开的模型：**(a) 它在我们看不见的 t>1500 某一刻自己断了电**（那 30 秒心跳在
+   没电的时候自然停，事后看不出差别）；**(b) 插回 USB 那一下把正在断电/临界供电的板子撞没了**。
+   分开的唯一办法是**掐表那一趟**：拔 → 精确 3 分钟 → 插回来，同时 COM8 上开一个循环重开的实时抓取，
+   把 panic 的 backtrace 和断的那一刀抓住。这一趟还没跑。
+   抓取那台仪器已经写好并校准过：`D:/dev/tmp/capwait.py <port> <secs> <out> [cmd]` —— 端口不在就 50 毫秒
+   一次轮询等它出现，一出现立刻开、开一次记一条 `#### +X.Xs OPEN #n`，板子被拔走就记 `CLOSED` 接着等，
+   全程**只读不写**（除非给 cmd，且只在窗口最后 6 秒发一次），`dtr/rts` 在 `open()` 之前压成 False，
+   所以不会脉冲 EN/IO0（`snap.py` 那个坑，§14.3）。实测挂 5 秒回读到 `hb t=581s`、`uptime` 没归零 = 没复位。
+   为什么必须循环重开而不是 `cap.py`：`cap.py` 只开一次，板子一拔端口没了它当场退出，
+   正好错过"插回来到第一次 panic 之间"那一段 —— 那一段才是这一趟要抓的东西。
+3. **插回来之后第一次开机 panic 了**（`b22 rst=4 panic`，t=1 才落上 `usb+`，说明它启动约 1 秒就崩、
+   然后自己重启）。这是**第二个故障**，跟供电那问无关，而且**它就在恢复路径上**：现场"拔插电源之后
+   屏自己回得来"（§15.10）如果每次回来都要先 panic 一次，那 ~3 分钟里多了一段不确定。
+   目前只称到"panic 过"这一条事实，**backtrace 一条都没抓到**，所以还判不了原因。
+   下一趟带实时抓取就是为了抓它。
+   顺带排除了一条我以为能走的路：**"下次开机时把上次 panic 的原因打出来"在这套 IDF 里没有现成 API**
+   （`esp_diag_reset_reason` 在 6.0.1 和 5.5.2 两棵源码树里 grep 都是零命中；6.0.1 的
+   `esp_debug_helpers.h` 只有 `esp_backtrace_print*`，`panic_info_t` 只在 `esp_private/panic_internal.h` 里）。
+   所以抓 backtrace 只能靠当场有人在串口另一头听，事后翻 NVS 翻不出来 —— 这就是上面那台 `capwait.py` 存在的全部理由。
+   （`esp_system` 也没有用户可注册的 panic 钩子：`panic_handler_register` / `PANIC_USER_DEFINED` 两处 grep 都零命中，
+   Kconfig 只有 `PRINT_HALT` / `PRINT_REBOOT` / `SILENT_REBOOT` / `GDBSTUB` 和 `PANIC_REBOOT_DELAY_SECONDS`。）
+   如果掐表那一趟还是没抓到（比如 panic 比 USB 枚举还早），下一档只能上 **coredump 到 flash**
+   （`components/espcoredump` 在这棵树里是有的）—— 代价是分区表要加一格 data、要整片重刷、解码要 ELF 和
+   `esp-coredump` 那套工具；这一条只记成"备胎"，可行性这一轮**没有验证过**。
+
+对照着看的两台仪器都支持"这一趟里板子确实重启过、而且电池窗口没闭合"：
+
+```
+@stay        on=1 nap=0 naps=0 drops=0 wifi=1
+@power       {"boot":"panic","uptime":183,...,"cpu_pd":false}
+@power.saved {"boot":"usb","uptime":466,...,"secs":29,"battery_mv":[4123,4111],
+              "screen_off":100.0,"slept":44.8,"sleeps":744,"cpu_pd":false,...}
+```
+
+`@power.saved` 里那个窗口还是 15 秒对照那一趟的 **29 秒**，不是这 8 分钟 —— 电池窗口只在 USB 在场时
+开/闭，8 分钟那一趟整段都在电池上，所以窗口从没闭合过，`secs:29` 是上一趟留下的。**别拿它当这一趟的读数**。
+`slept:44.8 / sleeps:744` 和 `usb_serial_jtag NO_LIGHT_SLEEP` 那句警告一起说明 light sleep 是真在跑
+（`cpu_pd:false` = light sleep 里 CPU 不断电，这是正常配置，不是异常）。
+
+15 秒那次对照（实测 22 秒，§15.12 之后先跑的）称到：撑得住，`key=` 那格随 USB 在/不在在 `a0`↔`60` 之间翻
+（只记录、不解读，没数据手册位定义），`off=00 cfg=34 pen=06` 全程不变，VBAT 4123→4118→4184。
+两个新事实，是从这趟对照里撞出来、纠正了我之前的话的：
+
+- **屏本来已经熄了的时候，拔线是同秒进 `low+` 的，不等 120 秒**。
+- **"插着 USB 永远不会进低功耗"这句是错的**：插回去之后有大约 7 秒，USB 重新枚举让
+  `muse_console_host()` 读成 false，板子会再进一次 `low+`。
+
+仪器参与那条风险（§15.12 结尾提的"每 30 秒写 flash 本身是电流尖峰"）在这一趟里的判读：
+它**没有死得比原来快**（原来 §15.11 两次都在 5 分钟窗口里死；这一趟活到至少 7.9 分钟），
+所以按 §15.12 定好的口径，这一条不算"仪器把板子搞死了"，`low` 那一片就是它死之前最后走到的状态。
+
+### 15.14 11-10：熄屏的屏怎么被叫醒 —— 一条下行 `wake`，落地是 POWER 键那条路；唤醒词放手机侧
+
+owner 那一句是「你能不能做一个语音唤醒，就算圆屏在熄屏状态下，我用语音唤醒它是不是可以迅速回连」。
+这一节是屏侧那一半，**已刷上板、已称到**。
+
+**为什么不能在屏上放唤醒词**（这一条先钉死，后面所有取舍都从它出发）：熄屏进 rest 的时候
+麦克风、codec、功放是**断了电**的 —— `muse_voice.c` 里 `rest = asleep && battery && …`
+→ `set_resting(rest)` → `muse_audio_power(!rest)`。"屏一直听着"要先让它不睡，那是把现在这一整套
+功耗模型推倒重画。另一半原因更硬：这套 SDK 里根本没有唤醒词引擎，esp-sr / WakeNet / MultiNet
+一个都不在（grep 过依赖树）。**所以唤醒词放手机侧，屏只负责被叫醒**，owner 拍板选的就是这一条。
+
+**做法**：`command{cmd:"wake"}`，v3 里第二条下行 `command`（为什么骑在 `command` 上而不新开 `t`，
+理由和 `audio_chunk` 是同一条 —— 组件收到不认识的 `t` 是**关连接**，收到不认识的 `cmd` 只是丢帧）。
+屏侧落地的不是"轻一点的亮一下"，是 **POWER 键自己那条路** `set_asleep(false, why)`
+（新公开的 `muse_input_wake()`，`muse_input.h`），因为要的就是它顺手做的两件事：面板重新起来、
+Wi-Fi **立刻**重连而不是坐着等拨号退避。`muse_state_poke()` 不够 —— 它只改 `s_last_poke_us`，
+叫不醒已经睡下去的屏。
+
+不在 WebSocket 回调里办：回调里不能干重活（README §5 那条红线），而熄屏那一刻 UI 任务是停着的
+（`muse_ui.c` 的 `update_sleep()` 提前返回），语音任务在 `muse_state_wait_awake(60000)` 里等 ——
+**能立刻接住这一帧的只有命令队列那条任务**，所以 `queue_wake()` 把它递给 `carpet_cmd`。
+顺带把 `face_offer`（答句上屏那条）也接了同一口：以前那句"poke 叫不醒打盹的屏，彩排时要先戳一下"
+现在不成立了，答句自己就会点亮。
+
+**契约上这条不回 ack、不重试、不排队**，手机要按「没叫醒」处理：发出去 3 秒内这条连接没动静就说话，
+别静默。**硬前提是关联还活着** —— nap 之后 socket 已经没了，这一帧送到空气里，只有 POWER 键叫得醒。
+所以它只在设置页「熄屏后保持联网」开着时才成立。
+
+**契约那三处一起同步了，一处都不能少**：`protocol/screen-link.schema.json` 的 `cmd` enum、
+`protocol/screen-link.md` v3 那一节、`core/src/main/kotlin/.../protocol/ScreenLink.kt:112` 的
+`CommandType`。最后那一处不是可选项 —— `SchemaDriftTest` 里有一条
+`assertEquals(CommandType 的集合, schema 的 cmd 集合)`，只改 schema 会把 `:core:test` 跑红。
+`DemoRuntime.handleScreenCommand` 那条 `when` 带 `else -> false`，加取值编得过、也不用给它加分支
+（`wake` 永远不该由屏发上来）；`ScreenLinkServer.deliverable` 也不为它加版本档 ——
+老固件收到不认识的 `cmd` 只是丢这一帧，那正是想要的降级方式。
+
+**上板称到**（COM8，`cmd_task` 栈 6144 字那一版，连着三趟 `>nap` → 叫醒，原文一条没改）：
+
+```
+I (106454) carpet.diag: e2 t=105 nap+
+@stay on=1 nap=1 naps=1 drops=1 wifi=0
+I (111318) muse_input: waking (ws say)
+I (111322) carpet.diag: e3 t=110 lit
+I (111325) carpet: woke by link, carpet_cmd 还剩 3732 字节
+I (111439) muse_input: Wi-Fi waking
+I (111443) carpet.diag: e5 t=110 nap-
+@stay on=1 nap=0 naps=1 drops=1 wifi=1
+```
+
+三趟的 `还剩 3732 字节` 一模一样，全程没有溢出、没有复位。第二、三趟是 `naps=2/drops=2`、`naps=3/drops=3`，
+每趟都从 `nap=1 wifi=0` 回到 `nap=0 wifi=1`。
+抓这一轮用的脚本是 `D:/dev/tmp/wake_tries.py`（一个串口会话里跑完整个序列，中途不开第二次口 ——
+开第二次口就是复位，见 §15.12 那条坑）。
+
+**栈这一处是称出来的，不是猜的，中间犯过一次单位错**：`xTaskCreate` 的 `usStackDepth`
+在这个 kernel 里是**字**不是字节（FreeRTOS-Kernel `task.h:315` +
+`esp_additions/idf_additions.c:50` 按 `* sizeof(StackType_t)` 分配），我一开始当字节读，
+"把 4096 提到 8192"其实是提了一倍字节数的一半。真正的测量顺序是这样的：
+4096 字那一版三趟叫醒之后高水位都是 `1684 字节剩余`（= 421 字，峰值吃到 3675 字）；
+抬到 6144 字重跑同一套，剩 3732 字节（= 933 字，**峰值 5211 字**）。
+6144 上量到的峰值比 4096 上量到的深 1536 字 —— 说明上一轮那三趟没走到最深那条分支
+（叫醒会顺带把整条 Wi-Fi 重连派下去，栈吃到多深取决于那一刻链路停在哪一步），
+而 4096 字真撞上那条就是溢出，溢出的表现是"屏叫不醒"，正是这一条要防的事。
+现在余量 933 字 ≈ 3.7 KB。没往 PSRAM 放栈：这条任务要写 flash，写的时候 cache 会关，
+栈在 PSRAM 的任务不能干这个（`muse_voice.c:1305` 给语音任务用 `MUSE_BIG_CAPS` 时特意注明
+"this task never writes flash"）。内部 RAM 在这一版没有塌：开机心跳 `int=16K/7K min=7K psram=3550K`。
+
+**没称到的那一条，要说清**：`on_command` 里真认 `cmd:"wake"` 那一行**还没在真链路上走过**。
+上面三趟走的是串口 `>say`（它调 `face_offer`，从那里进同一个 `queue_wake`），
+`wake` 那一条分支要有一个能拨得通的 ws 服务器才测得到，而这台 PC 和屏在华为热点上互相不通
+（§15.6 记过这个误判来源），在 Windows 上开一个热点属于动网络，没批准就不动。
+**现场补这一条的方法**：App 那边把 10.2 第 1 条接上之后，熄屏 → 发一帧 `wake` → 屏亮，
+串口侧应看到 `waking (ws wake)`（`why` 带的是 `ws wake`，和 `ws say` 区分得开）。
+App 侧整包要求写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
+
+### 15.15 同步状态
+
+`muse-carpet.patch` 这一轮（11-10，§15.14 那条叫醒）重打过：
+**27 个文件（26 个文本 + 那份字库二进制）、4299 行新增 / 86 行删，patch 7384 行**
+（相对上一版多一个文件 = `muse_input.h`，那条 `muse_input_wake()` 的公开声明；
+`carpet_link.c` 1067 → 1135 新增行，`muse_input.c` 237 → 242）。
+**这轮验到的是"能干净解出来 + 解出来的东西就是工作树"**：baseline `cdc169d` 干净 worktree
+`git apply --check` 过、真 `git apply` 过，解出来 27 个文件、`carpet_link.c` 1135 行、
+`carpet_diag.c` 226 行、`carpet_lang_zh.c` 314 行、字库 154,528 字节（和上一轮同一个数）。
+`diff --strip-trailing-cr` 逐个比过这轮关心的八个文件 —— `carpet_link.c` / `carpet_diag.c` /
+`carpet_lang_zh.c` / `muse_input.c` / `muse_input.h` / `muse_settings.c` /
+`devices/sdkconfig.carpet` / `main/app.c` —— **全 SAME，解出来的就是板上在跑的那一份**。
+**这一轮干净 worktree 是从头编过的**（不只是 `--check`）：按 §3 那四步（`cp -r components/screen_link` +
+删 `idf_component.yml` + 换 §4 那份 CMakeLists + 四层 defaults 先 `reconfigure` 再 `build`）走下来
+`Project build complete`、`esp-idf/screen_link/libscreen_link.a` 真在、出来的 `muse-gadget.bin`
+**3,346,432 字节 —— 和刷进板子那次 esptool 报的写入量一个数**。
+**`:core:test --rerun-tasks` 同轮跑过：305 条、0 失败 0 错误**（含 `SchemaDriftTest` 13 条 ——
+它就是逼着 `CommandType` 和 schema 的 `cmd` 一起加 `wake` 的那条，只改 schema 会直接红）。
+`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`。
+
+### 15.16 「App 显示连不上圆屏」这一趟：称到了真因，也称到了链路本来是通的
+
+现场事实是手机 App 报「无法连接圆屏」，而 App 侧那一轮排查没找到东西。这一趟把屏侧的串口
+从头到尾称过一遍，结论和之前的猜测不一样：**屏能连上 App，而且当天就连上过**；
+连不上是另外两件事，都在这台板子的内存上，而且都是**一次性的死法** —— 一旦踩到，本轮再也回不来。
+
+**① 链路本身是通的（这一条最重要，先把方向定下来）。** COM8，出厂地址、手机热点、板上就是演示那块：
+
+```
+I (2864) link.wifi: got IP 192.168.43.4
+I (3046) carpet: dialing ws://192.168.43.1:8443 (built-in)
+I (3262) screen_link: ws 接入 ws://192.168.43.1:8443
+I (3265) screen_link: hello 已发：WS175B-A3F7  电量未知
+I (3266) carpet: linked, contract v3
+I (3292) carpet: sent page_report
+```
+
+所以「App 连不上屏」里没有任何一条是「手机端服务端不通 / 白名单不通 / 契约谈不拢」。
+屏的 `@status` 那一份 `link.paired=false state="Connecting"` 说的是**屏自己没拨号**，
+不是手机拒了 —— 拨号根本没发生：`>url` 回的是 `dialed=0`，`>carpet` 回的是 `fails=0`。
+
+**② 第一种死法：开机那一刻内部 RAM 不够，建链路任务失败，而 gate 是一条一次性的路。**
+同一块板子重开机一次（前面那次因为 ③ 复位过），原文：
+
+```
+I (27087) link.wifi: got IP 192.168.43.4
+E (29043) carpet: screen_link_start: ESP_ERR_NO_MEM
+I (33407) link.heartbeat: hb t=32s ... wifi=up ws=down ... int=16K/7K min=7K
+```
+
+`carpet_link.c` 的 `gate_task` 是「等 Wi-Fi 起来 → 开链路 → `vTaskDelete(NULL)`」。
+开失败它只印一条 `E` 然后把这条任务删掉，于是那一整次开机 `dialed=0 fails=0` 一直到 t=113s，
+一次都不会再拨。**屏有网、地址对、服务端活着，但永远连不上** —— 现场看到的就是 App 那句「无法连接」。
+改：`gate_task` 现在带阶梯重试（5 / 15 / 30 / 60 秒封顶），每轮重读地址、真的重开一次；
+`screen_link_start()` 的失败路径全部走新加的 `start_fail()` 把已经拿到的东西退回去
+（不退的话 `s_ws` 还挂着，下一轮只会撞 `ESP_ERR_INVALID_STATE`，「重试」就是个空壳）。
+
+**③ 第二种死法：链路起来一秒之后，编解码器把整机撞崩。** 就是 ② 那次复位的真身，panic 现场：
+
+```
+E (4342) i2s_common: i2s_alloc_dma_desc(542): allocate DMA buffer failed
+E (4348) i2s_std: i2s_std_set_slot(158): allocate memory for dma descriptor failed
+E (4361) I2S_IF: Failed to reconfig STD slot, reGuru Meditation Error: Core  1 panic'ed (LoadProhibited)
+EXCVADDR: 0x00000000
+Backtrace: 0x421014d1 ... 0x4204b453
+```
+
+`addr2line` 对 `build-muse-s3-175-carpet/muse-gadget.elf`（ELF SHA256 前缀 `b283b092f`）解出来是
+`i2s_rx_channel_start`(i2s_common.c:153) ← `i2s_channel_enable` ← `_i2s_drv_enable` ←
+`esp_codec_dev_open` ← `open_codecs`(muse_audio.c:115) ← `muse_audio_init` ←
+`muse_voice_start` ← `muse_app_run` ← `boot_task` —— 也就是说 DMA 缓冲要不到之后，
+`esp_codec_dev` 里那个 slot 重配没检查失败，回头 enable 时照着没 alloc 出来的描述符解引用，
+NULL 直接踩。这是 Espressif 组件的形状，**我们不改它，改的是让它要不到内存的那一口气**。
+§15.11 / §15.13 那两次「5 分钟窗口里死」和这一次「开机 4 秒死」现在能并成一条：
+都是这一条 panic，只是被叫起来的时机不同。
+
+**④ 那口气是什么：链路的三条任务栈都写大了。** 同一个坑（`usStackDepth` 是**字**不是字节）
+在 `screen_link.c` 里比 §15.14 那条更深：
+`xTaskCreate(link_task, "screen_link", 8192, …)` 要的是 **32 KB**，不是作者以为的 8 KB。
+这一版改完称到的余量（连上、收过 state、发过 `page_report`、走完一轮断线之后回读）：
+
+```
+I (153859) screen_link: link_task 栈还剩 2004 字      # 峰值 2092 字，4096 字这一档余量翻倍
+```
+
+所以 `link_task` 4096 字（16 KB）、`carpet_url` 那条从 4096 → 2048 字，两条都留了高水位回读；
+`carpet_gate` 维持 4096 字（它正在干「建不起来」那一段，减它是减余量）也加了回读。
+**注意别把这次改动读成「32 KB 就是 panic 的凶手」：这一条我没单独称过** ——
+内部最大连续块只剩 19K 的时候那 32 KB 照样建起来了，说明这一版任务栈是能落 PSRAM 的。
+改小是拿量到的峰值减的，不是拿 panic 反推的。
+
+**⑤ 第三种形状（顺手称到，同一条根）：`>url` 改地址会「改了没反应」。**
+
+```
+E (472819) carpet: url restart task out of memory
+@url now=ws://192.168.43.1:8443 src=factory saved=ws://192.168.43.1:8443 linked=1 dialed=1
+```
+
+稳态内部 RAM 只剩 10K 空闲 / 4K 最大连续，那条一次性任务（原 16 KB 栈）建不出来，
+地址写进 NVS 了但没重拨。上面 ④ 把它减到 8 KB，并在失败那一条日志里带上内存数。
+
+**⑥ 还改了一条已经死过一次的：`esp_websocket_client_start()` 失败之后不能原地重拨。**
+`E websocket_client: Error create websocket task` 之后，组件的 state 已经停在 INIT，
+以后每一次 `start()` 都在入口回 `E The client has started`（真机 t=154859 / t=157352 两条），
+屏这边表现为「退避阶梯在跑但永远连不上」。`screen_link.c` 现在在 start 失败时
+换掉整个句柄（destroy + 重新 init）再走阶梯。
+**这一条改完还没在真机上制造过同一种失败**（要造它得在内部 RAM 只剩 4K 的那一刻拨号，
+造不出来），称到的只有代码路径和那条旧证据。
+
+**⑦ 心跳里 `ws=` 那一栏不是我们的链路。** `hb … ws=down` 读的是 `noise_ctrl_is_connected()`
+（Muse 官方 Home Link 云端），`setup=advertising` 同理；彩排链路好不好看的是
+`>carpet` 的 `linked=` / `>url` 的 `dialed=`。这一条以前每次都要解释一遍，写在这。
+
+**⑧ 热点侧的量还是要补**：这一趟看到的 `no saved wifi network nearby`（屏扫到 3~6 个 AP
+但没有一个叫「Mate 60」）说明华为热点在没人连之后会自己关；§10.3 那条放大关系仍在。
+现场顺序仍然是**先开热点 → 再按一下屏**（叫醒会立刻强制一次全量扫描，实测）。
+
+### 15.17 同步状态
+
+`muse-carpet.patch` 这一轮（11-10 深夜，§15.16 那一趟）重打过：
+**27 个文件（26 个文本 + 那份字库二进制）、4333 行新增 / 86 行删，patch 7418 行 / 387,845 字节**
+（相对上一版：`carpet_link.c` 1135 → 1169 行，改动是 `gate_task` 的阶梯重试、
+`start_fail()` 那条不退回去就永远拨不出去的清理、`carpet_url` 栈 4096 → 2048 字、
+两条高水位回读；没有新增文件）。
+**干净 worktree 这轮只做到「解得干净 + 解出来就是工作树」这一层**：
+新开了一个 `D:/dev/tmp/muse-clean-v4`（`git worktree add --detach … cdc169d`），
+`git apply --check` 过、真 `git apply` 过、解出 17 条改动、字库 154,528 字节
+（sha256 前缀 `a77558a4`，和工作树同一份），
+`diff --strip-trailing-cr` 比过 `carpet_link.c` / `muse_input.c` / `muse_input.h` /
+`muse_ui.c` / `main/muse_glue.c` / `main/app.c` / `devices/sdkconfig.carpet` —— **七个全 SAME**。
+**没在干净 worktree 里从头重编这一版**（上一版编过，见 §15.15；这一轮的源码是在
+带 patch 的工作树里编 + 刷 + 上板称的：`Project build complete`、esptool
+`Hash of data verified`，板上跑的就是这一份）。
+`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`；
+这轮它改了（`screen_link.c` 794 → 900 行：`mem_note()`/`fill_ws_cfg()`/`client_open()` 三条拆出来、
+`link_task` 栈 8192 → 4096 字 + 高水位回读、start 失败换句柄），
+两份树之间 `diff --strip-trailing-cr` 比过：**SAME**。
+`apps/android` 和 `core/` 这轮**一行没动**（没有协议改动，所以 `SchemaDriftTest` 那 13 条
+用不上，`:core:test` 也就没重跑）；App 侧要的东西仍在 `docs/APP-SCREEN-CONNECT.md` 第十节，
+本轮新加的排障判据在第十一节。

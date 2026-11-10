@@ -69,6 +69,14 @@ static volatile int64_t s_last_state_us = 0;
  */
 static volatile uint32_t s_wd_fires = 0;
 /**
+ * 连着拨不上多少次（见头文件）。放这里而不是让调用方自己数：退避阶梯只有本文件看得见，
+ * 而"第几条失败才算网已经死了"这句话要连着阶梯一起说才成立。
+ */
+static volatile uint32_t s_dial_fails = 0;
+/** 最后一条拨号失败的原因，一行；写在线程回调里，读在 keeper/UI 任务，所以配一把自旋锁。 */
+static char s_last_err[120];
+static portMUX_TYPE s_err_mux = portMUX_INITIALIZER_UNLOCKED;
+/**
  * 上一帧 state 里手机给的 ts（Unix 毫秒）。0 = 这轮会话还没收到过 state。
  *
  * 这值由链路任务写、UI 任务读，而 S3 上 64 位读写不原子 —— 一次读到"半新半旧"就是
@@ -422,6 +430,51 @@ static void handle_frame(char *raw)
 
 /* ---------------- ws 回调 ---------------- */
 
+/* 一行存进 s_last_err（读的人只有串口回读，不画在屏上，所以不配字体）。 */
+static void store_dial_error(const char *one)
+{
+    taskENTER_CRITICAL(&s_err_mux);
+    strlcpy(s_last_err, one, sizeof(s_last_err));
+    taskEXIT_CRITICAL(&s_err_mux);
+}
+
+/*
+ * 从组件的错误正文里挑出"为什么没通"的三个数，拼成一行。
+ * 为什么要从正文挑：组件在自己的日志那一行里顺手把 transport 的 last error **清掉了**
+ * （esp_tls_get_and_clear_last_error），所以随后那条 DISCONNECTED 的数值位全是 0 ——
+ * 真机称到过：`(ESP_OK errno=0 http=0)`。正文是唯一还带着 errno=119 的地方。
+ * 现场要分的是 119（到不了手机，网的事）/ 113（端口没人听，App 的事）/ http≠0
+ * （真有服务端应答但拒了这一轮），三个数都在这一行里。
+ */
+static void note_dial_error_text(const char *text, int len)
+{
+    if (text == NULL || len <= 0) return;
+    char line[224];
+    snprintf(line, sizeof(line), "%.*s", len > (int)sizeof(line) - 1 ? (int)sizeof(line) - 1 : len, text);
+
+    char code[48] = "";
+    const char *p = strstr(line, "transport_error=");
+    if (p != NULL) {
+        p += 16;
+        int i = 0;
+        while (p[i] != '\0' && p[i] != ',' && i < (int)sizeof(code) - 1) {
+            code[i] = p[i];
+            i++;
+        }
+        code[i] = '\0';
+    }
+    int err_no = 0, http = 0;
+    const char *q = strstr(line, "errno=");
+    if (q != NULL) err_no = atoi(q + 6);
+    const char *h = strstr(line, "esp_ws_handshake_status_code=");
+    if (h != NULL) http = atoi(h + 29);
+
+    if (!code[0] && err_no == 0 && http == 0) return;   /* 不是拨号那一类的错，别覆盖上一条 */
+    char one[120];
+    snprintf(one, sizeof(one), "%s errno=%d http=%d", code[0] ? code : "ws", err_no, http);
+    store_dial_error(one);
+}
+
 /* 签名不是猜的，是对着组件头文件定的：esp_websocket_register_events 收的是
  * IDF 通用 esp_event_handler_t（四个参数），配置结构体里**没有** event_handler 字段，
  * `esp_websocket_event_handle_t` 这个类型也不存在 —— 1.5.0 到 1.8.0 全是这样。
@@ -445,12 +498,27 @@ static void ws_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
          * ERROR 只在有错误正文时才有。2026-11-05 就是被这条日志缺失坑的 —— 串口里 40 秒
          * 一个字没有，分不清"任务活着但在撞防火墙"和"任务压根没建起来"。 */
         ESP_LOGW(TAG, "ws 断开/未接通，下一次按退避阶梯再来");
+        if (evt != NULL && evt->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT
+            && (evt->error_handle.esp_tls_last_esp_err != ESP_OK
+                || evt->error_handle.esp_transport_sock_errno != 0
+                || evt->error_handle.esp_ws_handshake_status_code != 0)) {
+            /* 这一份是数值句柄：有的死法没有错误正文，只有它。有正文时它在 ERROR 之后
+             * 已经被组件清成 0 了，所以上面那一串判空是必须的 —— 否则这条会把
+             * ERROR 里称到的 errno=119 覆盖成 "ESP_OK errno=0"（真机称到过）。 */
+            char one[120];
+            snprintf(one, sizeof(one), "%s errno=%d http=%d",
+                     esp_err_to_name(evt->error_handle.esp_tls_last_esp_err),
+                     evt->error_handle.esp_transport_sock_errno,
+                     evt->error_handle.esp_ws_handshake_status_code);
+            store_dial_error(one);
+        }
         s_up = false;
         xEventGroupSetBits(s_eg, BIT_DOWN);
         break;
     case WEBSOCKET_EVENT_ERROR:
         if (evt->data_len > 0 && evt->data_ptr != NULL) {
             ESP_LOGW(TAG, "ws 错误：%.*s", (int)evt->data_len, (char *)evt->data_ptr);
+            note_dial_error_text((const char *)evt->data_ptr, evt->data_len);
         }
         break;
     case WEBSOCKET_EVENT_DATA: {
@@ -517,6 +585,58 @@ static void sleep_backoff(uint32_t seconds)
     }
 }
 
+/* 这一句存在的唯一理由：失败的时候现场要能一眼看出是"内存"而不是"网络"。
+ * 光一条 ESP_ERR_NO_MEM 分不开 —— 内部 RAM 空闲多少、最大连续块多少，才是那条判据。
+ * 调用处的缓冲区一律 96 字节：这三个数拼起来最长 66 字节，而 -Wformat-truncation
+ * 按 unsigned 的十位最坏情况算，48 字节那种写法直接编不过。 */
+static void mem_note(char *out, size_t n)
+{
+    snprintf(out, n, "内部 RAM %uK 空闲/最大连续 %uK，PSRAM %uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+/* 组件 config 的填法只留这一处：开机建一次，start 失败换句柄时还要建同一份。
+ * 抄两遍的下场是以后改一处漏一处。 */
+static void fill_ws_cfg(esp_websocket_client_config_t *ws_cfg)
+{
+    memset(ws_cfg, 0, sizeof(*ws_cfg));
+    ws_cfg->uri = s_cfg.url;
+    ws_cfg->buffer_size = SCREEN_LINK_MAX_FRAME;
+    /* 两份 buffer_size 的缓冲（rx/tx）是 `malloc` 出来的：这一版
+     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096，正好 4096 字节这一档留在**内部 RAM**，
+     * 所以链路一起来就固定要走 8 KB 内部 —— 这就是真机稳态内部空闲从 22K 掉到 10K
+     * （2026-11-10，`hb t=7s int=10K/4K min=2K`）里最大的那一块。
+     * task_stack 这一格收的是**字**（不是字节），4096 字 = 16 KB，跟组件默认档
+     * WEBSOCKET_TASK_STACK(4*1024) 同一档，先不动。
+     * 2026-11-10 真机 153366 那条 `Error create websocket task` 就是这一档要不到：
+     * 那一刻内部只剩 10K 空闲 / 4K 最大连续；换句柄那条出路在下面 link_task 里。 */
+    ws_cfg->task_stack = 4096;
+    /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
+     * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
+     * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
+    ws_cfg->disable_auto_reconnect = true;
+    ws_cfg->reconnect_timeout_ms = 1000;
+}
+
+/* 建出一个装好事件回调的句柄（不含 start）。成功时 s_ws 非空。 */
+static esp_err_t client_open(void)
+{
+    esp_websocket_client_config_t ws_cfg;
+    char mem[96];
+
+    fill_ws_cfg(&ws_cfg);
+    s_ws = esp_websocket_client_init(&ws_cfg);
+    if (s_ws == NULL) {
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "ws 句柄建不出来 %s：%s", s_cfg.url, mem);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_handler, s_ws);
+    return ESP_OK;
+}
+
 static void link_task(void *arg)
 {
     (void)arg;
@@ -530,11 +650,28 @@ static void link_task(void *arg)
          * 2026-11-05 真机抓到 "Error create websocket task"：那会儿内部 RAM 最大连续块
          * 只剩 4K。以前这里不看返回值，失败后直接撞进下面那个 portMAX_DELAY 死等，
          * UP/DOWN 两个位再没人置过，退避阶梯一次都没跑 —— 表现是"永远连不上，且再也不试"。
-         * 重复 start() 是安全的：create_transport 进来先把上一轮的 transport_list 销毁。 */
+         * **但"重复 start() 是安全的"那一条是错的**，2026-11-10 真机称到：start 在建任务
+         * 那一步失败后组件的 state 已经停在 INIT，于是以后每一次 start() 都在入口就回
+         * `The client has started`（t=154859 / t=157352 两条 E，之后到本轮结束再没连上）。
+         * 出路不是再 start 一次，是这个句柄整个换掉。 */
         if (esp_websocket_client_start(s_ws) != ESP_OK) {
+            char mem[96];
             if (s_stopping) break;
+            s_dial_fails++;
+            mem_note(mem, sizeof mem);
+            ESP_LOGE(TAG, "start 没起来（第 %lu 次连续失败）：%s；换掉整个 ws 句柄重来",
+                     (unsigned long)s_dial_fails, mem);
             sleep_backoff(BACKOFF_S[step]);
             if (step < BACKOFF_STEPS - 1) step++;
+            /* 只有链路任务自己在这一刻持有 s_ws：s_up 是 false，发帧那条(第 139 行)
+             * 有 `s_up && s_ws != NULL` 兜着，screen_link_stop() 也在 s_ws==NULL 时直接返回。 */
+            esp_websocket_client_destroy(s_ws);
+            s_ws = NULL;
+            if (client_open() != ESP_OK) {
+                ESP_LOGE(TAG, "换句柄也没换成，%d 秒后再试一轮", (int)BACKOFF_S[step]);
+                sleep_backoff(BACKOFF_S[step]);
+                if (step < BACKOFF_STEPS - 1) step++;
+            }
             continue;
         }
         EventBits_t bits = xEventGroupWaitBits(s_eg, BIT_UP | BIT_DOWN | BIT_STOP, pdTRUE, pdFALSE,
@@ -542,6 +679,7 @@ static void link_task(void *arg)
         if (bits & BIT_STOP) break;
 
         if (bits & BIT_UP) {
+            s_dial_fails = 0;   /* 真连上过：这一串失败到此为止 */
             s_last_state_us = 0;
             /* 首帧的截止线：连上那一刻。下面只看 s_last_state_us 会瞎 —— 见那里的注释 */
             int64_t up_us = now_us();
@@ -590,6 +728,15 @@ static void link_task(void *arg)
 
             if (s_cb.on_disconnected != NULL) s_cb.on_disconnected();
             xEventGroupWaitBits(s_eg, BIT_DOWN, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
+            /* 这一行是量体裁衣用的，不是装饰。这条任务的 `8192` 一直是按**字节**写的，
+             * 而这个 kernel 的 usStackDepth 收的是**字**（FreeRTOS-Kernel task.h:315 +
+             * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），
+             * 所以真机上一口吃掉的是 32 KB 连续内部 RAM —— 和 carpet_cmd 那次同一个坑。
+             * 2026-11-10 真机：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
+             * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 → LoadProhibited panic，
+             * 而那 32 KB 就是在这中间拿走的。高水位从这里读，改小才有依据。 */
+            ESP_LOGI(TAG, "link_task 栈还剩 %u 字",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
         }
         /* 这条 else 分支以前是一行 `continue`，退避根本没跑到就撞回 start()。
          * "服务端还没起来"是演示现场最常见的一种断法，实测那时每 10 秒撞一次
@@ -597,6 +744,12 @@ static void link_task(void *arg)
          * 现在两条失败出口共用同一个阶梯。*/
         if (s_stopping) break;
 
+        /* 只有这一轮压根没连上才算「拨不上」；连上之后断掉的不算 —— 那种死法由
+         * state 看门狗和 wd 计数说话，混进这个数里，keeper 要判的"网络是不是已经
+         * 死了"就永远读不到一段真实的连续失败。 */
+        if (!(bits & BIT_UP)) {
+            s_dial_fails++;
+        }
         sleep_backoff(BACKOFF_S[step]);
         if (step < BACKOFF_STEPS - 1) step++;
     }
@@ -606,6 +759,24 @@ static void link_task(void *arg)
 }
 
 /* ---------------- 公共 API ---------------- */
+
+/* 开到一半失败就把已经拿到的全部退回去，好让下一次 start 是**真的再试一遍**。
+ * 不退的形状是称出来的：esp_websocket_client_init 成功、随后 xTaskCreate 因为内部 RAM
+ * 开不出那一整块栈而失败，s_ws 还挂在那儿 —— 下一轮进来先撞
+ * `if (s_ws != NULL) return ESP_ERR_INVALID_STATE`，"重试"于是永远只会返回同一个错误，
+ * 而 ws 那两份 4 KB 缓冲和 PSRAM 那块攒包每轮再漏一遍。
+ * 2026-11-10 真机：t=27s 关联上热点，t=29s `screen_link_start: ESP_ERR_NO_MEM`，
+ * 之后一直到 t=113s `ws=down fails=0 dialed=0`，一次都没再拨。 */
+static esp_err_t start_fail(esp_err_t err)
+{
+    if (s_ws != NULL) { esp_websocket_client_destroy(s_ws); s_ws = NULL; }
+    if (s_asm != NULL) { free(s_asm); s_asm = NULL; }
+    if (s_rx_q != NULL) { vQueueDelete(s_rx_q); s_rx_q = NULL; }
+    if (s_eg != NULL) { vEventGroupDelete(s_eg); s_eg = NULL; }
+    s_task = NULL;
+    s_up = false;
+    return err;
+}
 
 esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_callbacks_t *cb)
 {
@@ -622,32 +793,43 @@ esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_call
 
     s_eg = xEventGroupCreate();
     s_rx_q = xQueueCreate(8, sizeof(rx_item_t));
-    if (s_eg == NULL || s_rx_q == NULL) return ESP_ERR_NO_MEM;
+    if (s_eg == NULL || s_rx_q == NULL) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "链路的小对象（事件组/队列）建不出来：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
 
     /* 攒分片那 4KB 从 PSRAM 要（理由见上面 s_asm 的注释）。要不到就明确失败，
      * 不悄悄退回 .bss —— 那正是这次把链路饿死的形状。 */
     s_asm = heap_caps_malloc(SCREEN_LINK_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_asm == NULL) return ESP_ERR_NO_MEM;
+    if (s_asm == NULL) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "攒包那 4KB（PSRAM）也要不到：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
 
-    esp_websocket_client_config_t ws_cfg = {0};
-    ws_cfg.uri = s_cfg.url;
-    ws_cfg.buffer_size = SCREEN_LINK_MAX_FRAME;
-    /* 4096 = 组件自己在 task_stack 不给时的默认档（esp_websocket_client.c 里
-     * WEBSOCKET_TASK_STACK）。这里原来是 8192：内部 RAM 要一整块 8K，真机上开不出来。
-     * 走的是明文 ws://，没有 TLS 握手要吃栈，4K 这一档就是它设计的用途。 */
-    ws_cfg.task_stack = 4096;
-    /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
-     * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
-     * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
-    ws_cfg.disable_auto_reconnect = true;
-    ws_cfg.reconnect_timeout_ms = 1000;
+    if (client_open() != ESP_OK) return start_fail(ESP_ERR_NO_MEM);
 
-    s_ws = esp_websocket_client_init(&ws_cfg);
-    if (s_ws == NULL) return ESP_FAIL;
-    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_handler, s_ws);
-
-    BaseType_t ok = xTaskCreate(link_task, "screen_link", 8192, NULL, 5, &s_task);
-    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    /* 这条以前写 8192。这个 kernel 的 usStackDepth 收的是**字**（task.h:315 +
+     * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），所以那一行要的
+     * 是 32 KB，不是作者以为的 8 KB —— 和 carpet_cmd 那次是同一个坑。
+     * 真机 2026-11-10：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
+     * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 LoadProhibited panic。
+     * 这 24 KB 差额是不是那一下的直接凶手**没单独称过**（栈这一版是能落 PSRAM 的：
+     * 内部最大连续块只剩 19K 时那 32 KB 照样建起来了），所以这一条的依据不是那条 panic，
+     * 是量出来的高水位：连上、收过 state、发过 page_report、走完一轮断线之后
+     * **还剩 2004 字**（峰值 2092 字）—— 4096 字这一档余量翻倍，够用。
+     * 每轮断线会回读一次那个数（链路任务里那条 `link_task 栈还剩`），不够就往抬。 */
+    BaseType_t ok = xTaskCreate(link_task, "screen_link", 4096, NULL, 5, &s_task);
+    if (ok != pdPASS) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "链路任务建不出来：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
+    return ESP_OK;
 }
 
 esp_err_t screen_link_stop(void)
@@ -684,6 +866,19 @@ uint32_t screen_link_state_gap_s(void)
 uint32_t screen_link_watchdog_fires(void)
 {
     return s_wd_fires;
+}
+
+uint32_t screen_link_dial_fails(void)
+{
+    return s_dial_fails;
+}
+
+void screen_link_last_error(char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) return;
+    taskENTER_CRITICAL(&s_err_mux);
+    strlcpy(out, s_last_err, cap);
+    taskEXIT_CRITICAL(&s_err_mux);
 }
 
 uint32_t screen_link_state_age_ms(void)

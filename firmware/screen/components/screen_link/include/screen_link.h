@@ -118,6 +118,22 @@ uint32_t screen_link_state_gap_s(void);
 uint32_t screen_link_watchdog_fires(void);
 
 /**
+ * 连着拨不上多少次：从上一次真的连上（WEBSOCKET_EVENT_CONNECTED）开始数的连续失败次数，
+ * 一连上就归零。它是「屏的 Wi-Fi 说自己连着、其实已经没有路由」在现场唯一的证据 ——
+ * 手机热点把这台站踢掉以后 esp_wifi 仍报 connected，而每一条拨号都以 ENETUNREACH(119)
+ * 死掉，网络那一侧不动就永远出不来。muse_glue 的 keeper 读它来决定要不要重新关联。
+ */
+uint32_t screen_link_dial_fails(void);
+
+/**
+ * 最后一条拨号失败的原因，一行 ASCII，形如
+ * `ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0`；从没失败过 = 空串。
+ * 现场靠它把「端口上没人听」（errno=113）和「根本到不了手机」（errno=119）分开 ——
+ * 前者是 App 的事，后者是网的事，屏侧的处理完全不同。
+ */
+void screen_link_last_error(char *out, size_t cap);
+
+/**
  * 同上一条的毫秒版。给钟面用：**手机的 ts 加上这个 age，就是此刻该显示的手机时间**。
  * 这样屏不需要自己的 RTC 也不需要 SNTP —— 它没有电池-backed 时钟，
  * 而车载那个网一断，走 NTP 只会拿到一个更误导人的读数。没连上过返回 UINT32_MAX。

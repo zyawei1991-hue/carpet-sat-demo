@@ -125,7 +125,7 @@
 - **协商**：`hello.protocols` 报 3 才发音频。发送侧先看 `ScreenLinkServer.audioReady`，
   对面不报 v3 就连 TTS 都不跑（白跑一遍是白等一秒），只留文字。
 
-### v3 另外两项（都是可选加性）
+### v3 另外三项（都是可选加性）
 
 - `ui.card = maint`：`docs/MAINTENANCE.md` M3 那一档。**一行该做的事，不带数字、不带判据**。
   屏侧要的是"未知档退回 `status`"，所以老固件收到 maint 不会画坏，只是不画。
@@ -136,11 +136,290 @@
   **唯一知道尺寸的只有屏自己**。`w` 或 `h` 传 0 = 整项不申报 ——
   别填一个看着像真的的数，那会让对面按错的宽度排版还一切"正常"。
 
+- `command{cmd:"wake"}`：把熄了屏的圆屏点亮，落地的是 POWER 键自己那条路（不是更轻的一条）。
+  契约上它和 `audio_chunk` 是同一种东西 —— **骑在 `command` 上、不新开 `t`**，理由见上面那条
+  "唯一不能反过来决定的决定"；老固件收到 `cmd:"wake"` 只会丢这一帧，不掉线。
+  **不带参数**（`args` 可有可无，屏不看）；**不回 ack、不重试、不排队** —— 屏醒了下一步会自己
+  发 `state`、`page_report` 和那条 `hello`，那些才是"叫醒了"的证据。手机侧要按**没叫醒**处理：
+  发出去 3 s 内没看到这条连接上有任何动静，就当这一下没成，别静默。
+  什么时候发：手机侧的唤醒词命中，或用户点「叫醒圆屏」。**答句不要额外发这一条** ——
+  `dialog{dir:"down"}` 在屏侧本来就会点亮屏幕。
+  **硬前提：那条 WebSocket 还活着。** 屏在电池上熄屏到点会 `nap`（Wi-Fi 关掉，见固件
+  `muse_input.c` 的 `WIFI_NAP_MS = 2 分钟`），那一刻连接就没了，这一帧送到空气里，
+  只有按 POWER 能叫醒它。所以这一条只在设置页「熄屏后保持联网」开着时才有效；
+  App 侧的要求写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
+
+## 上行音频通道（契约 v4 · 设计，未实现）
+
+「对着屏说话」才需要这一档。屏已经是嘴（`audio_chunk` 放音），这一节给它装耳朵：屏采的裸 PCM
+推到手机，手机做转写，答句照旧走 `dialog{dir:"down"}`。方向反过来了，但帧的形状**刻意和 v3 下行做成同一套**——
+同骑 `command`、同一组 `args` 键、同样 2560 字节一块，只为让两侧只剩一套分块代码。
+
+```
+按住（屏生成 turn_id = s-<开机随机段>-<自增>，此后这一轮所有帧都用它）
+     → command{cmd:mic_chunk, args:{turn_id,seq,total,rate,b64}} × N   每 80 ms 一帧
+     → 手机转写 → dialog{dir:"up", turn_id:同一个, text:转写出来的那句}    这句是屏该显示的
+     → 手机照旧答 dialog{dir:"down"}（+ 可选 audio_chunk）
+```
+
+- **`turn_id` 由屏在按下的那一刻生成，手机不许另起一个。** 它是这一轮的唯一编号：`mic_chunk` 靠它拼段，
+  `dialog` 靠它去重，答句靠它配对。手机换号的表现是"声音和文字对不上、同一句话画两遍"。
+  上行那句走 `dir:"up"`，语义仍按对话面那套 —— 它是**记录**，不是请求手机重答一遍。
+- **为什么又是 `command` 而不是新开 `t`**：和 v3 那条"唯一不能反过来决定的决定"同一条理由，一字不改。
+
+### 第一条要求不是音频，是「让屏先知道对面是几版」
+
+v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成立，手机那边正好相反**。
+`CommandType` 是 Kotlin 严格枚举（`core/.../protocol/ScreenLink.kt:112`），枚举外的值在
+`ScreenMessage.decode` 里抛 `SerializationException`；入站解码整个包在 `runCatching` 里，失败分支是
+`conn.close(CLOSE_POLICY, "bad contract")`（`core/.../screen/ScreenLinkServer.kt:97-102`），
+而且 `Json { ignoreUnknownKeys = true }` 救不了枚举取值 —— 它只管多余的键。
+**所以对着现在装在手机上的 v3 App 发一条 `mic_chunk`，表现是链路当场被手机关掉、一句话不说**，
+和「App 无法连接圆屏」那两次现场故障同一个观感。
+
+屏又**没法自己算出对面是几版**：协商号是服务端算的，`ack` 帧里没有版本字段可以回读，
+固件只能取自己申报的那一档（`components/screen_link/screen_link.c:59-63`，
+`s_negotiated = SCREEN_LINK_CONTRACT_MAX`）。这条不对称是 v1 时就写进注释的已知代价，
+上行音频正好踩在它上面。
+
+所以 v4 的第一条是**加性地把协商号回读**：
+
+- `AckPayload` 多一个可选整数字段 `protocols`（`ScreenLink.kt:433`），hello 的回执里带上服务端
+  实际支持的档位。老固件用 cJSON 读 ack，多出来的键直接看不见，不掉线。
+- 固件收到后**只用它给"上行"这一路把闸**：申报号缺失或低于 4 时，屏不许发任何 `cmd`。
+  **不要拿它去覆盖现有的 `s_negotiated`** —— 那个变量现在管的是 `screen_link_dialog_ready()` 这类
+  "屏能不能说话/能不能收"的判断，而收这一路对着老 App 本来就是安全的、已经跑着的；把它清零换来的
+  是一台好使的屏突然连答句都不画了。风险是不对称的：**下行错了屏只是丢帧，上行错了手机关链**，
+  所以这道新闸只管上行，别的都不动。
+- **没有这个键就当"不许上行"**。这里"缺了 = 不发"是安全默认，
+  和 `SatState.module_ok` 那条"缺了必须当不知道"的反面教训不冲突 —— 那条是显示字段，省略会被读成假值；
+  这一条控的是**发不发**，误判方向是沉默而不是炸链。
+- **发布顺序是硬的，不能倒**：先让 App 会申报、并且认识 `mic_chunk`，装机之后才允许固件发这一帧。
+  反过来的话，一块新固件能把一台没更新的手机当场踢下线，那比"屏不能说话"重得多。
+
+### 帧预算与屏侧的取数位置
+
+- 采到的就是现成的：`idle_capture()` 每 20 ms 从 `muse_audio_read` 拿 320 帧（16k/单声道/s16le = 640 字节），
+  喂 `s_pre` 预滚环和设置页那个音量条。**2560 字节 = 4 个 20 ms 块 = 80 ms** → base64 3416 字符 → 整帧约 3.5 KB，
+  压在 `SCREEN_LINK_MAX_FRAME 4096`（同时是 `ws_cfg.buffer_size`）里，和 v3 下行同一个数。
+- **12.5 帧/秒 ≈ 43 KB/s 的入站 JSON**。下行那条文档里写了"22 KB/s 没实测过"；上行这条更糟，
+  是**手机作为服务端从没被这块屏压过任何持续入站流量**。第一次真跑要在手机上看到收帧序号连续，
+  在屏上看到发送侧没有阻塞。
+- **不许在 `voice_task` 里直接发帧**：那条任务的 20 ms 读取就是它的节拍，`esp_websocket_client_send_text`
+  一旦因为 tx 队列满而阻塞，掉的是**采到的音频**而不是某一帧。要做的是生产者/消费者切开：
+  `voice_task` 写 PSRAM 环，独立上行任务取环、组帧、发。环满了丢什么必须先写死再实现 ——
+  按 v3 下行那条同款的规矩，**整段作废比"后半句没了"好**，但上行的整段作废意味着这一轮白说，
+  所以屏侧要给一个"这轮没送出去"的反馈，别静默。
+- 「按住说」8 s 上限 = 256 KB PCM = 100 帧。和下行那个 2 MB(=64 s) 的段上限是两个数，别混。
+
+### 屏侧现状：那条「录音通路坏了」要先改判
+
+之前量到的"自测过了（-54.9 dBFS）之后所有 `muse_audio_read` 全失败"，
+现在有一个**更便宜的解释，而且它把结论翻过来**：
+
+- 那句 `i2s_common: i2s_channel_read(1410): The channel is not enabled` 不是状态位，是**拿令牌的超时**。
+  IDF 那边读一次要借一次二进制信号量，通道 enable 时给、disable 时收（`i2s_common.c`）；
+  esp_codec_dev 读默认等 1000 ms。所以任何**第二个读者**都会等满 1 秒、然后打这一行一模一样的错。
+- `muse_audio_read` 自己不加锁（锁只在 `muse_audio_power` 里），所以两个读者就是纯竞争。
+- `voice_task` 在不 rest 的时候**每一圈都在读麦克风**（`idle_capture()`，注释写着"The 20 ms read paces this loop"），
+  而 `rest = asleep && battery`。**在 USB 供电的台子上 rest 永远为假**，也就是说麦克风一直是被 voice_task 占着的。
+  我之前那个从串口任务发起的探针，正是撞上去的第二个读者。
+- 顺带把"强制 `muse_audio_power(false)` 卡住"也解释了：`Pending out channel for in channel running`
+  是配对逻辑在等一个被在途读者拿着的令牌（`portMAX_DELAY`），不是硬件坏了。
+
+**这条 2026-11-10 已按上面的判据称到，改判成立**：进设置页声音那一栏，对着麦克风拍手 ——
+**电平条和 dBFS 数字有反应**（owner 实测；他没说当时插没插 USB，但这一条判据和供电无关：
+`rest` 要 `asleep && battery` 同时成立，而那一页亮着屏，所以两种供电下 `voice_task` 都在读）。
+所以**屏侧的录音通路本来就是好的，没有 bug 要修**；
+之前那句 `The channel is not enabled` 是串口探针自己撞上了 `voice_task` 的常驻读取（第二个读者等满 1 秒令牌）。
+推论直接落到实现上：**上行不许新开读者，就在 `voice_task` 里取它已经拿到的那 20 ms 块**（`s_chunk` / `s_pre` 那条现成的路）。
+
+还剩只有代码量出来才知道的那一半，别当成已定：稳态下谁持有令牌、以及 `s_open` 有没有被某次
+`set_fmt` 的内部 disable 留在错状态 —— 这两条在上行真跑起来、开始和放音撞车之前不用管，撞车那天要管。
+
+### 手机那一侧要做的事（写在契约里，由 apps/android 那棵树实现）
+
+1. `AckPayload` 加 `protocols`（见上），`CONTRACT_VERSION`/`SUPPORTED_VERSIONS` 从 3 走到 4
+2. `CommandType` 加 `mic_chunk`，入站解码把这一帧当成"音频段"而不是聊天帧；
+   按 `turn_id` 攒段、`seq` 不连续就整段丢、超上限整段丢 —— **和 `AudioChunks` 下行那套是同一条规则**
+3. **转写**：现有 `OpenAiCompatProvider` 走不了这一条 —— 它把 `/chat/completions` 硬拼在 baseUrl 后面、
+   只发 JSON body（`core/.../ai/Providers.kt:99-104`），multipart 的 `/audio/transcriptions` 在它里面没有形状。
+   要的是一个独立的上传客户端。**HTTPS 是硬要求**：`network_security_config.xml` 的 base-config 全局禁明文，
+   域名白名单那几条全是注释状态。**端点已选定并真打过（2026-11-10，见下面「转写端点实测」）：
+   `https://api.siliconflow.cn/v1/audio/transcriptions`，默认模型 `FunAudioLLM/SenseVoiceSmall`（免费档）。**
+   齿轮面板加 `asr_url` / `asr_key` 两个字段即可，**不引 SDK、不塞模型，APK 不长大**（owner 的硬约束）。
+   **上传前必须自己封 44 字节 RIFF 头**：屏给的是裸 PCM，实测把裸 PCM 直接当文件传回去是 `500`（空 body），
+   封了头就 `200`；而且**它认容器不认后缀和 Content-Type**（`.pcm` + `audio/wav` 仍 500，`.wav` + `application/octet-stream` 却 200）
+4. **落屏**：转写出来的那句回 `dialog{dir:"up", turn_id:屏给的那个}`，屏显示它 —— 这是"我听到你说的是这句"的凭据
+5. 转写喂 `DialogBridge.ask(question, via = "screen", turnId)`，答句照旧走下行那两帧
+6. `DialogBridge.onAnswer` 现在在 `AppRuntime.kt:375-384` **根本没接**（构造参数里没有它）。
+   接上它不只关系这一节 —— 它是 v3 那条 `audio_chunk` 至今没声音的同一个缺口。
+   **云端合成这一档已经称到了，不再是未定项**：`POST https://api.siliconflow.cn/v1/audio/speech` 回 `200`，
+   模型 `FunAudioLLM/CosyVoice2-0.5B`，但有两处和 OpenAI 形状不一样，照着抄会失败：
+   - `voice` 必须是 **`模型:音色`** 的写法（`FunAudioLLM/CosyVoice2-0.5B:anna`）；只写 `anna` 回
+     `400 {"code":20047,"message":"Invalid voice."}`
+   - **`response_format` 是被忽略的**：`wav` / `pcm` / `mp3` 三种都回 `Content-Type: audio/mpeg`、
+     头四个字节 `ID3`。解出来是 **MPEG2 Layer3 / 22050 Hz / 单声道 / 128 kbps**。
+     所以手机必须**解 MP3 + 重采样 22050→16000**（比值 320/441，不是整数）才能喂 v3 那条 `audio_chunk`。
+     解码用 Android 自带的 `MediaExtractor`/`MediaCodec`，**不引第三方库，APK 不长大**
+   - **owner 已拍（2026-11-10 晚）：用免费的 edge-tts，音色 `zh-CN-XiaoyiNeural`（晓伊）**，
+     不用硅基流动那档收费的。称到的数：27 字 **1.93 s / 35,856 B**，17 字压缩答句 **2.46 s / 25,920 B**；
+     解帧头是 **MPEG2 Layer3 / 24000 Hz / 单声道 / 48 kbps** ⇒ 重采样到屏要的 16k 是 **2/3**，
+     比硅基流动那家的 320/441 干净得多。**同字数比收费那家又快又小**（那家 27 字 2.77~5.15 s / 95,319 B）。
+     落地代码仍是同一套：系统 `MediaExtractor`/`MediaCodec` 解码 + 重采样 + 切 2560 B 块，**不引库、APK 不长大**。
+     **第一次调用会抖**：`list_voices()` 那次抛 `ConnectionResetError [WinError 64]`，原样重试一次就过 ——
+     **这条链路要带一次重试，而且音色写死、不要调 `list_voices`**。详见 `docs/APP-SCREEN-CONNECT.md` §12.10
+   - **代码侧查到底了：这棵树里一行放音代码都没有。** `apps/android/src` + `core/src/main` 扫遍
+     `TextToSpeech`/`MediaPlayer`/`AudioTrack`/`SoundPool`/`MediaCodec`/`android.media`/`android.speech`/`ExoPlayer`
+     **只命中两行注释**；`setDataSource`/`RingtoneManager`/`.play(`/`prepareAsync` 零命中；gradle 无媒体依赖；
+     manifest 无音频权限；`res/` 无 `raw/`、无 `assets/`。**这一轮又补了三处更硬的**：
+     `build/intermediates/{compile,runtime}_app_classes_jar/**/classes.jar` 逐个 `.class` 扫 → **0 命中**；
+     两个 `.aar` 连内层 jar 一起扫、`core-0.1.0.jar`（470 项）扫 → **全 0 命中**；
+     全仓库 `find -name "*.apk"` → **一个都没有**，`build/outputs/` 下只有 manifest 合并日志。
+     `onAnswer` 没接这条原判也是对的（`DialogBridge.kt:53` `private val … = {}`，`:159` 才调；
+     `AppRuntime.kt:375-384` 没传，全仓库只此一个 App 侧实例）
+   - **但 owner 实测反驳了我的推测，以他的实测为准**：原话「**现在实测绝对是手机发声圆屏不发声**」。
+     所以"最可能是圆屏自己在念"那个推测**作废**。两条证据摆在一起只剩一个解释：
+     **他手机上装的那份 APK 不是从这棵树的当前状态构建的**，发声那一半在别的树/别的本地改动里。
+     **这条没称到，卡在**：`adb devices -l` 回的设备列表**是空的**（手机没插 USB 或没开调试），
+     拉不到装机那份 APK；仓库里也没有 APK、没有第二棵树（`git worktree list` 只有这一棵，stash 空）。
+     **解法很小**：手机插上 USB 开调试，我 `pm path` + `pull` 下来扫一遍就当场定性；
+     或者由 `apps/android` 那位说明装机那份是哪棵树、哪个 commit 构建的。详见 §12.3
+   - **在查清之前，屏侧这条规矩先立着**：喇叭只有一只，我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
+     ES8311+NS4150B 输出，而 `DialogBridge.kt:121-125` 对 `foreignCloud` 只记日志、不会去闭 Muse 的嘴。
+     **v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**；手机侧同理 ——
+     装机那份既然已经会念，**要么复用它那条合成顺手切块发屏，要么屏出声时把它静音，不许两边各念一遍**
+
+### 转写端点实测（2026-11-10，拿到 key 之后真打的，不是估的）
+
+打的都是 `POST https://api.siliconflow.cn/v1/audio/transcriptions`，multipart + Bearer。
+音频有两段真中文：一段是 edge-tts 合成的 9 s MP3，一段是 Windows SAPI（`Microsoft Huihui Desktop`）
+合成的 **16 kHz / 16-bit / 单声道 WAV** —— **后者正是屏采上来那个格式**，所以它才是验收用的那段。
+
+| 打的是什么 | 模型 | 回话 | 用时 |
+| --- | --- | --- | --- |
+| 9 s MP3（53,424 B） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星过顶窗口是指卫星飞过地面站上空，能互相看见并通信的那段时间，通常只有几分钟。","language":"Chinese","usage":{"type":"duration","seconds":9}}` | **0.48 s** |
+| 同上 | `XingChenAGI/XingChenASR-V3.2-Ultra` | `200`，同一句一字不差，`"duration":8.893125` | **1.77 s** |
+| **2.87 s 16k 单声道 WAV**（91,886 B，「卫星什么时候能过顶」） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星什么时候能过顶？","language":"Chinese","usage":{"type":"duration","seconds":3}}` | **0.81 s** |
+| 同上 | `XingChenAGI/XingChenASR-V3.2-Ultra` | `200`，`"duration":2.87`，同一句 | **1.04 s** |
+| **9.26 s 同格式 WAV**（296,206 B，35 字长句） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星什么时候能过顶？下一次过顶窗口有多长？我要不要现在就发一条消息出去。"…}` 全对 | **0.63 s**，上传 296,503 B ≈ 462 KB/s |
+| **截到 8.000 s**（256,044 B，模拟「按住说」上限） | 同上 | `200`，尾巴掉了两个字：`…我要不要现在就发一条消息。` | **0.62 s**，上传 256,342 B ≈ 404 KB/s |
+| 裸 PCM 去掉 44 字节头 | 同上 | **`500`，body 全空** | 0.34~0.37 s |
+
+从这张表读出来的、要写进实现的四条：
+
+- **16 kHz 单声道 s16le 封成 WAV 它认，字准，用时不到一秒。** 这一条以前是"估的"，现在是称到的。
+- **必须封 RIFF 头，而且它嗅容器不看后缀/Content-Type**（`.wav` 名字装裸 PCM 照样 500，
+  `.wav` 名字 + `application/octet-stream` 却 200）。屏只送裸 PCM，封头这件事落在手机上，44 字节。
+- **`usage.seconds` 是向上取整的整数**：9.255 s 的文件报 `seconds:10`，2.87 s 报 `3`。
+  算配额要按整秒算，别按小数算。
+- **8 s 上限会真的切掉句子尾巴**（实测少了「出去」两个字）。这不是 bug，是上限的定义；
+  但屏侧到点必须给一个"说完了/被截断了"的可见反馈，否则用户以为是自己没说清。
+
+**限流/配额**：连打 4 次全 `200`（0.34 / 0.37 / 0.38 / 0.46 s），同时打 3 个全 `200`（0.43 / 0.53 / 0.64 s），
+响应头里**没有任何 `x-ratelimit-*` 或 `retry-after`**。加上上面这些一共十来次调用，**没撞到任何限流**。
+**但这不等于"没有日额度"** —— 免费档的天花板在账号侧，连着打十次称不出来，
+现场真撞上的表现会是 `429`/`403`，App 要把这个当成"转写不可用"降级到打字，别静默重试。
+
+**没称到的那一半，别混进上面的数**：表里的用时和上传速率是**这台开发电脑的网络**（它走的就是后面那台手机的蜂窝，
+但上传 256 KB 这一段在手机上会占多久，没在手机上称过）。**端到端也没称过**，而且 owner 已经在 2026-11-10 晚
+拍了压缩答句那一档，所以按**压缩后**的分量相加：转写 0.6~0.8 s + 对话面 **3.05 s**（加了一句话提示之后实测最快那一档）
++ 合成 **1.9~2.5 s**（edge-tts 晓伊）≈ **5.6~6.4 s 才开始出声**，然后放 4.3 s。
+**这仍是算式不是实测**；原来那个 6~16 s 的区间是"不压缩 + 收费合成"的组合，已作废。
+
+### 合成端点实测（同一天，同一把 key）
+
+`POST https://api.siliconflow.cn/v1/audio/speech`，模型 `FunAudioLLM/CosyVoice2-0.5B`：
+
+| 输入 | `response_format` | 回话 | 用时 | 音频 |
+| --- | --- | --- | --- | --- |
+| 27 字中文答句 | `wav` | `200`，`Content-Type: audio/mpeg`，头 `ID3` | 4.05 s | 97,409 B |
+| 同上 | `pcm` | `200`，**还是 `audio/mpeg` + `ID3`** | 5.15 s | 92,394 B |
+| 同上 | `mp3` | `200`，同上 | 2.77 s | 95,319 B |
+| 5 字答句「要现在发。」 | `wav` | `200`，同上 | **1.22 s** | 22,594 B |
+
+解帧头得到：**MPEG2 Layer3 / 22050 Hz / 单声道 / 128 kbps**，27 字那句是 **5.88 s 音频**。
+换算到 v3 下行：5.88 s → 16k 单声道 s16le = **188,081 B PCM = 74 帧 `audio_chunk` ≈ 259 KB 线上**，
+离 2 MB / 64 s 那个段上限还很远。5 字那句是 1.33 s → 17 帧 ≈ 59.5 KB。
+**所以答句长度直接决定屏上要收多少帧**，把答句压在两三十字以内不只是体感问题，也是链路预算问题。
+**上面这张表是"另一家"的数，留着当对照 —— 落点不是它**（见下一节）。
+
+### 合成落点已定：edge-tts 晓伊 + 压缩答句（2026-11-10 晚 owner 拍，当场称过）
+
+owner 原话：「tts 就用 edge 晓伊的声音」「声音延迟就用压缩答句方案吧，言简意赅就好」。
+
+**合成 = `edge-tts` + `zh-CN-XiaoyiNeural`，免费、不要 key、不要账号：**
+
+| 输入 | 用时 | 产物 | 音频时长 | 换成屏要的 16k s16le |
+| --- | --- | --- | --- | --- |
+| 27 字答句 | **1.93 s** | 35,856 B MP3 | 5.98 s | 191,232 B = **75 帧** ≈ 262.5 KB |
+| **17 字压缩答句**「八分钟后过顶，窗口四分钟，现在发。」 | **2.46 s** | 25,920 B MP3 | 4.32 s | 138,240 B = **54 帧** ≈ 189 KB |
+
+- 帧头解出来是 **MPEG2 Layer3 / 24000 Hz / 单声道 / 48 kbps** ⇒ 重采样到 16k 的比值是 **2/3**，
+  比硅基流动那家的 320/441 好写。**同字数比收费那家又快又小**（那家 27 字要 2.77~5.15 s / 95,319 B）
+- **合成完拿硅基流动 ASR 回读了一遍**（把"合成→识别"这一小段串起来称）：17 字那句 `200` / **0.53 s** /
+  `{"text":"8分钟后过顶，窗口4分钟，现在发。"}`；27 字那句 `200` / **0.40 s** /
+  `{"text":"卫星再过8分钟过顶，窗口只有4分钟，要不要现在发消息？"}`。**字全对，只有中文数字被归一成阿拉伯数字**
+  （八→8、四→4）—— 屏上显示转写结果时会出现"8分钟"，**这是正常的，别当识别错**
+- **这条链路会抖，要带一次重试**：第一次 `list_voices()` 连 `speech.platform.bing.com:443` 抛
+  `ConnectionResetError [WinError 64] 指定的网络名不再可用`，而同一次 DNS 正常（`150.171.28.10`）、
+  对照请求硅基流动也通（401）⇒ 不是网络断了。**原样重试一次就全过**（上表是重试那次）。
+  **音色写死，不要调 `list_voices`**，少一个会抖的请求
+- 代价不变：非官方端点随时可能变、现场必须出网、出的是 MP3 要解码重采样切块（系统 `MediaCodec`，APK 不长大）
+
+**压缩答句 = 靠提示词压，不靠砍 `max_tokens`。** 同一句问句加 system
+（`你是车载卫星助手。用一句话回答，不超过30个字，直接给结论，不要解释推理过程。`）、`max_tokens=200`，打 hanbao：
+
+| 模型 | 用时 | 答句字数 | completion tokens（其中思考） |
+| --- | --- | --- | --- |
+| **`deepseek-v4.1-flash-1017`** | **3.05 s** | 20 | 158（**145 是 reasoning**） |
+| `glm-5.3-flash` | 3.67 s | 25 | 53（35 是 reasoning） |
+| `deepseek-v4-pro` | 6.61 s | 23 | 15 |
+
+- 对比不加压缩提示那轮的 3.9~10.1 s ⇒ **最快那一档压到 3.05 s**，整条因此收窄到 5.6~6.4 s 才出声
+- **`max_tokens` 要给到 250 以上**：20 字的答句实测烧掉 158 个 completion token（145 个是思考），
+  给 120 会截断、然后推理草稿漏进正文（前面已称过）。**长度由提示词约束，不由配额约束**
+- **"不要解释推理过程"只压正文、压不掉内部思考**（145 个 reasoning token 照烧）⇒ **3 s 是这条对话面的地板**，
+  再快要换模型或上流式，那是下一次决策
+- **这轮没喂事实表**（真 App 里 `facts = { aiContext() }` 会喂），所以内容不代表真实表现：两档 flash 都回
+  "需提供卫星编号和当前位置"，而 **`deepseek-v4-pro` 直接编了个「预计 5 分钟后过顶」**。
+  ⇒ **选 `deepseek-v4.1-flash-1017`**（最快，缺数据时要数据而不是编数据）；
+  这条也正好说明文案红线为什么必须在出口 —— 模型会编"几分钟后/已送达"这类句子
+- **工作上限按字数卡：一句、≤30 字。** 晓伊语速约 4 字/秒，17 字仍有 4.3 s 播放时长，
+  所以"看起来短"不算短；压缩同时省的是播放时长、下行帧数、流量三样
+
+### 还没称过的（别按已实现讲）
+
+- 43 KB/s 入站：一次都没压过
+- `mic_chunk` 的失败模式：v4 的申报回读落地前，它是**会关链的**，不是会丢帧的
+- 云转写在展台上的可用性：**蜂窝已答（走）**；**端点也已称（2026-11-10，owner 给了 `https://hanbao.party/v1`）** ——
+  结论是**这家没有语音**：`GET /v1/models` 回 200 只有三档对话模型（`deepseek-v4-pro` /
+  `deepseek-v4.1-flash-1017` / `glm-5.3-flash`），`POST /v1/audio/transcriptions`、`/v1/audio/speech`、
+  `/asr`、`/stt`、`/tts` 全部回 `404 page not found`，**和随手编一个路径的回话一字不差**；
+  同一次探测里 `/v1/embeddings` 和 `/v1/messages` 回的是 `400`（说明路由存在、只是 body 不对），
+  所以那六个 404 是"真没有"，不是"方法不对"。**ASR 的落点已经另找了一家并称完**（硅基流动，见上面
+  「转写端点实测」）；**hanbao 仍然是对话面那一家，不换** —— 两家分工：它答话，硅基流动听写
+- **顺带称到的、和音频无关的一条**：这家对话面单次实测 **3.9 ~ 10.1 秒**（同一句中文问句，三档模型；
+  最长那次是 `glm-5.3-flash` 拿 220 token 配额、其中 20 花在思考上），而 App 那边
+  `OpenAiCompatProvider` 的读超时写死 `Duration.ofSeconds(12)` —— **答句稍长一点就当场超时**，
+  而且推理型那两档在小 `max_tokens` 下会把英文思考草稿当成正文吐回来。**这一条不依赖 v4，现在就该修**
+- 端到端时长：**分量都称到了，但整条串起来没称过**。按 owner 拍的压缩答句 + edge 晓伊那一档相加：
+  转写 0.6~0.8 s + 对话面 3.05 s + 合成 1.9~2.5 s ≈ **5.6~6.4 s 才开始出声**，然后放 4.3 s（17 字答句）。
+  算式而已。手机蜂窝上传 256 KB 要多久也没称过
+- 屏上采集与放音同时进行（回声、以及同一根 I2S 总线上的双向）：**没碰过**
+
 ## 保活与断线
 
 - App 每 1 Hz 发 `state`，这本身就是心跳。**3 s 没收到 state，展示端把链路图标变灰**；10 s 没收到则重连
 - 展示端不主动发心跳，省流量省电
 - 重连退避：1s / 2s / 5s / 10s / 30s 封顶
+- **上面那一条是"socket 拨不上"。还有一档是"socket 还没开始拨"**：客户端句柄建不出来
+  （2026-11-10 真机：开机那几十秒内部 RAM 最紧，`screen_link_start: ESP_ERR_NO_MEM`）。
+  这一档以前是**一次性的** —— 建不起来就不再有任何一条路会去建，屏挂着网、地址对、
+  服务端活着，却永远不发 `hello`，App 那边只看到"连不上圆屏"。
+  现在按 5s / 15s / 30s / 60s 封顶重新建一次（`carpet_link.c` 的 gate），
+  且每次重建前把上一轮的句柄、队列、事件组全部退回去 —— 不退的话第二轮只会撞
+  `ESP_ERR_INVALID_STATE`，"重试"变成空壳。对 `hello` 什么时候到，App 侧不需要做任何配合。
 - 断线期间展示端**保留最后一帧 state 并打灰色水印「链路中断 mm:ss」**，不要黑屏。演示时黑屏等于事故。
   数据保留最后一帧，但**卡面**连续 10s 没声就落回钟面 —— 理由和边界见下面「断链够久」那一节
 
@@ -306,7 +585,11 @@
 
 - [x] App 侧服务选型：定了 Java-WebSocket，只做 WebSocket。批量面等真需要轨迹时再议
 - [x] 契约 v2：加 `dialog` 帧 + 按 `hello.protocols` 协商，逐连接过滤（v1 固件只看不说，不用升级）
-- [ ] 展示端固件的对话通道：`screen.html` 那套冒充件已经按 v2 在跑（`node simulator/screencheck.mjs` 22 条断言，其中 11 条是对话面；`node simulator/linkcheck.mjs` 11 条，跑之前先把彩排台起起来：`./gradlew :simulator:run --args="--hold 9"` —— **`--hold` 是步号不是秒数**，传之外的值以前会让进程活着但 1Hz 停掉），真固件那边要补的是录音 → ASR 这一段
+- [ ] 展示端固件的对话通道：`screen.html` 那套冒充件已经按 v2 在跑（`node simulator/screencheck.mjs` 22 条断言，其中 11 条是对话面；`node simulator/linkcheck.mjs` 11 条，跑之前先把彩排台起起来：`./gradlew :simulator:run --args="--hold 9"` —— **`--hold` 是步号不是秒数**，传之外的值以前会让进程活着但 1Hz 停掉），真固件那边要补的是录音 → ASR 这一段。**这一段现在有了形状，见上面「上行音频通道（契约 v4）」**：
+      第一步不是录音，是让 `ack` 把服务端的契约号回读给屏 —— 屏现在算不出对面是几版，而手机解不开陌生 `cmd` 的处理是**关连接**
+- [ ] **契约 v4（对着屏说话）**：`mic_chunk` 上行 + `ack.protocols` 回读 + 手机端 multipart 转写客户端 + `DialogBridge.onAnswer` 接线。
+      四张表（schema / `CommandType` / 固件 `CMD_NAMES` / 组件 `ALLOWED`）由 `SchemaDriftTest` 逼着一起改。
+      **发布顺序不许倒**：App 先会申报，固件才许发第一帧
 - [ ] 展示端接入配对：现在是出厂烧死 `screen_id`，演示现场改不了。要不要换成一次性配对码，D8 被推翻时一起定
 - [ ] 展示端固件的 WebSocket 客户端：小智固件已依赖 `esp_websocket_client`，复用，不引新库
 - [ ] 轨迹点数组的压缩：1 Hz 采样 2 小时 = 7200 点，JSON 太大，考虑抽稀到 30s 或走二进制

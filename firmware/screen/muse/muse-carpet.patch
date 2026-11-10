@@ -1,14 +1,15 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..679e06a 100644
+index b478d5e..e884d6c 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
-@@ -46,6 +46,22 @@ if(CONFIG_MUSE_ENABLED)
+@@ -46,6 +46,23 @@ if(CONFIG_MUSE_ENABLED)
      else()
          list(APPEND srcs "muse_ui.c" "muse_menu.c" "muse_settings_ui.c" "muse_keypad.c" "muse_lv_mem.c")
      endif()
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
-+        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c")
++        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c"
++                         "carpet/carpet_diag.c")
 +        # Chinese for the settings pages and the menu, when CONFIG_MUSE_UI_LANG_ZH
 +        # picks it. The table itself is only read then; the file costs nothing
 +        # otherwise, and keeping it out of muse_lang.c keeps the host test
@@ -25,7 +26,7 @@ index b478d5e..679e06a 100644
      if(CONFIG_MUSE_HATCH)
          list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
-@@ -192,7 +208,11 @@ set(muse_priv_requires
+@@ -192,7 +209,11 @@ set(muse_priv_requires
      esp_driver_pcnt efuse
      # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
      # before Kconfig values exist, so these can't depend on it; only the code does.
@@ -543,6 +544,285 @@ index 0000000..f1ee8d7
 +
 +/* `>carpet` 回读里那一行：收了几个字节、总共说多少、放到哪、电平、丢过几次。 */
 +void carpet_audio_dump(void);
+diff --git a/esp32/components/muse/carpet/carpet_diag.c b/esp32/components/muse/carpet/carpet_diag.c
+new file mode 100644
+index 0000000..fe24c28
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_diag.c
+@@ -0,0 +1,226 @@
++/*
++ * 断电验尸（见 carpet_diag.h 顶部那段）。
++ *
++ * 一条记录长这样：
++ *   b3 t=4 OFF! usb=1 mv=4098 pct=100 off=20 cfg=34 pen=06 key=00 kl=08
++ *   t = 开机到现在多少秒   usb/mv/pct = PMU 眼里的供电
++ *   off = REG_PWROFF_STATUS(0x21)「上一次是谁关的电」   cfg/pen = 那两条按键关机使能
++ *   key = 现在锁存的按键事件   kl = **开机那一刻** PMU 已经锁存着的按键事件
++ *        （muse_pmu_init() 会把它清掉，所以只能在被清之前抄一份 —— 这一格才是"是不是按键把电关了"的答案）
++ *
++ * 写的是 NVS（`nvs` 分区，命名空间 `cdiag`），因为现场那次是整机断电，RAM 和日志都留不下东西。
++ * 环形 16 条：跑一趟 5 分钟大概十几条，正好装得下，也不至于把 flash 写穿。
++ */
++
++#include "carpet_diag.h"
++
++#include <inttypes.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "esp_log.h"
++#include "esp_sleep.h"
++#include "esp_system.h"   /* esp_reset_reason() + ESP_RST_* */
++#include "esp_timer.h"
++#include "nvs.h"
++
++#include "muse_pmu.h"
++#include "muse_state.h"
++
++static const char *TAG = "carpet.diag";
++
++#define SLOTS 24            /* 环里几条：一趟 5 分钟大概十几条，宁可装得下整趟 */
++#define TICK_MS 30000       /* 低功耗期间多少秒兜一条（20 秒会把 usb-/dark 那两条顶出环） */
++#define NS "cdiag"
++
++static nvs_handle_t s_nvs;
++static bool s_open;
++static uint32_t s_seq;
++static uint8_t s_latched_key;      /* PMU 清掉之前抄的那两份 */
++static uint8_t s_latched_irq1;
++static TickType_t s_last_tick;
++
++/* 开机那两条的"待发"副本。为什么要绕这一道：`carpet_link_start()` 跑在
++ * `muse_settings_init()`（也就是 `nvs_flash_init()`）之前 —— 同一个坑本仓库已经记过一次
++ * （carpet_link.c:762 那段：在那一步读设置会撞 `xQueueSemaphoreTake` 的 NULL 锁死循环）。
++ * 实测到第一版就是这么没的：刷完开机 `>diag` 回读 `seq=0`，两条开机记录当场写不进去。
++ * 所以开机信息先在 RAM 里存着（复位原因、唤醒原因、PMU 那两份锁存都在），
++ * 等第一条写得动的记录（或 `>diag`）把 NVS 打开时再补写，顺序仍按最旧排。 */
++static bool s_boot_pending;
++static uint32_t s_boot_t;
++static char s_boot_why[24];
++static char s_boot_wake[24];
++
++static bool ensure_open(void)
++{
++    if (s_open) {
++        return true;
++    }
++    if (nvs_open(NS, NVS_READWRITE, &s_nvs) != ESP_OK) {
++        return false;   /* 没 flash 就认了：诊断不该把机器弄死 */
++    }
++    s_open = true;
++    if (nvs_get_u32(s_nvs, "n", &s_seq) != ESP_OK) {
++        s_seq = 0;
++    }
++    return true;
++}
++
++/* 落一条：kind 是这条属于哪一类（b 开机 / e 转折 / t 低功耗兜底），tag 短到 6 个字符以内，
++ * secs 是"这一刻是开机后第几秒"—— 开机那两条传的是攒下来的那一刻，其余传现在。
++ * 寄存器按写这一刻读：对转折和兜底本来就该如此；对补写的开机两条，值钱的那两格
++ * （kl=/k1=）是 RAM 里的开机锁存，不受补写时机影响。 */
++static void write_line(char kind, const char *tag, uint32_t secs)
++{
++    if (!ensure_open()) {
++        return;
++    }
++    uint8_t r[MUSE_PMU_DIAG_REGS] = { 0 };
++    bool have = muse_pmu_diag_regs(r, sizeof r) == ESP_OK;
++    muse_power_t p = { .battery_pct = -1, .battery_mv = 0 };
++    if (muse_pmu_read_power(&p) != ESP_OK) {
++        p.battery_pct = -1;
++    }
++    char buf[160];
++    int n = snprintf(buf, sizeof buf,
++                     "%c%" PRIu32 " t=%" PRIu32 " %s usb=%d mv=%" PRId32 " pct=%d"
++                     " off=%02x cfg=%02x pen=%02x key=%02x kl=%02x k1=%02x",
++                     kind, s_seq, secs,
++                     tag ? tag : "-", (int)p.usb, (int32_t)p.battery_mv, p.battery_pct,
++                     have ? r[3] : 0, have ? r[2] : 0, have ? r[4] : 0,
++                     have ? r[6] : 0, s_latched_key, s_latched_irq1);
++    if (n <= 0 || (size_t)n >= sizeof buf) {
++        return;
++    }
++    char key[8];
++    snprintf(key, sizeof key, "r%" PRIu32, s_seq % SLOTS);
++    if (nvs_set_str(s_nvs, key, buf) == ESP_OK) {
++        nvs_set_u32(s_nvs, "n", s_seq + 1);
++        nvs_commit(s_nvs);
++    }
++    s_seq++;
++    ESP_LOGI(TAG, "%s", buf);
++}
++
++/* 开机那两条，等到 NVS 写得动再补；补不成（还是早）就留着，下次再试。 */
++static void flush_boot(void)
++{
++    if (!s_boot_pending || !ensure_open()) {
++        return;
++    }
++    s_boot_pending = false;
++    write_line('b', s_boot_why, s_boot_t);
++    write_line('b', s_boot_wake, s_boot_t);
++}
++
++/* 记录本身：转折（e）和兜底（t）走这里，顺手把欠着的开机两条先补上，顺序才对。 */
++static void record(char kind, const char *tag)
++{
++    flush_boot();
++    write_line(kind, tag, (uint32_t)(esp_timer_get_time() / 1000000));
++}
++
++/* 复位原因的名字：和 muse_battery.c:562 那张表**一模一样**，因为 `@power` 里的 "boot"
++ * 就是它给的 —— 两台仪器必须说同一种话，不然 §15.11 那种"power on 还是 usb"的对不上
++ * 就成了新的疑点。数字一起写，将来发现表里没有的取值还能事后认。 */
++static const char *reset_name(esp_reset_reason_t r)
++{
++    switch (r) {
++    case ESP_RST_POWERON: return "power on";
++    case ESP_RST_SW: return "restart";
++    case ESP_RST_PANIC: return "panic";
++    case ESP_RST_INT_WDT:
++    case ESP_RST_TASK_WDT:
++    case ESP_RST_WDT: return "watchdog";
++    case ESP_RST_DEEPSLEEP: return "deep sleep";
++    case ESP_RST_BROWNOUT: return "brownout";
++    case ESP_RST_USB: return "usb";
++    case ESP_RST_JTAG: return "jtag";
++    default: return "other";
++    }
++}
++
++void carpet_diag_pmu_latched(uint8_t intsts2, uint8_t intsts1)
++{
++    s_latched_key = intsts2;
++    s_latched_irq1 = intsts1;
++}
++
++void carpet_diag_boot(void)
++{
++    /* 开机这一条最值钱：它带的 off=/kl= 就是"上一次是怎么没的"。
++     * 复位原因 / 唤醒原因另起一条，因为塞不进同一行。
++     * 这一步通常还写不进 NVS（早于 nvs_flash_init），所以先存 RAM，写得动的时候再补。 */
++    esp_reset_reason_t why = esp_reset_reason();
++    snprintf(s_boot_why, sizeof s_boot_why, "rst=%d %s", (int)why, reset_name(why));
++    /* 能从 light sleep 醒过来是因为谁：按键 / 定时器 / 网络，一条就够。 */
++    snprintf(s_boot_wake, sizeof s_boot_wake, "wake=%d", (int)esp_sleep_get_wakeup_cause());
++    s_boot_t = (uint32_t)(esp_timer_get_time() / 1000000);
++    s_boot_pending = true;
++    flush_boot();
++}
++
++void carpet_diag_event(const char *tag)
++{
++    record('e', tag);
++}
++
++void carpet_diag_tick(TickType_t now, bool low_power)
++{
++    if (!low_power) {
++        s_last_tick = 0;
++        return;
++    }
++    if (s_last_tick && now - s_last_tick < pdMS_TO_TICKS(TICK_MS)) {
++        return;
++    }
++    s_last_tick = now;
++    record('t', "low");
++}
++
++void carpet_diag_clear(void)
++{
++    if (!ensure_open()) {
++        printf("@diag NVS 打不开\n");
++        fflush(stdout);
++        return;
++    }
++    char key[8];
++    for (uint32_t i = 0; i < SLOTS; i++) {
++        snprintf(key, sizeof key, "r%" PRIu32, i);
++        nvs_erase_key(s_nvs, key);
++    }
++    s_seq = 0;
++    s_boot_pending = false;
++    nvs_set_u32(s_nvs, "n", 0);
++    nvs_commit(s_nvs);
++    printf("@diag cleared\n");
++    fflush(stdout);
++}
++
++void carpet_diag_dump(void)
++{
++    flush_boot();   /* 到这一步 NVS 一定写得动了：把欠着的开机两条先补上再翻 */
++    if (!ensure_open()) {
++        printf("@diag NVS 打不开\n");
++        fflush(stdout);
++        return;
++    }
++    uint32_t newest = s_seq;
++    uint32_t from = newest > SLOTS ? newest - SLOTS : 0;
++    char key[8], buf[176];
++    size_t cap;
++    int shown = 0;
++    printf("@diag seq=%" PRIu32 " slots=%d\n", newest, SLOTS);
++    for (uint32_t i = from; i < newest; i++) {
++        snprintf(key, sizeof key, "r%" PRIu32, i % SLOTS);
++        cap = sizeof buf - 1;
++        buf[0] = '\0';
++        if (nvs_get_str(s_nvs, key, buf, &cap) == ESP_OK) {
++            printf("  %s\n", buf);
++            shown++;
++        }
++    }
++    printf("@diag 翻出 %d 条；b=开机 e=转折 t=低功耗兜底 kl/k1=开机时 PMU 还锁着的按键/其它中断\n", shown);
++    fflush(stdout);
++}
+diff --git a/esp32/components/muse/carpet/carpet_diag.h b/esp32/components/muse/carpet/carpet_diag.h
+new file mode 100644
+index 0000000..4c3b867
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_diag.h
+@@ -0,0 +1,41 @@
++/*
++ * 断电验尸：把"死之前那一刻机器的样子"写进 NVS，下次开机能翻出来。
++ *
++ * 为什么要这么绕：现场的症状是"电池 + 熄屏放 5 分钟，回来插 USB 才醒"（HANDOFF §15.11），
++ * 也就是**整机断过电**。断过电之后串口日志全没了，RAM 里的计数也全没了，
++ * 光靠 `@stay` / `@power` 只能看出"重启过"，看不出**死在哪一步、死的时候 PMU 说什么**。
++ * NVS 是唯一能扛过断电的东西，所以每个可疑的转折点都当场落一条，宁可写得土一点。
++ *
++ * 每条记录都带同一组 PMU 原始寄存器（`off=` 那句就是 `REG_PWROFF_STATUS 0x21`，
++ * "上一次是谁把它关掉的"）—— 这一组是这次要认的东西本身，不是我猜出来的线索。
++ *
++ * 只在 CONFIG_MUSE_CARPET_CARDS 里；这块诊断是台架仪器，演示固件交付时按 carpet_diag.c
++ * 顶部那段把它摘掉。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "freertos/FreeRTOS.h"
++
++/* PMU 在自己清 IRQ 锁存之前，先让它把"开机那一刻已经锁存的按键事件"递过来。
++ * 早于 NVS 就绪，所以只存到 RAM，第一条 boot 记录再一起写出去。 */
++void carpet_diag_pmu_latched(uint8_t intsts2, uint8_t intsts1);
++
++/* 开机补一条：复位原因 + 唤醒原因 + 那两份锁存。从 carpet_link_start() 叫，NVS 那时已经好了。 */
++void carpet_diag_boot(void);
++
++/* 一个转折点：tag 要短（记录进 flash，一条越短越经得起翻）。传 NULL 就是 "-"。 */
++void carpet_diag_event(const char *tag);
++
++/* 低功耗期间的定心丸：low_power 为真时每 20 秒一条，为假就不写。
++ * 这条的作用是"那一段时间里它确实还活着"，所以宁少勿多。 */
++void carpet_diag_tick(TickType_t now, bool low_power);
++
++/* `>diag`：从最旧到最新打出来，最后报一共几条、掉过几次电。 */
++void carpet_diag_dump(void);
++
++/* `>diag clear`：把环抹空、序号归零。跑那一趟之前清一次，读出来才只有这一趟。 */
++void carpet_diag_clear(void);
 diff --git a/esp32/components/muse/carpet/carpet_font.ttf b/esp32/components/muse/carpet/carpet_font.ttf
 new file mode 100644
 index 0000000000000000000000000000000000000000..4404f5f486d302fe9327de1ce10abc76e3353531
@@ -2702,10 +2982,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_lang_zh.c b/esp32/components/muse/carpet/carpet_lang_zh.c
 new file mode 100644
-index 0000000..796bc53
+index 0000000..798e6d3
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_lang_zh.c
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,314 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2932,6 +3212,9 @@ index 0000000..796bc53
 +    { "10 minutes", "10 分钟" },
 +    { LV_SYMBOL_EYE_CLOSE "  Sleep now", LV_SYMBOL_EYE_CLOSE "  马上熄屏" },
 +    { "Turn the screen off after Muse has been idle for:", "空闲多久之后熄屏：" },
++    { "Stay online when asleep", "熄屏后保持联网" },
++    { "On: still reachable over Wi-Fi while dark, at the cost of battery.",
++      "开着时熄屏也连着 Wi-Fi，手机随时能连上；代价是更费电。" },
 +    { "Tap the screen or press either button to wake.", "碰屏幕或按任意键都能唤醒。" },
 +
 +    /* ---------- Battery ---------- */
@@ -3083,10 +3366,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..5cd8e1b
+index 0000000..c14f405
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1041 @@
+@@ -0,0 +1,1169 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3114,6 +3397,7 @@ index 0000000..5cd8e1b
 +
 +#include "cJSON.h"
 +#include "carpet/carpet_audio.h"
++#include "carpet/carpet_diag.h"
 +#include "carpet/carpet_page.h"
 +#include "driver/gpio.h"
 +#include "esp_log.h"
@@ -3126,6 +3410,7 @@ index 0000000..5cd8e1b
 +#include "muse_audio.h"
 +#include "muse_board.h"      /* 屏幕几何：宽、高、是不是圆、有没有触摸、对角线 */
 +#include "muse_chat_priv.h"   /* muse_hatch_caption_at()：按屏当前的 cols×lines 分页 */
++#include "muse_input.h"       /* muse_input_wake()：App 那头发来的"叫醒"走按键同一条路 */
 +#include "muse_settings.h"
 +#include "muse_state.h"
 +#include "muse_wifi.h"
@@ -3146,10 +3431,19 @@ index 0000000..5cd8e1b
 + * 也**不动 CMD_NAMES** —— core 的 SchemaDriftTest 拿那张表和契约比，多一条就红。 */
 +#define CMD_PAGE (CMD_COUNT + 1)
 +
++/* CMD_WAKE 同样不是要发出去的命令，它只在队列里存在，所以也不动 CMD_NAMES。
++ * 为什么叫醒屏要绕这个队列而不是在 `on_command()` 里直接办：那是 esp_websocket_client
++ * 的事件任务，`muse_input_wake()` 底下是 set_asleep(false) —— 要点面板、要往 flash 的环里
++ * 落一条、没连上时还要 muse_wifi_apply() 重连，这些不该压进 ws 回调；而屏打盹的时候
++ * UI 任务在 update_sleep() 那里就 return 了（muse_ui.c:1996），voice 任务在
++ * muse_state_wait_awake() 里睡着（60 秒一次兜底，太慢），**这个队列的消费者是熄屏期间
++ * 唯一一个能被来帧立刻叫醒的上下文**，所以落地在它这里。 */
++#define CMD_WAKE (CMD_PAGE + 1)
++
 +typedef struct {
 +    int cmd;          /* CMD_NAMES 下标 + 1，0 表示空 */
 +    int dir;          /* 只有 card_next 用 */
-+    char page[16];    /* 只有 CMD_PAGE 用 */
++    char page[16];    /* 只有 CMD_PAGE 用；CMD_WAKE 借这一格带"谁叫的醒"（ws wake / ws say） */
 +} cmd_msg_t;
 +
 +#define CMD_QUEUE_LEN 8
@@ -3434,6 +3728,8 @@ index 0000000..5cd8e1b
 + * 写上屏的那几笔都在锁里：三份缓冲跨了两个任务（这句在链路任务、翻页在 UI 任务），
 + * 出了锁再读 `s_face_shown` 就可能读到对面写了一半的那页。muse_state 自己那把是自旋锁，
 + * 顺序永远是我们这把 → 它那把，反过来的路径不存在，所以嵌套安全。 */
++static void queue_wake(const char *why);   /* 定义在下面 on_command 之前；face_offer 先用到 */
++
 +static void face_offer(const char *text, bool answer, const char *turn_id)
 +{
 +    if (!text || !text[0] || !s_lock) return;
@@ -3468,7 +3764,9 @@ index 0000000..5cd8e1b
 +    s_face_level = 0;
 +    s_face_live = true;
 +
-+    muse_state_poke();   /* 屏打盹时这句得把它叫醒 */
++    muse_state_poke();   /* 醒着的时候：这一句把自动熄屏的钟拨回去 */
++    queue_wake("ws say");/* 打盹的时候：poke 只延长时间、不叫醒（muse_state.c:253 就一行时间戳），
++                            所以这一句得另外走一次真正的唤醒 —— 答句不该冻在第一页等有人戳屏 */
 +    muse_state_set_caption("%s", s_face_shown);
 +    face_set_mode(answer ? MUSE_MODE_SPEAKING : MUSE_MODE_THINKING);
 +    ESP_LOGI(TAG, "face page 0/%u: %s", (unsigned)strlen(s_face_text), s_face_shown);
@@ -3479,9 +3777,11 @@ index 0000000..5cd8e1b
 + * 露的正是脸那一格时也得翻）。
 + * 已知边界：屏打盹时 muse_ui 的 UI 任务在 update_sleep() 那里就 return 了，这条 tick
 + * 跟着停 —— 那句答页冻在第一页不动（2026-11-05 上板实测：`>say` 之后 16 秒 at 一直 0，
-+ * 发个 'w' 叫醒就接着翻）。poke 只延长时间、不叫醒打盹的屏，所以彩排时要么先戳一下屏，
-+ * 要么让答句发生在有人正看着的时候。真要把答句叫醒屏幕，得动 muse_ui 的休眠那条路，
-+ * 这份不改上游。 */
++ * 发个 'w' 叫醒就接着翻）。poke 只延长时间、不叫醒打盹的屏，所以那一版彩排时要么先戳一下屏，
++ * 要么让答句发生在有人正看着的时候。
++ * 2026-11-10 更新：这一条已经不是这样了。face_offer 现在除了 poke 还递一次 CMD_WAKE
++ * （muse_input_wake() = POWER 键同一条 set_asleep(false)），答句自己就把屏叫回来，
++ * 不用先戳。下面那句"tick 停"的机制仍然成立 —— 屏没醒，tick 就不跑，醒过来才接着翻页。 */
 +void carpet_link_face_tick(void)
 +{
 +    if (!s_face_live || !s_lock) return;
@@ -3684,6 +3984,18 @@ index 0000000..5cd8e1b
 +    }
 +}
 +
++/* 把"叫醒屏"递给 carpet_cmd 那条任务去落地，不在 ws 回调里办（原因见 CMD_WAKE 那段）。
++ * `why` 塞进 page 那一格（15 字够了），落到 muse_input_wake() 的日志和断电环里。 */
++static void queue_wake(const char *why)
++{
++    if (!s_cmdq) return;
++    cmd_msg_t m = { .cmd = CMD_WAKE, .dir = 0 };
++    snprintf(m.page, sizeof m.page, "%s", why ? why : "ws");
++    if (xQueueSend(s_cmdq, &m, 0) != pdTRUE) {
++        ESP_LOGW(TAG, "command queue full, dropped wake");
++    }
++}
++
 +/* v3 的下行指令。`t=command` 这一列里只有 audio_chunk 是**手机→屏**的，
 + * 其余（card_next / poke / page_report …）全是屏→手机的请求，不会从这条回调进来。
 + *
@@ -3694,6 +4006,19 @@ index 0000000..5cd8e1b
 +    if (cmd && strcmp(cmd, "audio_chunk") == 0) {
 +        /* 为什么这段不要，carpet_audio 自己会留一行（采样率 / seq / 容量 / 解码） */
 +        carpet_audio_on_chunk(args);
++        return;
++    }
++    if (cmd && strcmp(cmd, "wake") == 0) {
++        /* 现场那一问的便宜解法：屏熄着的时候只要「熄屏后保持联网」开着，Wi-Fi 关联是**不断**的
++         * （rest 只把无线放进最深 modem sleep，muse_wifi.h：MUSE_WIFI_REST "up to a second"），
++         * 所以这一帧收得到 —— 缺的从来不是"能不能收到"，是收到之后没人把显示叫回来
++         * （muse_state_poke() 只盖一个最后活动的时间戳，muse_state.c:253）。
++         * 走的是 POWER 键同一条 set_asleep(false)：面板起来、`lit` 落进断电环。
++         * **这一条只在关联还活着的时候有用**：nap 之后 socket 本来就没了一条下行帧都进不来，
++         * 那时能叫醒屏的只有按键 —— 所以演示现场那个开关必须是开的（§15.2 那条）。
++         * args 现在没人看，留着以后带原因。 */
++        ESP_LOGI(TAG, "下行 wake：点亮屏幕（关联没断才收得到这条）");
++        queue_wake("ws wake");
 +        return;
 +    }
 +    ESP_LOGW(TAG, "没听过这条下行指令：%s", cmd ? cmd : "(空)");
@@ -3724,6 +4049,20 @@ index 0000000..5cd8e1b
 +    (void)arg;
 +    cmd_msg_t m;
 +    while (xQueueReceive(s_cmdq, &m, portMAX_DELAY) == pdTRUE) {
++        if (m.cmd == CMD_WAKE) {
++            /* 落在这条任务栈上，不落在 ws 回调上（原因见上面 CMD_WAKE 那段）。
++             * 剩下的栈一次性打出来：叫醒这条会走 NVS 写 + 重连，4096 够不够是**称出来的**，
++             * 不是猜的 —— 下面那行高水位就是证据。 */
++            muse_input_wake(m.page[0] ? m.page : "ws");
++            /* 单位按仓库自己的规矩来（main/stack_monitor.c:25）：这个 kernel 的高水位是**字**，
++             * 一个 StackType_t 四字节，所以这里乘回来才念成字节。实测（6144 字那版，三次
++             * nap → 叫醒）：剩 3732 字节 = 933 字，峰值吃到 5211 字；栈大小那条注释里有
++             * 和 4096 那版的对照。这一行留在叫醒分支里不是装饰——现场要说"这一版到底够不够"，
++             * 靠的就是它后面那个数。 */
++            ESP_LOGI(TAG, "woke by link, carpet_cmd 还剩 %u 字节",
++                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
++            continue;
++        }
 +        if (m.cmd < 1 || m.cmd > CMD_PAGE) continue;
 +        const char *name = m.cmd == CMD_PAGE ? "page_report" : CMD_NAMES[m.cmd - 1];
 +        cJSON *args = NULL;
@@ -3911,6 +4250,12 @@ index 0000000..5cd8e1b
 +        ESP_LOGI(TAG, "url saved (%s); the link starts on its own once Wi-Fi is up", s_url);
 +    }
 +    xSemaphoreGive(s_link_mtx);
++    /* 这一行量的是"这一趟吃到多深"，留给下一次改这一档用。
++     * 原来是 4096 字（16 KB），2026-11-10 真机稳态内部 RAM 只剩 10K/4K 的时候，
++     * `>url` 直接回 `E carpet: url restart task out of memory` —— 地址改了但没重拨，
++     * 现场看到的表现是"改了没反应"。现在这一档 2048 字（8 KB），余量够不够看这里。 */
++    ESP_LOGI(TAG, "carpet_url 这一趟用完还剩 %u 字",
++             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
 +
@@ -3920,8 +4265,11 @@ index 0000000..5cd8e1b
 +        ESP_LOGE(TAG, "no link mutex, url change not applied");
 +        return;
 +    }
-+    if (xTaskCreate(url_restart_task, "carpet_url", 4096, NULL, 4, NULL) != pdPASS) {
-+        ESP_LOGE(TAG, "url restart task out of memory");
++    if (xTaskCreate(url_restart_task, "carpet_url", 2048, NULL, 4, NULL) != pdPASS) {
++        /* 带数字的那一条：现场只有"内存"和"别的"两种死法分得开。 */
++        ESP_LOGE(TAG, "url restart task out of memory: 内部 RAM %uK 空闲/最大连续 %uK",
++                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
++                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 +    }
 +}
 +
@@ -3964,7 +4312,13 @@ index 0000000..5cd8e1b
 +     * 密码不印 —— 串口日志会被抄进交接文档，那玩意儿抄一次就是一份凭据。 */
 +    char ssid[MUSE_SSID_MAX + 1], pass[MUSE_PASS_MAX + 1];
 +    muse_settings_wifi(ssid, pass);
-+    printf("@url wifi=%d ssid=%s\n", (int)muse_wifi_connected(), ssid[0] ? ssid : "(none)");
++    /* fails/err：拨不上到底是谁的问题，现场只有这两个数分得开 ——
++     * errno=119 是到不了手机（网的事，keeper 会重新关联），errno=113 是端口没人听
++     * （App 的事），http≠0 才是真有一个服务端把这一轮拒了。 */
++    char err[120];
++    screen_link_last_error(err, sizeof(err));
++    printf("@url wifi=%d ssid=%s fails=%lu%s%s\n", (int)muse_wifi_connected(), ssid[0] ? ssid : "(none)",
++           (unsigned long)screen_link_dial_fails(), err[0] ? " err=" : "", err);
 +    printf("@url built-in=%s  set: >url ws://a.b.c.d:8443  clear: >url clear\n",
 +           CONFIG_SCREEN_LINK_URL);
 +    fflush(stdout);
@@ -3985,24 +4339,66 @@ index 0000000..5cd8e1b
 +    s_cb.on_dialog = on_dialog;
 +    s_cb.on_command = on_command;
 +
-+    xSemaphoreTake(s_link_mtx, portMAX_DELAY);
-+    url_read();
-+    esp_err_t err = link_open();
-+    xSemaphoreGive(s_link_mtx);
-+    if (err != ESP_OK) {
-+        ESP_LOGE(TAG, "screen_link_start: %s", esp_err_to_name(err));
++    /* 开不出去就阶梯再来一次，而不是印一条 E 然后把这条任务删掉。
++     * 删掉那一种的代价是 2026-11-10 真机称出来的：t=27s 关联上热点、t=29s
++     * `screen_link_start: ESP_ERR_NO_MEM`（link_task 那一整块栈那轮开不出来），
++     * 之后一直到 t=113s 都是 `ws=down dialed=0 fails=0` —— 屏有网、地址对、
++     * 手机上的服务端也确实活着（同一个固件 t=3.3s 报过 `linked, contract v3`），
++     * 但 App 那边永远显示"连不上圆屏"，屏这边一次都不再拨。
++     * 开机那几十秒正好是内部 RAM 最紧的一段时间（显示、字体、编解码器都在这时候抢），
++     * 撑过去就好了，所以这一条只需要等，不需要别的。 */
++    static const int GATE_RETRY_S[] = {5, 15, 30, 60};
++    const int LAST = (int)(sizeof GATE_RETRY_S / sizeof GATE_RETRY_S[0]) - 1;
++    for (int tries = 0; !s_link_started; tries++) {
++        esp_err_t err = ESP_OK;
++        xSemaphoreTake(s_link_mtx, portMAX_DELAY);
++        /* 拿到锁再说：`>url` 改地址那条（url_restart_task）也在这把锁后面开链路，
++         * 它先开成了的话这里就别再开 —— 第二次 start 只会撞 INVALID_STATE，
++         * 而这一条会把重试阶梯一直跑到 60 秒封顶，日志里全是假故障。 */
++        if (!s_link_started) {
++            url_read();
++            err = link_open();
++        }
++        xSemaphoreGive(s_link_mtx);
++        if (err == ESP_OK) break;
++        int wait_s = GATE_RETRY_S[tries > LAST ? LAST : tries];
++        ESP_LOGE(TAG, "screen_link_start: %s; %d 秒后再拨（第 %d 次）", esp_err_to_name(err),
++                 wait_s, tries + 1);
++        vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
 +    }
++    /* 这一档还是 4096 字（16 KB），没动它：它跑的是 url_read（读 NVS）+ link_open
++     * （里面 ws 句柄和链路任务都在建），现在正是建不起来的那一段时间，减它就是减余量。
++     * 先把它用完时的余量称出来，下次要抬要压都有数。 */
++    ESP_LOGI(TAG, "carpet_gate 这一趟用完还剩 %u 字",
++             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
 +
 +void carpet_link_start(void)
 +{
 +    if (s_gate) return;
++    /* 开机补的两条（复位原因 + 唤醒原因 + PMU 在 init 里被清掉之前抄来的按键锁存）。
++     * 放在这里而不是 app_main：这会儿 NVS 已经挂上，PMU 也已经 init 过（那一步早于建 UI），
++     * 两个前提同时满足的只有这一点。 */
++    carpet_diag_boot();
 +    /* 先建锁再建任务：链路回调和 UI 的 tick 都从这一把锁后面碰 s_state */
 +    if (!s_lock) s_lock = xSemaphoreCreateMutex();
 +    if (!s_cmdq) s_cmdq = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
 +    if (!s_link_mtx) s_link_mtx = xSemaphoreCreateMutex();
-+    if (xTaskCreate(cmd_task, "carpet_cmd", 4096, NULL, 4, &s_cmd_task) != pdPASS) {
++    /* 6144 **字**（这个 kernel 的 usStackDepth 是字数不是字节数，FreeRTOS-Kernel
++     * task.h:315 + esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配）= 24 KB。
++     * 为什么从 4096 提到这里，是称出来的不是猜的：叫醒那条分支（set_asleep(false) →
++     * 往 flash 的环里落一条 `lit` → 可能还有 muse_wifi_apply()）在 4096 字上跑完，
++     * 高水位连着三次都是 1684 字节剩余（421 字），也就是峰值吃到 3675 字 —— 4096 字
++     * 那条路本来就没剩多少，再叠一条日志或 NVS 多一层就是栈溢出，而溢出发生在熄屏的叫醒上，
++     * 现场只会看到"屏叫不醒"。
++     * 6144 字上重跑同一套（三次 nap → 叫醒，全过，无溢出无复位）：**剩 3732 字节 = 933 字**，
++     * 峰值吃到 5211 字。比 4096 那次测到的峰值还深 1536 字 —— 说明上一次那三趟没走到最深
++     * 的那条分支（叫醒会顺带把 Wi-Fi 的整条重连派下去，栈吃到多深取决于那一刻链路停在哪一步），
++     * 4096 字真跑那条是会溢出的，这就是把它抬到 6144 的依据。现在余量 933 字（约 3.7 KB）。
++     * 没往 PSRAM 放：这条任务要写 flash，写的时候 cache 会关，栈在 PSRAM 的任务不能干这个
++     * （muse_voice.c:1305 给语音任务用 MUSE_BIG_CAPS 时特意注明"this task never writes flash"）。 */
++    if (xTaskCreate(cmd_task, "carpet_cmd", 6144, NULL, 4, &s_cmd_task) != pdPASS) {
 +        s_cmd_task = NULL;
 +        ESP_LOGE(TAG, "cmd task out of memory");
 +    }
@@ -4018,6 +4414,21 @@ index 0000000..5cd8e1b
 +    out->linked = s_linked;
 +    out->negotiated = s_negotiated;
 +    out->gap_s = screen_link_state_gap_s();
++}
++
++/*
++ * 给 keeper 的两句。它管这张网卡，而"卡说还连着、其实已经到不了手机"这一种死法
++ * 只有拨号那一侧看得见：esp_wifi 那边仍是 connected，keeper 每轮都判定"什么都不用做"，
++ * 于是每一条拨号都在撞同一个没有路由的地址。keeper 拿这个数决定要不要重新关联。
++ */
++uint32_t carpet_link_dial_fails(void)
++{
++    return screen_link_dial_fails();
++}
++
++void carpet_link_last_error(char *out, size_t cap)
++{
++    screen_link_last_error(out, cap);
 +}
 +
 +/* 开发口：文字和声音一起来。turn_id 两边都用 "audtest" —— 这条的目的就是让
@@ -4079,9 +4490,9 @@ index 0000000..5cd8e1b
 +
 +    /* gap 换算成页面第一行那句中文的规则写在 carpet_page.c 的 tick 里：
 +     * 没网=等网络、没连=未接入、gap 无穷=等首帧、>10s=掉线重连、>3s=卡N秒、否则=已接入。 */
-+    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu\n",
++    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu fails=%lu\n",
 +           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state,
-+           (unsigned long)screen_link_watchdog_fires());
++           (unsigned long)screen_link_watchdog_fires(), (unsigned long)screen_link_dial_fails());
 +    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
 +    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
 +    /* 首屏那条带上的整句：live=还有话挂着，mode=脸现在哪个状态
@@ -4130,10 +4541,10 @@ index 0000000..5cd8e1b
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..d4f7c75
+index 0000000..969c865
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,156 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -4250,6 +4661,13 @@ index 0000000..d4f7c75
 +void carpet_link_url(char *out, size_t n, bool *from_nvs);
 +esp_err_t carpet_link_set_url(const char *url);
 +void carpet_link_url_dump(void);
++/*
++ * 连着拨不上多少次，和最后一条失败的原因（都是 screen_link 那两份的转发，
++ * 屏侧要读的是这两句，不是那个组件的头文件）。给 keeper 判"网还连着但已经到不了手机"，
++ * 理由写在 screen_link.h 的 screen_link_dial_fails 注释里。
++ */
++uint32_t carpet_link_dial_fails(void);
++void carpet_link_last_error(char *out, size_t cap);
 +
 +/*
 + * 开发口：把一句话直接塞进首屏那条带，当它是答句（脸进 speaking、按 2.5 秒一页翻）。
@@ -5221,25 +5639,189 @@ index 0000000..53f5a9a
 +void carpet_page_goto(const char *page_name);
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/muse_app.c b/esp32/components/muse/muse_app.c
+index d27f69e..ccc566a 100644
+--- a/esp32/components/muse/muse_app.c
++++ b/esp32/components/muse/muse_app.c
+@@ -54,6 +54,9 @@ static void on_setting(muse_setting_t what)
+     case MUSE_SETTING_WIFI:
+         muse_wifi_apply();
+         break;
++    case MUSE_SETTING_STAY_ONLINE:
++        muse_wifi_apply();   /* a nap already under way ends on the next pass */
++        break;
+     case MUSE_SETTING_BLE:
+         muse_ble_apply();
+         break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..250d75e 100644
+index 7c579bb..83d53a4 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -48,6 +48,13 @@
+@@ -48,6 +48,24 @@
  #include "muse_ui.h"
  #include "muse_voice.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"
 +#include "carpet/carpet_page.h"
++#include "carpet/carpet_diag.h"
 +#if CONFIG_MUSE_UI_LANG_ZH
 +#include "carpet/carpet_lang_zh.h"
 +#endif
 +#endif
++/* 断电验尸（carpet_diag.h 顶部）。症状见 HANDOFF §15.11：电池 + 熄屏放几分钟，回来是**整机断过电**
++ * —— 串口日志和 RAM 计数全没了，`>nap` 那套仪器在这一趟上失效。所以每个可疑转折点当场落一条 NVS，
++ * 断电也留得住。carpet 之外的构建里这两个宏是空话，一行行为都不改。 */
++#if CONFIG_MUSE_CARPET_CARDS
++#define CARPET_DIAG(tag) carpet_diag_event(tag)
++#define CARPET_DIAG_TICK(now, low) carpet_diag_tick((now), (low))
++#else
++#define CARPET_DIAG(tag) do {} while (0)
++#define CARPET_DIAG_TICK(now, low) do {} while (0)
++#endif
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -892,6 +899,117 @@ static bool console_command(char *line, bool whole)
+@@ -140,6 +158,9 @@ static bool update_power(void);
+ 
+ static void power_off(void)
+ {
++    /* 落在这之前的最后一条，就是"它自己按了关机"。这一条要放在最顶上、
++     * 连 `!muse_board->power_off` 那个 return 之前——那条路径是物理开关，同样会断电。 */
++    CARPET_DIAG("OFF!");
+     if (!muse_board->power_off) {
+         return;   /* a physical switch powers it off */
+     }
+@@ -170,6 +191,9 @@ static void set_asleep(bool asleep, const char *why)
+ {
+     if (asleep != muse_state_asleep()) {
+         ESP_LOGI(TAG, "%s (%s)", asleep ? "sleeping" : "waking", why);
++        /* 熄屏那一刻是这一趟的分界线：断电只在它之后发生。why（power button / serial /
++         * idle…）留进日志，环里那条只记"暗/亮"，够对齐时间了。 */
++        CARPET_DIAG(asleep ? "dark" : "lit");
+         muse_state_set_asleep(asleep);
+ #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
+         if (asleep) {
+@@ -551,6 +575,9 @@ static bool update_power(void)
+     ESP_LOGI(TAG, "%s", s_cpu_low ? "low power: display paused"
+                         : paused  ? "display paused (USB host: CPU at full speed)"
+                                   : "full power");
++    /* 三个档位各一条。low+ 之后才允许 light sleep，所以它是"进入危险区"的门；
++     * 环里若停在 dark → low+ 之后没有下一条，就是它睡下去再没醒来。 */
++    CARPET_DIAG(s_cpu_low ? "low+" : paused ? "pause+" : "full");
+     return paused;
+ }
+ 
+@@ -560,11 +587,35 @@ static bool update_power(void)
+  * power arrives; meanwhile nothing reaches the device over the network.
+  * Not while a voice note recorded offline waits to go (for a while). Returns
+  * true while napping.
++ *
++ * "Stay online" (settings, Sleep page) turns the automatic part of this off:
++ * whatever is supposed to reach the screen then finds it at the network,
++ * without anyone touching the screen first. The association is all it gives up
++ * either way - resting already puts the radio in its deepest modem sleep
++ * (muse_voice.c's MUSE_WIFI_REST), so it still wakes for one beacon in ten.
++ * ">nap" on the bench still naps regardless: it is an explicit measurement
++ * request, not this timer.
+  */
++static volatile bool s_napping;   /* 现在正在 nap 吗；`>stay` 回读用 */
++/* RAM 里的两个计数，专治"电池那一趟没法抓串口"：拔线的时候板子不掉电，
++ * 这两个数一直在数，插回来再读就知道那 3 分钟里到底发生过什么。
++ * naps = nap 真的开始过几次（`熄屏后保持联网` 开着时应当是 0）；
++ * drops = Wi-Fi 从"连着"变成"没连着"几次（nap、升级重连、AP 踢都算）。
++ * 开机清零，所以读的时候连着 `>status` 的 uptime 一起看。 */
++static volatile uint32_t s_nap_events;
++static volatile uint32_t s_wifi_drops;
++
+ static bool update_wifi_nap(TickType_t now, bool paused)
+ {
+     static TickType_t low_since;
+-    static bool napping;
++    /* 初值必须是"还没连上"：刷完那一刻 Wi-Fi 本来就没起来，按 true 起算会白记一次
++     * drops（实测到 `@stay ... drops=1 wifi=0` 刚开机就这样）。 */
++    static bool was_up;
++    bool up = muse_wifi_connected();
++    if (was_up && !up) {
++        s_wifi_drops++;
++    }
++    was_up = up;
+     if (!s_cpu_low) {
+         low_since = now;
+     }
+@@ -572,14 +623,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+         s_nap_now = false;
+         muse_state_set_as_if_battery(false);
+     }
+-    bool nap = paused && !muse_voice_notes_waiting()
+-               && (s_nap_now || (s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS)));
+-    if (nap != napping) {
+-        napping = nap;
++    bool auto_nap = !muse_settings_stay_online()
++                    && s_cpu_low && now - low_since >= pdMS_TO_TICKS(WIFI_NAP_MS);
++    bool nap = paused && !muse_voice_notes_waiting() && (s_nap_now || auto_nap);
++    if (nap != s_napping) {
++        s_napping = nap;
++        if (nap) {
++            s_nap_events++;
++        }
+         ESP_LOGI(TAG, "Wi-Fi %s", nap ? "napping" : "waking");
++        CARPET_DIAG(nap ? "nap+" : "nap-");
+         muse_wifi_nap(nap);
+     }
+-    return napping;
++    return s_napping;
+ }
+ 
+ /* Independent POWER never goes through PTT, AUX's menu or its setup double
+@@ -589,6 +645,7 @@ static bool s_power_down, s_power_swallow;
+ static void power_release(void)
+ {
+     if (!s_power_down) return;
++    CARPET_DIAG("key-");
+     s_power_down = false;
+     if (!s_power_swallow) set_asleep(true, muse_board->power_button);
+     s_power_swallow = false;
+@@ -603,12 +660,14 @@ static void dedicated_buttons(unsigned ev)
+         release = false;
+     }
+     if (!s_power_down && (ev & MUSE_BTN_POWER_PRESS)) {
++        CARPET_DIAG("key+");
+         s_power_down = true;
+         s_power_swallow = muse_state_asleep();
+         muse_state_poke();
+         if (s_power_swallow) set_asleep(false, muse_board->power_button);
+     }
+     if (s_power_down && !s_power_swallow && (ev & MUSE_BTN_POWER_LONG)) {
++        CARPET_DIAG("keyL");
+         s_power_swallow = true;   /* no sleep on release after shutdown/failure */
+         if (s_talk_down) talk_button(MUSE_BTN_TALK_RELEASE);
+         power_off();
+@@ -721,12 +780,23 @@ static void input_task(void *arg)
+             if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
+                 muse_state_set_power(&p);
+                 muse_battery_note_power(&p, muse_state_on_battery());
++                /* 把"USB 走了/回来了"当场落一条：这一条是那一趟的**起点**。
++                 * 没有它，环里最后一条 `dark` 到底发生在拔线后多久说不清（亮屏时每 2 秒读一次电，
++                 * 所以 `usb-` 的 t= 和拔的瞬间差不到 2 秒）；有了它，"撑了多久死的"才算得出来。 */
++                static bool last_usb;
++                if (last_usb != p.usb) {
++                    last_usb = p.usb;
++                    CARPET_DIAG(p.usb ? "usb+" : "usb-");
++                }
+             }
+         }
+ 
+         paused = update_power();
+         bool napping = update_wifi_nap(now, paused);
+         muse_battery_note_state(muse_state_asleep(), s_cpu_low);
++        /* 低功耗期间每 20 秒兜一条：环里最后一条 t=low 的 t= 就是"它最后一次证明自己还活着"
++         * 是开机后第几秒，和下一次开机那条 b* 的 off=/kl= 对着看才知道断电发生在哪一步。 */
++        CARPET_DIAG_TICK(now, s_cpu_low);
+         /* Paused, anything but a button (a pairing prompt, an image) is
+          * noticed within REST_WAIT_MS. Napping, nothing comes over the
+          * network; USB power arriving is noticed within NAP_WAIT_MS. */
+@@ -892,6 +962,161 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -5321,6 +5903,32 @@ index 7c579bb..250d75e 100644
 +        carpet_link_url_dump();
 +        return true;
 +    }
++    /* 熄屏后要不要保持联网 —— 和设置页「自动熄屏」那一格是同一个 NVS key，不是两套状态。
++     * 为什么也给串口一条：这一条只在**电池**上看得见差别，而那会儿通常没有串口可看，
++     * 所以现场要么在电脑前提前把它定下来，要么事后拿这一句证明当时是开着的。
++     * nap=1 = 这会儿真的离开 Wi-Fi 了；插着 USB 它永远是 0（update_wifi_nap 的 paused
++     * 要求 on_battery），别拿"nap=0"当这一条生效的证据。
++     * naps= / drops= 是**自上次开机**的两个累计数（只在 RAM 里）：拔了 USB 板子也不掉电，
++     * 所以电池那一趟发生的都记着，插回来读这一句就能复盘 —— 这一条是专门补"电脑 ping 不通屏"
++     * 那个废判据的（HANDOFF §15.6）。电池那一趟要的证据是 naps=0 且 drops=0。 */
++    if (!strncmp(line, "stay", 4) && (line[4] == '\0' || line[4] == ' ')) {
++        const char *rest = line + 4;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "on")) {
++            muse_settings_set_stay_online(true);
++        } else if (!strcmp(rest, "off")) {
++            muse_settings_set_stay_online(false);
++        } else if (*rest) {
++            printf("@stay 只认 on / off（不带参数=回读）\n");
++            fflush(stdout);
++            return true;
++        }
++        printf("@stay on=%d nap=%d naps=%lu drops=%lu wifi=%d\n", (int)muse_settings_stay_online(),
++               (int)s_napping, (unsigned long)s_nap_events, (unsigned long)s_wifi_drops,
++               (int)muse_wifi_connected());
++        fflush(stdout);
++        return true;
++    }
 +    /* 中文表自检：把这张表里**从没画过**的键逐条打出来，最后报画过几条/共几条。
 +     * 截图只看得见他画出来的那些，这一条看的是剩下的 —— 英文原文被改了个词、表却没跟着改，
 +     * 屏上只是那一行退回英文，看着像"还剩几行没翻译"，只有这条能把它指出来。
@@ -5353,11 +5961,29 @@ index 7c579bb..250d75e 100644
 +        fflush(stdout);
 +        return true;
 +    }
++    /* 断电验尸：把 NVS 里那一圈记录从最旧到最新打出来（carpet_diag.c）。
++     * 为什么不能用 `>stay` / `>power` 代替：那两台仪器都在 RAM 里，而 §15.11 那一趟是**整机断电**，
++     * 插回来时它们已经归零了（`@power.saved` 还是断电前那一份，正是归零的证据）。
++     * 每一行都带 PMU 原始寄存器：off=<0x21>「上一次是谁关的电」、kl=<开机时锁存的按键>、
++     * cfg/pen = 那两条按键关机使能。b=开机 e=转折 t=低功耗兜底。 */
++    if (!strncmp(line, "diag", 4) && (line[4] == '\0' || line[4] == ' ')) {
++        const char *rest = line + 4;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "clear")) {
++            carpet_diag_clear();
++        } else if (*rest) {
++            printf("@diag 只认 clear（不带参数=回读）\n");
++            fflush(stdout);
++        } else {
++            carpet_diag_dump();
++        }
++        return true;
++    }
 +#endif
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1044,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1151,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -5370,6 +5996,32 @@ index 7c579bb..250d75e 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
+@@ -1028,3 +1259,8 @@ void muse_input_request_power_off(void)
+ {
+     s_power_off_requested = true;
+ }
++
++void muse_input_wake(const char *why)
++{
++    set_asleep(false, why ? why : "remote");
++}
+diff --git a/esp32/components/muse/muse_input.h b/esp32/components/muse/muse_input.h
+index be1d6cf..f9813de 100644
+--- a/esp32/components/muse/muse_input.h
++++ b/esp32/components/muse/muse_input.h
+@@ -85,3 +85,12 @@ void muse_input_touch_talk(bool pressed);
+ 
+ /* Plays the goodbye animation and powers off (from the input task). */
+ void muse_input_request_power_off(void);
++
++/*
++ * Wakes a dark screen from outside the button path, with `why` for the log
++ * (and for the carpet power-loss ring). This is the POWER button's own route,
++ * not a lighter one: it clears asleep, runs the panel back up, and rejoins
++ * Wi-Fi immediately instead of sitting out the dial backoff. Safe to call from
++ * any task that already calls muse_wifi_apply().
++ */
++void muse_input_wake(const char *why);
 diff --git a/esp32/components/muse/muse_lang.c b/esp32/components/muse/muse_lang.c
 index 46419e6..da1e3bf 100644
 --- a/esp32/components/muse/muse_lang.c
@@ -5438,11 +6090,90 @@ index 46419e6..da1e3bf 100644
  #else
  const char *muse_lang_status(const char *en)
  {
+diff --git a/esp32/components/muse/muse_pmu.c b/esp32/components/muse/muse_pmu.c
+index 57edbf8..c6563dd 100644
+--- a/esp32/components/muse/muse_pmu.c
++++ b/esp32/components/muse/muse_pmu.c
+@@ -19,6 +19,10 @@
+ #include "esp_check.h"
+ #include "esp_log.h"
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_diag.h"
++#endif
++
+ static const char *TAG = "muse_pmu";
+ 
+ #define AXP2101_ADDR 0x34
+@@ -90,6 +94,15 @@ esp_err_t muse_pmu_init(i2c_master_bus_handle_t bus, bool key_irqs)
+ 
+     if (key_irqs) {
+         ESP_RETURN_ON_ERROR(rd(REG_INTEN2, &v), TAG, "read inten2");
++#if CONFIG_MUSE_CARPET_CARDS
++        /* 断电验尸：这三格在下面就被清掉了，而"断电前那一刻 PMU 锁存了什么按键"
++         * 正是 §15.11 那条"电池 + 熄屏会整机断电"要认的东西。先抄给诊断，再清。 */
++        uint8_t latched2 = 0, latched1 = 0;
++        if (rd(REG_INTSTS2, &latched2) == ESP_OK) {
++            (void)rd(REG_INTSTS1, &latched1);
++            carpet_diag_pmu_latched(latched2, latched1);
++        }
++#endif
+         ESP_RETURN_ON_ERROR(wr(REG_INTEN2, v | PKEY_ALL), TAG, "enable key irqs");
+         ESP_RETURN_ON_ERROR(wr(REG_INTSTS2, PKEY_ALL), TAG, "clear key irqs");
+     } else {
+@@ -229,3 +242,25 @@ esp_err_t muse_pmu_power_off(void)
+     ESP_LOGI(TAG, "powering off");
+     return wr(REG_COMMON_CFG, v | 0x01);
+ }
++
++#if CONFIG_MUSE_CARPET_CARDS
++/* 断电验尸用的那一列（顺序和 muse_pmu.h 上那句注释一致）。纯读，不动任何寄存器。 */
++esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n)
++{
++    static const uint8_t regs[MUSE_PMU_DIAG_REGS] = {
++        REG_STATUS1, REG_STATUS2, REG_COMMON_CFG, REG_PWROFF_STATUS,
++        REG_PWROFF_EN, REG_IRQ_LEVEL, REG_INTSTS2,
++    };
++    if (!s_dev || !out) {
++        return ESP_ERR_INVALID_STATE;
++    }
++    if (n > MUSE_PMU_DIAG_REGS) {
++        n = MUSE_PMU_DIAG_REGS;
++    }
++    for (unsigned i = 0; i < n; i++) {
++        out[i] = 0;
++        ESP_RETURN_ON_ERROR(rd(regs[i], &out[i]), TAG, "diag read");
++    }
++    return ESP_OK;
++}
++#endif
+diff --git a/esp32/components/muse/muse_pmu.h b/esp32/components/muse/muse_pmu.h
+index 238ee4f..205198c 100644
+--- a/esp32/components/muse/muse_pmu.h
++++ b/esp32/components/muse/muse_pmu.h
+@@ -57,3 +57,11 @@ esp_err_t muse_pmu_read_power(muse_power_t *out);
+ 
+ /* Soft power-off: the AXP2101 cuts every rail. PWR turns the board back on. */
+ esp_err_t muse_pmu_power_off(void);
++
++#if CONFIG_MUSE_CARPET_CARDS
++/* 台架诊断（carpet_diag.c）：一次读回固定那一列寄存器，顺序是
++ * STATUS1 / STATUS2 / COMMON_CFG / PWROFF_STATUS / PWROFF_EN / IRQ_LEVEL / INTSTS2。
++ * 只为"断电之后还能问它一句：上一次是谁把电关掉的"，不改任何行为。 */
++#define MUSE_PMU_DIAG_REGS 7
++esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n);
++#endif
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
-index fd499cd..fe85866 100644
+index fd499cd..6270596 100644
 --- a/esp32/components/muse/muse_settings.c
 +++ b/esp32/components/muse/muse_settings.c
-@@ -46,6 +46,7 @@ static struct {
+@@ -41,11 +41,13 @@ static struct {
+     uint16_t sleep_s;
+     bool wifi_on;
+     bool ble_on;
++    bool stay_online;
+     char ssid[MUSE_SSID_MAX + 1];
+     char pass[MUSE_PASS_MAX + 1];
      char host[MUSE_HOST_MAX + 1];
      char vm[MUSE_VM_MAX + 1];
      char token[MUSE_TOKEN_MAX + 1];
@@ -5450,7 +6181,15 @@ index fd499cd..fe85866 100644
  } s = {
      .volume = CONFIG_MUSE_DEFAULT_VOLUME,
      .speaker_on = true,
-@@ -141,13 +142,15 @@ esp_err_t muse_settings_init(void)
+@@ -136,18 +138,23 @@ esp_err_t muse_settings_init(void)
+     if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
+         s.ble_on = b;
+     }
++    if (nvs_get_u8(s_nvs, "stay_online", &b) == ESP_OK) {
++        s.stay_online = b;
++    }
+     load_str("ssid", s.ssid, sizeof(s.ssid));
+     load_str("pass", s.pass, sizeof(s.pass));
      load_str("host", s.host, sizeof(s.host));
      load_str("vm", s.vm, sizeof(s.vm));
      load_str("token", s.token, sizeof(s.token));
@@ -5460,15 +6199,15 @@ index fd499cd..fe85866 100644
      s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
      s.brightness = clampi(s.brightness, 10, 100);
 -    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
-+    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s",
++    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s, nap %s",
               s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
 -             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
 +             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token",
-+             s.link_url[0] ? s.link_url : "built-in");
++             s.link_url[0] ? s.link_url : "built-in", s.stay_online ? "stays online" : "leaves wifi");
      return ESP_OK;
  }
  
-@@ -208,6 +211,29 @@ size_t muse_settings_hatch_token_len(void)
+@@ -208,6 +215,29 @@ size_t muse_settings_hatch_token_len(void)
      return n;
  }
  
@@ -5498,8 +6237,29 @@ index fd499cd..fe85866 100644
  void muse_settings_set_volume(int pct)
  {
      s.volume = clampi(pct, 0, 100);
+@@ -258,6 +288,20 @@ void muse_settings_set_ble_on(bool on)
+     notify(MUSE_SETTING_BLE);
+ }
+ 
++bool muse_settings_stay_online(void)
++{
++    return s.stay_online;
++}
++
++void muse_settings_set_stay_online(bool on)
++{
++    s.stay_online = on;
++    save_u8("stay_online", on);
++    // Turning it on should end a nap that is already under way, not wait for
++    // the next wake; muse_input's task recomputes the flag itself.
++    notify(MUSE_SETTING_STAY_ONLINE);
++}
++
+ void muse_settings_set_wifi(const char *ssid, const char *pass)
+ {
+     if (muse_link_wifi_set(ssid ? ssid : "", ssid && ssid[0] && pass ? pass : "")) {
 diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
-index 5788e5b..74ef9d0 100644
+index 5788e5b..3571316 100644
 --- a/esp32/components/muse/muse_settings.h
 +++ b/esp32/components/muse/muse_settings.h
 @@ -33,6 +33,10 @@
@@ -5513,7 +6273,15 @@ index 5788e5b..74ef9d0 100644
  
  #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
  
-@@ -69,6 +73,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
+@@ -46,6 +50,7 @@ typedef enum {
+     MUSE_SETTING_BLE,
+     MUSE_SETTING_HATCH,
+     MUSE_SETTING_VOICE_NOTES,
++    MUSE_SETTING_STAY_ONLINE,   /* keep Wi-Fi associated through the screen's nap */
+ } muse_setting_t;
+ 
+ typedef void (*muse_setting_cb_t)(muse_setting_t what);
+@@ -69,6 +74,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
  void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
  void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
  size_t muse_settings_hatch_token_len(void);
@@ -5525,8 +6293,23 @@ index 5788e5b..74ef9d0 100644
  
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
+@@ -77,6 +87,14 @@ void muse_settings_set_brightness(int pct);
+ void muse_settings_set_sleep_s(int secs);
+ void muse_settings_set_wifi_on(bool on);
+ void muse_settings_set_ble_on(bool on);
++/* Off (the default) is Muse's own power-saving behaviour: on battery, two
++ * minutes after the screen goes dark the device leaves Wi-Fi entirely until
++ * something wakes it, so nothing reaches it over the network while it sleeps.
++ * On, it stays associated in the deepest modem sleep instead, which is what
++ * lets a phone-side server dial-in work without anyone touching the screen.
++ * Polled where it's used (muse_input.c's nap), so no hardware applies it. */
++bool muse_settings_stay_online(void);
++void muse_settings_set_stay_online(bool on);
+ /* A network name is remembered first among the saved ones and joined now;
+  * an empty ssid forgets every saved network. */
+ void muse_settings_set_wifi(const char *ssid, const char *pass);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..a4407b6 100644
+index 20c46d3..8344d33 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -5561,7 +6344,15 @@ index 20c46d3..a4407b6 100644
  
  /* Hatch page. */
  static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
-@@ -166,6 +177,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
+@@ -128,6 +139,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+ static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
+ #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
+ static lv_obj_t *s_sleep_checks[SLEEP_COUNT], *s_sleep_rows[SLEEP_COUNT];
++static lv_obj_t *s_stay_sw;
+ static int s_sleep_shown = -1;
+ 
+ /* Battery page. */
+@@ -166,6 +178,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
      return font;
  }
  
@@ -5595,7 +6386,7 @@ index 20c46d3..a4407b6 100644
  /* A 172 px portrait panel cannot fit an icon, name and status side by side. */
  static bool narrow_panel(void)
  {
-@@ -199,11 +237,17 @@ static int stacked_text_w(void)
+@@ -199,11 +238,17 @@ static int stacked_text_w(void)
      return (s_tiny ? TINY_LIST_W : muse_board->width - 16) - 20;
  }
  
@@ -5614,7 +6405,7 @@ index 20c46d3..a4407b6 100644
      lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
      lv_label_set_text(l, muse_text_showable(text, shown, sizeof(shown)));
      return l;
-@@ -212,7 +256,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
+@@ -212,7 +257,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
  static void set_text(lv_obj_t *l, const char *text)
  {
      char shown[SHOWN_MAX];
@@ -5623,7 +6414,7 @@ index 20c46d3..a4407b6 100644
      if (strcmp(lv_label_get_text(l), text) != 0) {
          lv_label_set_text(l, text);
      }
-@@ -480,6 +524,58 @@ static lv_obj_t *column(lv_obj_t *list)
+@@ -480,6 +525,58 @@ static lv_obj_t *column(lv_obj_t *list)
      return l;
  }
  
@@ -5682,7 +6473,7 @@ index 20c46d3..a4407b6 100644
  /* Label and value, not tappable. */
  static lv_obj_t *info_row(lv_obj_t *list, const char *text)
  {
-@@ -635,7 +731,7 @@ static void on_text_show(lv_event_t *e)
+@@ -635,7 +732,7 @@ static void on_text_show(lv_event_t *e)
      (void)e;
      bool pw = !lv_textarea_get_password_mode(s_text_ta);
      lv_textarea_set_password_mode(s_text_ta, pw);
@@ -5691,7 +6482,7 @@ index 20c46d3..a4407b6 100644
  }
  
  /* Beside the keyboard's field, a button to show a password. */
-@@ -752,7 +848,7 @@ static void build_text_page(lv_obj_t *tile)
+@@ -752,7 +849,7 @@ static void build_text_page(lv_obj_t *tile)
      int top = text_y(98);
      if (narrow_panel()) {
          /* Portrait panels need a header inside the screen, not the round layout. */
@@ -5700,7 +6491,7 @@ index 20c46d3..a4407b6 100644
          single_line(s_text_title, muse_board->width - 16);
          lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
          lv_obj_set_width(s_text_ta, muse_board->width - 60);
-@@ -791,6 +887,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+@@ -791,6 +888,12 @@ static void open_text(const char *title, const char *initial, bool password, int
      lv_textarea_set_max_length(s_text_ta, max_len);
      lv_textarea_set_password_mode(s_text_ta, password);
      lv_textarea_set_text(s_text_ta, initial ? initial : "");
@@ -5713,7 +6504,7 @@ index 20c46d3..a4407b6 100644
      lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
      if (s_text_kp) {
          muse_keypad_reset(s_text_kp, password);
-@@ -944,10 +1046,12 @@ static bool rebuild_scan_list(void)
+@@ -944,10 +1047,12 @@ static bool rebuild_scan_list(void)
          bool saved = is_saved(s_aps[i].ssid);
          saved_seen |= saved;
          char buf[24];
@@ -5728,7 +6519,7 @@ index 20c46d3..a4407b6 100644
          }
          lv_label_set_text(v, buf);
      }
-@@ -973,6 +1077,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -973,6 +1078,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -5762,7 +6553,7 @@ index 20c46d3..a4407b6 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1119,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1120,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -5778,7 +6569,7 @@ index 20c46d3..a4407b6 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1006,27 +1146,29 @@ static void tick_wifi(void)
+@@ -1006,27 +1147,29 @@ static void tick_wifi(void)
      char buf[128];
      switch (w.state) {
      case MUSE_WIFI_OFF:
@@ -5815,7 +6606,7 @@ index 20c46d3..a4407b6 100644
          break;
      }
      set_text(s_wifi_status, buf);
-@@ -1046,6 +1188,23 @@ static void tick_wifi(void)
+@@ -1046,6 +1189,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -5839,7 +6630,7 @@ index 20c46d3..a4407b6 100644
  }
  
  /* ---------- Hatch ---------- */
-@@ -1125,12 +1284,26 @@ static void build_hatch_page(lv_obj_t *tile)
+@@ -1125,12 +1285,26 @@ static void build_hatch_page(lv_obj_t *tile)
      s_link_status = note(list, "");
      button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
      s_hatch_status = note(list, "");
@@ -5872,7 +6663,7 @@ index 20c46d3..a4407b6 100644
                 "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
                 "gadgets.muse.ai; one set here replaces the firmware's. "
                 "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
-@@ -1142,7 +1315,8 @@ static void tick_hatch(void)
+@@ -1142,7 +1316,8 @@ static void tick_hatch(void)
      const char *paired = !muse_link_hatch_linked()    ? "not paired"
                           : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
                                                           : "paired";
@@ -5882,7 +6673,7 @@ index 20c46d3..a4407b6 100644
      set_text(s_link_status, link);
      if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
          s_link_reset_armed_us = 0;
-@@ -1153,9 +1327,13 @@ static void tick_hatch(void)
+@@ -1153,9 +1328,13 @@ static void tick_hatch(void)
      muse_hatch_status(&h);
      char buf[96];
      if (h.detail[0]) {
@@ -5898,7 +6689,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_hatch_status, buf);
      lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-@@ -1218,11 +1396,12 @@ static void tick_ble(void)
+@@ -1218,11 +1397,12 @@ static void tick_ble(void)
          strlcpy(buf, "Off", sizeof(buf));
          break;
      case MUSE_BLE_ADVERTISING:
@@ -5913,7 +6704,7 @@ index 20c46d3..a4407b6 100644
          break;
      }
      set_text(s_ble_status, buf);
-@@ -1235,10 +1414,12 @@ static void tick_ble(void)
+@@ -1235,10 +1415,12 @@ static void tick_ble(void)
  
  /* ---------- Sound ---------- */
  
@@ -5927,7 +6718,35 @@ index 20c46d3..a4407b6 100644
      set_text(l, buf);
  }
  
-@@ -1431,16 +1612,25 @@ static void build_battery_page(lv_obj_t *tile)
+@@ -1378,17 +1560,27 @@ static void on_sleep_now(lv_event_t *e)
+     muse_state_set_asleep(true);
+ }
+ 
++static void on_stay_sw(lv_event_t *e)
++{
++    muse_settings_set_stay_online(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
++}
++
+ static void build_sleep_page(lv_obj_t *tile)
+ {
+     lv_obj_t *list;
+     s_sleep = page(tile, "AUTO-SLEEP", true, &list);
+     s_sleep_shown = -1;
+     note(list, "Turn the screen off after Muse has been idle for:");
++    /* First row, above the five choices: on the round panel the choice list
++     * already fills the tile, and this switch is the one row the demo needs to
++     * be reachable without scrolling. */
++    s_stay_sw = switch_row(list, "Stay online when asleep", muse_settings_stay_online(), on_stay_sw);
+     for (int i = 0; i < SLEEP_COUNT; i++) {
+         s_sleep_rows[i] = row(list, NULL, SLEEP_NAMES[i], &s_sleep_checks[i], on_sleep_choice,
+                               (void *)(intptr_t)i);
+         lv_obj_set_style_text_color(s_sleep_checks[i], lv_color_hex(COLOR_ACCENT), 0);
+     }
++    note(list, "On: still reachable over Wi-Fi while dark, at the cost of battery.");
+     button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
+     note(list, "Tap the screen or press either button to wake.");
+ }
+@@ -1431,16 +1623,25 @@ static void build_battery_page(lv_obj_t *tile)
      s_battery = page(tile, "BATTERY", true, &list);
      s_batt_shown_us = 0;
      s_batt_status = note(list, "");
@@ -5962,7 +6781,7 @@ index 20c46d3..a4407b6 100644
                 "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
  }
  
-@@ -1468,14 +1658,14 @@ static void tick_battery(void)
+@@ -1468,14 +1669,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -5981,7 +6800,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1686,10 @@ static void tick_battery(void)
+@@ -1496,10 +1697,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -5994,7 +6813,7 @@ index 20c46d3..a4407b6 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1706,7 @@ static void tick_battery(void)
+@@ -1516,7 +1717,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -6003,7 +6822,7 @@ index 20c46d3..a4407b6 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1733,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1744,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -6021,7 +6840,7 @@ index 20c46d3..a4407b6 100644
      }
      note(list, text);
  }
-@@ -1658,13 +1849,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+@@ -1658,13 +1860,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
  
  #if LV_USE_SNAPSHOT
  static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
@@ -6052,7 +6871,7 @@ index 20c46d3..a4407b6 100644
              return true;
          }
      }
-@@ -1688,6 +1895,22 @@ static void bench_open_pending(void)
+@@ -1688,6 +1906,22 @@ static void bench_open_pending(void)
              PAGES[i]->build(s_tile);
          }
          show(*PAGES[i]->obj);
@@ -6496,7 +7315,7 @@ index 1030652..e8fa4de 100644
              }
              if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..484ccee 100644
+index 0c74b08..6b8aa31 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -6510,7 +7329,20 @@ index 0c74b08..484ccee 100644
  #include "muse_input.h"
  #include "muse_link.h"
  #include "muse_mem.h"
-@@ -490,6 +494,17 @@ static bool none_nearby_lately(void) {
+@@ -72,6 +76,12 @@ static const char *TAG = "link.muse";
+ #define AWAY_MAX_US (10LL * 60 * 1000 * 1000)
+ #define AWAY_FRESH_US (10LL * 1000 * 1000)   // a look this recent that found none stands
+ #define SCAN_MAX 16
++// The screen dials the phone, and a phone hotspot that has quietly dropped this
++// station leaves us associating with no route: every dial dies with ENETUNREACH
++// while the radio still says connected, so none of the backoff above ever touches
++// it. That many dials in a row without one getting through is the sign to
++// re-associate rather than keep dialing from the same dead association.
++#define DIAL_STALL_FAILS 4
+ 
+ _Static_assert(MUSE_WIFI_SAVED_MAX >= WIFI_KNOWN_MAX, "room for every saved network");
+ 
+@@ -490,11 +500,23 @@ static bool none_nearby_lately(void) {
  // leaves Wi-Fi alone instead of dropping a network it has no copy of.
  #define WIFI_OVERRIDE (CONFIG_HOMEHUB_WIFI_SSID[0] != '\0')
  
@@ -6528,7 +7360,13 @@ index 0c74b08..484ccee 100644
  static void keeper_task(void *arg) {
      (void)arg;
      xEventGroupWaitBits(s_ready, BIT_LINK | BIT_MUSE, pdFALSE, pdTRUE, portMAX_DELAY);
-@@ -562,7 +577,7 @@ static void keeper_task(void *arg) {
+     load_creds();
+     uint32_t joined_gen = s_creds_gen;
++    uint32_t stalled_at = 0;    // the dial count a re-join was last tried at
+     int64_t next_try = 0;
+     int64_t backoff = RETRY_MIN_US;
+     int64_t away_backoff = AWAY_MIN_US;
+@@ -562,7 +584,7 @@ static void keeper_task(void *arg) {
                  ESP_LOGI(TAG, "screen off a while; left wifi");
                  napped = true;
              }
@@ -6537,16 +7375,36 @@ index 0c74b08..484ccee 100644
              ESP_LOGI(TAG, "wifi network changed; rejoining");
              wifi_mgr_disconnect();
              next_try = 0;
-@@ -571,7 +586,7 @@ static void keeper_task(void *arg) {
+@@ -571,7 +593,27 @@ static void keeper_task(void *arg) {
              backoff = RETRY_MIN_US;
              away_backoff = AWAY_MIN_US;
              s_away = false;
 -        } else if (!WIFI_OVERRIDE && !s_editing && esp_timer_get_time() >= next_try) {
++#if CONFIG_MUSE_CARPET_CARDS
++            // Connected here only means the association hasn't been torn down. The
++            // dials are what say whether the phone is reachable, so when a whole
++            // ladder of them fails without one getting through, re-associate
++            // instead of dialing from the same dead route forever.
++            uint32_t fails = carpet_link_dial_fails();
++            if (fails < stalled_at) {
++                stalled_at = fails;   // one got through since; the count restarted
++            }
++            if (fails >= DIAL_STALL_FAILS && fails - stalled_at >= DIAL_STALL_FAILS) {
++                stalled_at = fails;
++                char err[120] = "";
++                carpet_link_last_error(err, sizeof(err));
++                ESP_LOGW(TAG, "screen link dialed %lu times with none through (%s); rejoining wifi",
++                         (unsigned long)fails, err[0] ? err : "no error recorded");
++                wifi_mgr_disconnect();
++                next_try = 0;
++                backoff = RETRY_MIN_US;
++            }
++#endif
 +        } else if (!dev_override_now() && !s_editing && esp_timer_get_time() >= next_try) {
              // NVS has Muse's changes (s_editing is clear), so Link joins from
              // the same list the settings show.
              uint32_t gen = s_creds_gen;
-@@ -663,6 +678,11 @@ void muse_glue_start(void) {
+@@ -663,6 +705,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }

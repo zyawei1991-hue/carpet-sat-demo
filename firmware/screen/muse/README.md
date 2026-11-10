@@ -25,34 +25,40 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 21 个文件、3689 行新增 / 80 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，6,560 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-08 折叠分组那轮重打后实读的）：
+- 我们的全部改动 = 27 个文件、4333 行新增 / 86 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，7,418 行 / 387,845 字节，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-10 深夜「拨号那次死掉」那轮重打后实读的）：
   ```
-  esp32/components/muse/CMakeLists.txt       |  22 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行)
+  esp32/components/muse/CMakeLists.txt       |  23 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行)
   esp32/components/muse/Kconfig              |  31 +-   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
-  esp32/components/muse/carpet/carpet_lang_zh.c | 311 +   (新，「英文串→中文」那张表 164 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条)
+  esp32/components/muse/carpet/carpet_lang_zh.c | 314 +   (新，「英文串→中文」那张表 166 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条，11-09 加 `熄屏后保持联网` + 那句说明两条)
   esp32/components/muse/carpet/carpet_lang_zh.h |  58 +   (新)
   esp32/components/muse/carpet/carpet_audio.c | 383 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB)
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
-  esp32/components/muse/carpet/carpet_link.c | 1041 +   (新，链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump`)
-  esp32/components/muse/carpet/carpet_link.h | 149 +   (新)
+  esp32/components/muse/carpet/carpet_diag.c | 226 +   (新，11-09 深夜「断电验尸」：NVS 命名空间 `cdiag` 一圈 24 条，每条带同一组 PMU 原始寄存器 + VBAT；`>diag` 翻、`>diag clear` 抹。开机那两条**先存 RAM**，等 NVS 写得动了再补 —— 第一版没绕这一道，刷完实测 `>diag seq=0`，两条开机记录当场静默丢失，根因就是 §2 下面那条"`carpet_link_start()` 早于 `muse_settings_init()`"。)
+  esp32/components/muse/carpet/carpet_diag.h |  41 +   (新，那五个入口：latched / boot / event / tick / dump)
+  esp32/components/muse/carpet/carpet_link.c | 1169 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」)
+  esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
-  esp32/components/muse/muse_input.c         | 124 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读)
+  esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
+  esp32/components/muse/muse_input.c         | 248 +-   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口，链接任务收到 App 的 `cmd:"wake"` 就点它)
+  esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
-  esp32/components/muse/muse_settings.c      |  30 +-  (11-08 新入列：NVS 多一条 `link_url`，读写各一个函数)
-  esp32/components/muse/muse_settings.h      |   9 +   (11-08 新入列：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头)
-  esp32/components/muse/muse_settings_ui.c   | 313 +-  (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态)
+  esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
+  esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
+  esp32/components/muse/muse_settings.c      |  48 +-  (11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
+  esp32/components/muse/muse_settings.h      |  18 +   (11-08：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头；11-09：`MUSE_SETTING_STAY_ONLINE` + `muse_settings_stay_online/set_stay_online`)
+  esp32/components/muse/muse_settings_ui.c   | 324 +-  (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态。11-09：熄屏页加 `s_stay_sw` 那一格，**放在五个时长选项上面**——圆屏一屏放不下五格再加一格，滚动条是关的、台架也没有滚的口)
   esp32/components/muse/muse_ui.c            | 146 +-   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
   esp32/devices/sdkconfig.carpet             |  46 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
   esp32/main/app.c                           |  35 +-  (11-08 新入列：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
-  esp32/main/muse_glue.c                     |  24 +-   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi")
+  esp32/main/muse_glue.c                     |  51 +-   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，21 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  再 `git apply`，27 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
   2026-11-08 这天打了四次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
   （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
   里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
@@ -91,6 +97,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     而 `muse_audio_power(true)` 因 `s_open` 仍为 true 原地返回；强行 `power(false)+power(true)` 重开
     会改成不返回（日志停在 `I2S_IF: Pending out channel for in channel running`），串口开发口那条任务
     （3584 字节栈）从此读不到任何命令。所以探针只放音，不读麦克风。
+    **【2026-11-10 改判：这一段保留作历史观测，但结论作废。】** 那两次失败都是**探针自己撞上了
+    `voice_task` 的常驻读取**：`muse_audio_read` 不加锁，第二个读者会等满 esp_codec_dev 的 1000 ms 令牌
+    然后打出同一行 `The channel is not enabled`（超时日志，不是状态位）；`power(false)` 卡住也是在等
+    被在途读者拿着的令牌（`portMAX_DELAY`），不是硬件坏。**判据已称到**：设置页声音那一栏对着麦克风拍手，
+    电平条/dBFS 有反应 ⇒ 录音通路本来是好的。详见 §8 第 7 条和 `protocol/screen-link.md` v4 那一节。
   - 2026-11-06 契约 v3（`carpet_audio.c` + `on_command` + `hello.screen` + `UI_CARD` 补 maint）这轮 ——
     干净树（`git worktree add --detach … cdc169d`）`git apply --check` 过、解出来
     `carpet_link.c` 804 行 / `carpet_audio.c` 368 行 / `carpet_page.c` 849 行 / 字库 154,528 字节 /
@@ -136,7 +147,44 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     没有一条能合成一次 tap），折上的分组就永远拍不到展开态；`+` 只在 `#if LV_USE_SNAPSHOT`
     里、只把折上的那一组打开、从不反过来折，所以不带 `+` 的名字拍到的仍是用户默认看到的那一屏。
     折叠状态不落 NVS：子页返回时整个销毁重建（`show()` 里 `drop(prev)`），重启天然回到默认折上。
-  重打命令（**`components/screen_link` 必须排除**，
+  - 2026-11-10 熄屏的叫醒这轮（`HANDOFF.md` §15.14）—— 干净树 `git apply --check --binary` 过、
+    真 `git apply` 解出来 27 个文件 / `carpet_link.c` 1135 行 / `carpet_diag.c` 226 行 /
+    `carpet_lang_zh.c` 314 行 / 字库 154,528 字节。
+    **而且这一轮在干净 worktree 里真编过一遍**：照 §3 那四步走完 `Project build complete`、
+    `esp-idf/screen_link/libscreen_link.a` 在、`muse-gadget.bin` 3,346,432 字节 = 刷进板子那次的写入量；
+    `diff --strip-trailing-cr` 比 `carpet_link.c` / `muse_input.c` / `muse_input.h` 等工作树，全 SAME。
+    `:core:test --rerun-tasks` 305 条 0 失败（含 `SchemaDriftTest` 13 条 ——
+    它硬比 `CommandType` ↔ schema 的 `cmd` 集合相等，所以 schema 加 `wake` 就必须连着 Kotlin 一起加）。
+    **板上称到**：三趟 `>nap` → 叫醒全过，`waking (ws say)` → `carpet.diag: eN t=… lit` →
+    `carpet: woke by link, carpet_cmd 还剩 3732 字节` → `nap-` → `@stay … nap=0 wifi=1`，
+    没有溢出、没有复位。新落下的是 `esp32/components/muse/muse_input.h` 里那条
+    `muse_input_wake(const char *why)`（POWER 键那条 `set_asleep(false, …)` 的公开口）。
+    `cmd_task` 的栈从 4096 字提到 **6144 字**，是称出来的：4096 那版峰值吃到 3675 字，
+    6144 那版量到 5211 字、剩 933 字（约 3.7 KB）—— 注意 `usStackDepth` 是**字数**不是字节数。
+    **这一轮还没称的**：`on_command` 里真认 `cmd:"wake"` 那一行走的是 ws，要一个拨得通的服务器，
+    这台 PC 和屏在华为热点上互不通，留到现场由 App 那一头发。
+  - 2026-11-10 深夜「App 显示无法连接圆屏」这轮（`HANDOFF.md` §15.16、`docs/APP-SCREEN-CONNECT.md` §11）
+    —— 干净 worktree `D:/dev/tmp/muse-clean-v4`（`git worktree add --detach … cdc169d`）
+    `git apply --check` 过、真 `git apply` 过、解出 patch 里那 27 个文件（`git status` 只看得到 17 条：
+    15 个改过的 + 新目录 `carpet/`（内含 10 个文件）+ 新的 `sdkconfig.carpet`）/ 字库 154,528 字节
+    （sha256 前缀 `a77558a4`，和工作树同一份），
+    `diff --strip-trailing-cr` 比 `carpet_link.c` / `muse_input.c` / `muse_input.h` / `muse_ui.c` /
+    `main/muse_glue.c` / `main/app.c` / `devices/sdkconfig.carpet` 七个全 SAME。
+    **这一轮没在干净 worktree 里从头重编**（上一轮编过，见上面那条），源码是在带 patch 的工作树里
+    编 + 刷 + 上板称的：`Project build complete`、esptool `Hash of data verified`。
+    落下的东西全在内存那一条线上：`gate_task` 拨号失败改成 5/15/30/60 秒阶梯重试、
+    `carpet_url` 那条一次性任务 4096 → 2048 字（真机称到过 `url restart task out of memory`）、
+    `carpet_cmd`/`carpet_gate` 各留一条高水位回读。`components/screen_link/`（不进 patch 那份）
+    同一轮改了：`link_task` 栈 8192 → **4096 字**（那个数一直是按字节写的，`usStackDepth` 收字数），
+    高水位实测「还剩 2004 字」，`screen_link_start()` 失败路径统一走新加的 `start_fail()` 退回已拿到的东西，
+    `esp_websocket_client_start()` 失败时换掉整个句柄再来。**板上称到链路本来是通的**：
+    `dialing ws://192.168.43.1:8443 (built-in)` → `ws 接入` → `hello 已发：WS175B-A3F7` →
+    `linked, contract v3` → `sent page_report`；同一次开机 1 秒之后
+    `i2s_alloc_dma_desc: allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 panic
+    （backtrace 已用 `addr2line` 对 `muse-gadget.elf` 解过，ELF SHA256 前缀 `b283b092f`）。
+    **§6 那三条 `errno` 现在多了一种用法**：`dialed=0` 说明屏从没拨号（这一轮修的正是它），
+    `dialed=1 fails>0` 才轮到那三条去分"网的锅还是 App 的锅"。
+  - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
@@ -500,6 +548,23 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/linkcheck.mjs … --voice`：
 92 块 / 233,740 字节 ≈ 7.3 秒、seq 连续、最大帧 3570 字节 < 预算 3800）。
 
+### 5.8 叫醒熄屏的屏（契约 v3 第三条下行，11-10 屏侧已落地）
+
+`command{cmd:"wake"}`，不带参数。屏收到走的是 **POWER 键那条路**：熄屏清掉、面板起来、
+Wi-Fi 立刻重连（不等拨号退避）。**不回 ack、不重试、不排队** —— 醒了下一步它自己会推
+`state` / `page_report`，那才是证据；发出去 3 秒这条连接没动静就按「没叫醒」跟用户说话。
+
+什么时候发：**手机侧的唤醒词命中**那一下，或者用户点「叫醒圆屏」。**答句不要额外发** ——
+`dialog{dir:"down"}` 在屏侧本来就会点亮（11-10 起 `face_offer` 自己会递这一次叫醒）。
+
+为什么唤醒词不在屏上：熄屏进 rest 时麦克风/codec/功放是**断了电**的，而这套 SDK 里没有
+esp-sr / WakeNet。要"屏一直听着"就得推倒现在的功耗模型 —— 见 `HANDOFF.md` §15.14。
+
+**硬前提：那条 WebSocket 还活着。** 电池上熄屏满 2 分钟屏会 `nap`（关 Wi-Fi），那时这一帧送不到，
+而且不报错。所以这一条只在设置页「熄屏后保持联网」开着时成立；
+App 侧配套要改的四条（发帧、partial WakeLock、退出别停服务、`acceptScreens` 跟守护联动）
+写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
+
 ## 6. 现场怎么连（拓扑与地址）
 
 契约里拓扑是**反的**：手机是服务端，屏是客户端，屏连上去并先自报 `hello`
@@ -638,9 +703,24 @@ PC 那半已经在真链路上称过（彩排台 `--voice` + `node simulator/lin
    - **说（服务端合成 → 屏放）这一半代码已经写完**（§5.7 + 契约 v3），PC 那半在真链路上称过
      92 块 / 7.3 秒一条不少，**屏这一半还没上板**，所以这里仍然不算"做完"。
    - **听（屏上的麦克风 → ASR → 我们 App 的答题）这一半完全没有**：屏侧"听/说"现在是 Muse 自己
-     那条云链路，**和我们自己的 App 无关**；要让它走我们 App 的服务端，得先看 Muse 的 endpoint
-     能不能被屏上那四个字段改掉。而且 §2 记过一条硬坑：`muse_audio_read()` 开机 5.7 秒之后一律失败，
-     强行重开会挂死串口任务 —— 真要做"听"，那一本账先还掉。
+     那条云链路，**和我们自己的 App 无关**。
+     **2026-11-10 更新：做法不再依赖"改 Muse 的 endpoint"。** 契约 v4（`protocol/screen-link.md`
+     「上行音频通道」）定的是**在 `voice_task` 里取它已经拿到的那 20 ms 块**，经 `mic_chunk` 推给我们手机，
+     手机转写 + 答题，答句照旧走 v3 下行。Muse 那条云链路不动、也不改它的四个字段。
+     **原来记在这里的那条硬坑已改判**：`muse_audio_read()`"开机 5.7 秒之后一律失败"不是通路坏了 ——
+     `voice_task` 在不 rest 时每 20 ms 常驻读麦克风，而 `muse_audio_read` 自己不加锁，
+     串口探针是**第二个读者**，等满 esp_codec_dev 那 1000 ms 令牌超时后打出
+     `The channel is not enabled`（那是超时日志，不是状态位）。判据已称到：进设置页声音那一栏对着麦克风拍手，
+     **电平条和 dBFS 有反应**（owner 实测）→ 通路本来是好的。所以**上行不许新开读者**。
+   - **新增一条屏侧必须先定的事：喇叭只有一只。** 我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
+     ES8311+NS4150B 输出，手机侧对 `foreignCloud` 那几轮只记日志、不会来闭 Muse 的嘴
+     （`core/.../ai/DialogBridge.kt:121-125`）。**v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**。
+     顺带一条已查清的事实：**这棵树的手机 App 里没有任何放音代码**（源码、构建产物 `classes.jar`、
+     两个 `.aar` 的内层 jar、`core-0.1.0.jar` 全扫过，0 命中；仓库里也没有 APK）。
+     **但 owner 2026-11-10 晚实测「绝对是手机发声圆屏不发声」** ⇒ 他装机那份 APK 不是从这棵树的当前状态构建的，
+     发声那一半在别的树里。**这条还没定性**（`adb devices` 列表是空的，拉不到装机那份），
+     详见 `docs/APP-SCREEN-CONNECT.md` §12.3。**屏侧这条规矩不受它影响，先立着**：
+     我们的音频进来时 Muse 那条云链路要不要静音，v4 落地前必须定。
 8. 屏幕上的第三块 tile **还没有目视确认过**（判据见 §9）。
 
 ## 9. 已经实测到的 / 还差的（2026-11-04 这一轮）
