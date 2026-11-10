@@ -716,3 +716,28 @@ https://hf-mirror.com/csukuangfj/sherpa-onnx-apk/resolve/main/asr-2pass/1.12.22/
 **过了** → ASR 落点定在手机本地：§12.6 那一整节（第二家云、`asr_url`/`asr_key` 两格、multipart 上传）
 **整节作废**，`mic_chunk` 收到直接喂本地引擎；**不过** → 回到 §12.6 那家，两条都称过再挑。
 **不管过不过，v4 协议面一个字不改**（屏推的还是同一条 PCM），12.1 那道版本申报闸照做。
+
+### 12.8 改判：APK 不许长大 → 转写走接口，不走本地模型（2026-11-10 owner）
+
+owner 的原话是"这样手机 APK 会不会搞得很大"。**这一条是硬约束，所以 §12.7.1 那只 181.9 MB 的
+sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现场完全不出网也能说话"时才回来做它。
+（顺带记一个中间档：本地模型**可以不塞进 APK、首启再下**，APK 仍然小，但手机存储还是占 228 MB，
+而且首启要等一次下载 —— 演示现场不该出现"第一次用要等它下东西"。）
+
+**接口那一档有现成的，而且是免费模型**，这次称到了名字和价格，不是猜的：
+
+| 项 | 实测 / 出处 |
+| --- | --- |
+| 路由存在 | `POST https://api.siliconflow.cn/v1/audio/transcriptions` → `401 {"code":30014,"message":"Token is invalid."}`；同一次探测瞎编路径 → `404 Not Found`。**先路由后鉴权，所以这个 401 是真"有人但没给 key"** |
+| 免费 ASR 模型 | 硅基流动价格页：`FunAudioLLM/SenseVoiceSmall`（Free）、`TeleAI/XingChenASR-V3.2-Ultra`（Free）；它家文档里列的免费档是 `TeleAI/TeleSpeechASR` + `FunAudioLLM/SenseVoiceSmall`（**两处第二个模型名不一致，以拿到 key 后 `GET /v1/models` 的实读为准**） |
+| TTS 不用它家 | 价格页 TTS 是 `¥0.05/1k chars`（`FunAudioLLM/CosyVoice2-0.5B` / `fnlp/MOSS-TTSD-v0.5`）。**我们不用** —— §12.7 那条 edge-tts 已经称过是免费且中文可用 |
+| 形状 | OpenAI 兼容：`multipart` 上传 + `Bearer`。**App 侧不引任何 SDK、不塞任何模型**，APK 增量就是几十行客户端代码 |
+
+**所以这一档要 owner 做的只剩一件事：注册一个硅基流动账号，拿一把 API key。**
+拿到之后我立刻称两件事（现在文档里所有转写延迟都还是估的）：① 用 §12.7 已经合成出来的那段中文
+真音频打 `/v1/audio/transcriptions`，记**准确率和用时**；② 免费档的限流/配额长什么样
+（免费模型通常有 QPS 或日额度上限，**这条没称过，现场连着说三句话就可能撞上**，必须称一次）。
+
+**代价要写清楚，别只讲好处**：走接口 = 现场必须蜂窝出网（owner 已确认有蜂窝），
+**而且那句话的音频会离开手机上传到第三方**（演示场景可接受，但产品化时要明示）；
+免费档的稳定性也不在合同里。这三条和"APK 不长大"是一组交换，owner 已经选了后者。
