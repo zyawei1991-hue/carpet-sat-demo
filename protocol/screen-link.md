@@ -245,13 +245,79 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
 3. **转写**：现有 `OpenAiCompatProvider` 走不了这一条 —— 它把 `/chat/completions` 硬拼在 baseUrl 后面、
    只发 JSON body（`core/.../ai/Providers.kt:99-104`），multipart 的 `/audio/transcriptions` 在它里面没有形状。
    要的是一个独立的上传客户端。**HTTPS 是硬要求**：`network_security_config.xml` 的 base-config 全局禁明文，
-   域名白名单那几条全是注释状态
+   域名白名单那几条全是注释状态。**端点已选定并真打过（2026-11-10，见下面「转写端点实测」）：
+   `https://api.siliconflow.cn/v1/audio/transcriptions`，默认模型 `FunAudioLLM/SenseVoiceSmall`（免费档）。**
+   齿轮面板加 `asr_url` / `asr_key` 两个字段即可，**不引 SDK、不塞模型，APK 不长大**（owner 的硬约束）。
+   **上传前必须自己封 44 字节 RIFF 头**：屏给的是裸 PCM，实测把裸 PCM 直接当文件传回去是 `500`（空 body），
+   封了头就 `200`；而且**它认容器不认后缀和 Content-Type**（`.pcm` + `audio/wav` 仍 500，`.wav` + `application/octet-stream` 却 200）
 4. **落屏**：转写出来的那句回 `dialog{dir:"up", turn_id:屏给的那个}`，屏显示它 —— 这是"我听到你说的是这句"的凭据
 5. 转写喂 `DialogBridge.ask(question, via = "screen", turnId)`，答句照旧走下行那两帧
 6. `DialogBridge.onAnswer` 现在在 `AppRuntime.kt:375-384` **根本没接**（构造参数里没有它）。
    接上它不只关系这一节 —— 它是 v3 那条 `audio_chunk` 至今没声音的同一个缺口。
-   **未定项，要机子上称**：Mate 60 没有 GMS，`TextToSpeech` 引擎在不在得实测；云端 `/audio/speech`
-   有没有对应端点也得看齿轮面板里 `ai_url` 是哪家
+   **云端合成这一档已经称到了，不再是未定项**：`POST https://api.siliconflow.cn/v1/audio/speech` 回 `200`，
+   模型 `FunAudioLLM/CosyVoice2-0.5B`，但有两处和 OpenAI 形状不一样，照着抄会失败：
+   - `voice` 必须是 **`模型:音色`** 的写法（`FunAudioLLM/CosyVoice2-0.5B:anna`）；只写 `anna` 回
+     `400 {"code":20047,"message":"Invalid voice."}`
+   - **`response_format` 是被忽略的**：`wav` / `pcm` / `mp3` 三种都回 `Content-Type: audio/mpeg`、
+     头四个字节 `ID3`。解出来是 **MPEG2 Layer3 / 22050 Hz / 单声道 / 128 kbps**。
+     所以手机必须**解 MP3 + 重采样 22050→16000**（比值 320/441，不是整数）才能喂 v3 那条 `audio_chunk`。
+     解码用 Android 自带的 `MediaExtractor`/`MediaCodec`，**不引第三方库，APK 不长大**
+   - 它家 TTS 是**收费**的（价格页 `¥0.05/1k chars`），免费那条是 §12.7 称过的 edge-tts（同样出 MP3，
+     同样要解码重采样）。**用哪条是 owner 的决策，不是技术阻塞** —— 两条的落地代码是同一套
+   - **仍然没称到的**：Mate 60 没有 GMS，`TextToSpeech` 引擎在不在；以及 owner 说的"手机确实出声念了答案"
+     到底是谁在念（`onAnswer` 没接，代码上不该有声音）—— 这条不查清，合成接上去可能出现两个声音
+
+### 转写端点实测（2026-11-10，拿到 key 之后真打的，不是估的）
+
+打的都是 `POST https://api.siliconflow.cn/v1/audio/transcriptions`，multipart + Bearer。
+音频有两段真中文：一段是 edge-tts 合成的 9 s MP3，一段是 Windows SAPI（`Microsoft Huihui Desktop`）
+合成的 **16 kHz / 16-bit / 单声道 WAV** —— **后者正是屏采上来那个格式**，所以它才是验收用的那段。
+
+| 打的是什么 | 模型 | 回话 | 用时 |
+| --- | --- | --- | --- |
+| 9 s MP3（53,424 B） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星过顶窗口是指卫星飞过地面站上空，能互相看见并通信的那段时间，通常只有几分钟。","language":"Chinese","usage":{"type":"duration","seconds":9}}` | **0.48 s** |
+| 同上 | `XingChenAGI/XingChenASR-V3.2-Ultra` | `200`，同一句一字不差，`"duration":8.893125` | **1.77 s** |
+| **2.87 s 16k 单声道 WAV**（91,886 B，「卫星什么时候能过顶」） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星什么时候能过顶？","language":"Chinese","usage":{"type":"duration","seconds":3}}` | **0.81 s** |
+| 同上 | `XingChenAGI/XingChenASR-V3.2-Ultra` | `200`，`"duration":2.87`，同一句 | **1.04 s** |
+| **9.26 s 同格式 WAV**（296,206 B，35 字长句） | `FunAudioLLM/SenseVoiceSmall` | `200`，`{"text":"卫星什么时候能过顶？下一次过顶窗口有多长？我要不要现在就发一条消息出去。"…}` 全对 | **0.63 s**，上传 296,503 B ≈ 462 KB/s |
+| **截到 8.000 s**（256,044 B，模拟「按住说」上限） | 同上 | `200`，尾巴掉了两个字：`…我要不要现在就发一条消息。` | **0.62 s**，上传 256,342 B ≈ 404 KB/s |
+| 裸 PCM 去掉 44 字节头 | 同上 | **`500`，body 全空** | 0.34~0.37 s |
+
+从这张表读出来的、要写进实现的四条：
+
+- **16 kHz 单声道 s16le 封成 WAV 它认，字准，用时不到一秒。** 这一条以前是"估的"，现在是称到的。
+- **必须封 RIFF 头，而且它嗅容器不看后缀/Content-Type**（`.wav` 名字装裸 PCM 照样 500，
+  `.wav` 名字 + `application/octet-stream` 却 200）。屏只送裸 PCM，封头这件事落在手机上，44 字节。
+- **`usage.seconds` 是向上取整的整数**：9.255 s 的文件报 `seconds:10`，2.87 s 报 `3`。
+  算配额要按整秒算，别按小数算。
+- **8 s 上限会真的切掉句子尾巴**（实测少了「出去」两个字）。这不是 bug，是上限的定义；
+  但屏侧到点必须给一个"说完了/被截断了"的可见反馈，否则用户以为是自己没说清。
+
+**限流/配额**：连打 4 次全 `200`（0.34 / 0.37 / 0.38 / 0.46 s），同时打 3 个全 `200`（0.43 / 0.53 / 0.64 s），
+响应头里**没有任何 `x-ratelimit-*` 或 `retry-after`**。加上上面这些一共十来次调用，**没撞到任何限流**。
+**但这不等于"没有日额度"** —— 免费档的天花板在账号侧，连着打十次称不出来，
+现场真撞上的表现会是 `429`/`403`，App 要把这个当成"转写不可用"降级到打字，别静默重试。
+
+**没称到的那一半，别混进上面的数**：表里的用时和上传速率是**这台开发电脑的网络**（它走的就是后面那台手机的蜂窝，
+但上传 256 KB 这一段在手机上会占多久，没在手机上称过）。**端到端也没称过**：按分量相加是
+转写 0.6~0.8 s + 对话面 3.9~10.1 s（hanbao 实测）+ 合成 1.2~5.2 s（下面那张表）≈ **6~16 s 才开始出声**，
+这是算式不是实测，而且**它比"对着屏说话"该有的体感慢** —— 要么把答句压短、要么流式合成，这是产品决策不是代码细节。
+
+### 合成端点实测（同一天，同一把 key）
+
+`POST https://api.siliconflow.cn/v1/audio/speech`，模型 `FunAudioLLM/CosyVoice2-0.5B`：
+
+| 输入 | `response_format` | 回话 | 用时 | 音频 |
+| --- | --- | --- | --- | --- |
+| 27 字中文答句 | `wav` | `200`，`Content-Type: audio/mpeg`，头 `ID3` | 4.05 s | 97,409 B |
+| 同上 | `pcm` | `200`，**还是 `audio/mpeg` + `ID3`** | 5.15 s | 92,394 B |
+| 同上 | `mp3` | `200`，同上 | 2.77 s | 95,319 B |
+| 5 字答句「要现在发。」 | `wav` | `200`，同上 | **1.22 s** | 22,594 B |
+
+解帧头得到：**MPEG2 Layer3 / 22050 Hz / 单声道 / 128 kbps**，27 字那句是 **5.88 s 音频**。
+换算到 v3 下行：5.88 s → 16k 单声道 s16le = **188,081 B PCM = 74 帧 `audio_chunk` ≈ 259 KB 线上**，
+离 2 MB / 64 s 那个段上限还很远。5 字那句是 1.33 s → 17 帧 ≈ 59.5 KB。
+**所以答句长度直接决定屏上要收多少帧**，把答句压在两三十字以内不只是体感问题，也是链路预算问题。
 
 ### 还没称过的（别按已实现讲）
 
@@ -262,12 +328,14 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
   `deepseek-v4.1-flash-1017` / `glm-5.3-flash`），`POST /v1/audio/transcriptions`、`/v1/audio/speech`、
   `/asr`、`/stt`、`/tts` 全部回 `404 page not found`，**和随手编一个路径的回话一字不差**；
   同一次探测里 `/v1/embeddings` 和 `/v1/messages` 回的是 `400`（说明路由存在、只是 body 不对），
-  所以那六个 404 是"真没有"，不是"方法不对"。**ASR 的落点还欠一家**（或手机本地识别，见 §12.4）
+  所以那六个 404 是"真没有"，不是"方法不对"。**ASR 的落点已经另找了一家并称完**（硅基流动，见上面
+  「转写端点实测」）；**hanbao 仍然是对话面那一家，不换** —— 两家分工：它答话，硅基流动听写
 - **顺带称到的、和音频无关的一条**：这家对话面单次实测 **3.9 ~ 10.1 秒**（同一句中文问句，三档模型；
   最长那次是 `glm-5.3-flash` 拿 220 token 配额、其中 20 花在思考上），而 App 那边
   `OpenAiCompatProvider` 的读超时写死 `Duration.ofSeconds(12)` —— **答句稍长一点就当场超时**，
   而且推理型那两档在小 `max_tokens` 下会把英文思考草稿当成正文吐回来。**这一条不依赖 v4，现在就该修**
-- 端到端时长：按住说完到答句上屏，估 5~8 s，纯算式没实测
+- 端到端时长：**分量都称到了（转写 0.6~0.8 s、合成 1.2~5.2 s、对话面 3.9~10.1 s），但整条串起来没称过**；
+  相加是 6~16 s 才开始出声，算式而已。手机蜂窝上传 256 KB 要多久也没称过
 - 屏上采集与放音同时进行（回声、以及同一根 I2S 总线上的双向）：**没碰过**
 
 ## 保活与断线
