@@ -154,7 +154,7 @@ fun VehicleServiceCard(s: CardScope) {
         if (mine.isEmpty()) {
             Text(
                 if (scene == Scene.Kids) "还没有轮到孩子的那几项。把「车上有孩子」打开，空调滤芯会提前提醒"
-                else "现在没有到点的事。判据还没接手册，所以这句话只说明读数没越线",
+                else "现在没有到点的事。保养手册还没接进来，这句话只能说明读数没越线",
                 style = Type.Caption,
                 color = Ink.TextLow,
             )
@@ -164,11 +164,11 @@ fun VehicleServiceCard(s: CardScope) {
         }
 
         MaintFold(
-            "生成工单",
-            if (picked.isEmpty()) "勾中的才进工单" else "已勾 ${picked.size} 项",
+            "生成保养单",
+            if (picked.isEmpty()) "勾中的才进保养单" else "已勾 ${picked.size} 项",
         ) { OrderSection(s, maint, picked) }
 
-        MaintFold("判据是谁定的", maint.criteria.badge ?: "判据已接手册") {
+        MaintFold("这些提醒是按什么算的", maint.criteria.badge ?: "已按保养手册算") {
             TextInputRow(
                 placeholder = "上次保养时里程 · 现在 %,d km".format(maint.lastServiceKm()),
             ) { v -> maint.setLastServiceKm(v); s.app.say("记下了：上次保养在 %,d km".format(v)) }
@@ -187,7 +187,7 @@ fun VehicleServiceCard(s: CardScope) {
                 s.app.say(if (it) "记下了：车上有孩子，滤芯那条会提前提醒" else "记下了：车里不带孩子")
             }
             Text(
-                "间隔和标定胎压还等手册（保养 10,000 km / 12 个月、标定 2.5 bar），所以这几条判据现在都带着标",
+                "保养间隔和标准胎压还等手册（保养 10,000 km / 12 个月、胎压 2.5 bar），所以这几条提醒现在都带着「示意」的标",
                 style = Type.Caption,
                 color = Ink.Wait,
             )
@@ -198,7 +198,7 @@ fun VehicleServiceCard(s: CardScope) {
 @Composable
 private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestion>) {
     if (picked.isEmpty()) {
-        Text("勾上面的行，勾中的才进工单", style = Type.Caption, color = Ink.TextLow)
+        Text("勾选上面的事，选中的会拼成一张保养单", style = Type.Caption, color = Ink.TextLow)
         return
     }
     val order = maint.order(picked)
@@ -210,19 +210,20 @@ private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestio
         color = Ink.TextMid,
     )
     Text(
-        "%d 字节 · %s".format(bytes.size, if (WorkOrderCodec.fits(s.app.usage().budget)) "一帧装得下" else "装不进一帧"),
+        if (WorkOrderCodec.fits(s.app.usage().budget)) "这张保养单能一次发出去"
+        else "这张保养单太长了，卫星一次发不完，少勾几项",
         style = Type.Caption,
-        color = Ink.TextLow,
+        color = if (WorkOrderCodec.fits(s.app.usage().budget)) Ink.TextLow else Ink.Wait,
     )
-    // 两句实话：车架号得接上 OBD 才读得到；上行是 M2，还没接，所以这一帧现在只在手机里
+    // 两句实话：车架号得接上 OBD 才读得到；上行还没接，所以这张单现在只在手机里
     if (!maint.vinReal) Text("车架号是编的：接上 OBD 盒子才读得到后 6 位", style = Type.Caption, color = Ink.Wait)
     val base by s.app.scene.collectAsState()
     val choice by s.app.privacyChoice.collectAsState()
     Text(
         if (maint.canSendOut(base.profile.basePrivacy, choice)) {
-            "卫星上行还没接。这一帧现在只在手机里，复制出去对码"
+            "卫星发送还没接通，这张单现在只在手机里；可以先复制出来核对"
         } else {
-            "生效隐私档是本地留存：工单只存手机，不上行"
+            "按现在的隐私档，保养单只留在手机里，不会发出去"
         },
         style = Type.Caption,
         color = Ink.TextLow,
@@ -230,7 +231,7 @@ private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestio
     Row(horizontalArrangement = Arrangement.spacedBy(Grid.x8)) {
         GhostAction("复制全文") {
             clip.setText(AnnotatedString(WorkOrderCodec.describe(WorkOrderCodec.decode(bytes))))
-            s.app.say("工单复制好了")
+            s.app.say("保养单复制好了")
         }
         GhostAction("清空勾选") { maint.clearSelected() }
     }
@@ -264,7 +265,7 @@ private fun SuggestionRow(sg: Suggestion, checked: Boolean, onToggle: () -> Unit
                 Text(sg.headline, style = Type.Body, color = Ink.TextHigh, modifier = Modifier.weight(1f))
                 Badge(sg.severity.label, tone)
             }
-            Text("${sg.detail} · 判据 ${sg.judgement.text}", style = Type.Caption, color = Ink.TextMid)
+            Text("${sg.detail} · 依据 ${sg.judgement.text}", style = Type.Caption, color = Ink.TextMid)
             // 两个标一行一个：并成一句在 1.3 字号下必然断在「未接 / 手册」中间，把出处拆成半句
             listOfNotNull(sg.badge, sg.judgement.source.badge).distinct().forEach { mark ->
                 Text(mark, style = Type.Overline, color = Ink.Wait)
@@ -427,7 +428,7 @@ fun HealthVitalsCard(s: CardScope) {
         ValueRow("体温", "36.5 ℃")
         ValueRow("上次测量", "8 分钟前")
         Text(
-            "超阈值走卫星发一条，不等蜂窝",
+            "指标异常会直接用卫星告诉家人，不用等手机信号",
             style = Type.Caption,
             color = Ink.Wait,
         )

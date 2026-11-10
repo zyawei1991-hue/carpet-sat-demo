@@ -23,7 +23,7 @@ enum class Capability {
     Sentinel,
     Dock,
 
-    /** AI 主理人这条链路（路由 / 权限 / 主动扫描）。**模型接不接是另一件事**，界面上逐条标来源 */
+    /** AI 助手这条链路（路由 / 权限 / 主动扫描）。**模型接不接是另一件事**，界面上逐条标来源 */
     Assistant,
     VehicleBus,
     ChildDevice,
@@ -40,9 +40,9 @@ enum class InputMode { Touch, TouchAndVoice, DockKnob, DockSideKey }
  * 所以这里给每个档位一个序号，取 max 而不是取"最后设置的那个"。
  */
 enum class PrivacyTier(val severity: Int, val label: String) {
-    Open(0, "全量上传"),
-    Guarded(1, "只上传必要字段"),
-    Strict(2, "本地留存，仅 SOS 出网"),
+    Open(0, "什么都传"),
+    Guarded(1, "只传必要的"),
+    Strict(2, "只存在手机里，求救才发出"),
     ;
 
     companion object {
@@ -77,7 +77,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
             // 原始经纬度和 HDOP 留在「户外无网」那一串里，徒步的人才需要自己核对坐标
             // service 紧跟 status：车主看完"车现在怎么样"，下一句要的是"所以现在该做什么"
             cards = listOf("sos", "link", "vehicle.status", "vehicle.service", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue"),
-            actions = listOf("寻车", "远程熄火", "上报车况"),
+            actions = listOf("寻车", "远程熄火", "报一下车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
         ),
@@ -90,7 +90,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         SceneProfile(
             headline = "pass",
             cards = listOf("sos", "pass", "position", "tpi", "queue", "usage", "sentinel", "terminal"),
-            actions = listOf("上报轨迹", "静默上报"),
+            actions = listOf("记一条轨迹", "安静地报个位置"),
             input = InputMode.Touch,
             basePrivacy = PrivacyTier.Guarded,
         ),
@@ -111,10 +111,10 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         ),
     ),
 
-    /** 健康助手：体征 + 打卡 + 主理人。体征设备到货前全是示意 */
+    /** 健康助手：体征 + 打卡 + AI 助手。体征设备到货前全是示意 */
     Health(
         "健康助手",
-        "体征 · 打卡 · 主理人",
+        "体征 · 打卡 · AI 助手",
         SceneProfile(
             headline = "health.vitals",
             cards = listOf("health.vitals", "health.checkin", "health.agent", "position", "queue", "sos"),

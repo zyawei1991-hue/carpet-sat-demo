@@ -109,6 +109,87 @@ object AudioChunks {
     /** PCM 的秒数，给日志和"这句话念了多久"用 */
     fun secondsOf(pcmBytes: Int): Double = pcmBytes.toDouble() / (SAMPLE_RATE * 2)
 
+    /**
+     * 任意 WAV → 屏要的形状（[SAMPLE_RATE] / 单声道 / s16le）。format 里缺项或不是 16 位就返回 null。
+     *
+     * 为什么不能直接用 [wavToPcm]：手机上 `android.speech.tts` 的 `synthesizeToFile` 输出的是
+     * **引擎自己的采样率**（实测 22050 / 24000，还见过立体声），而且 WAV 头里没写"给我 16k"这个选项。
+     * 把 24k 的裸 PCM 按 16k 声明发下去，屏上听起来是又快又尖的一整句 —— 这比没声音更难判断是哪里坏了。
+     * 桌面那份 System.Speech 恰好就是 16k 单声道，所以那边走 [wavToPcm] 不受影响。
+     */
+    fun wavToPcm16k(wav: ByteArray): ByteArray? {
+        if (wav.size < 12) return null
+        if (String(wav, 0, 4, Charsets.US_ASCII) != "RIFF") return null
+        if (String(wav, 8, 4, Charsets.US_ASCII) != "WAVE") return null
+        var at = 12
+        var channels = 0
+        var rate = 0
+        var bits = 0
+        var data: ByteArray? = null
+        while (at + 8 <= wav.size) {
+            val id = String(wav, at, 4, Charsets.US_ASCII)
+            val size = le32(wav, at + 4)
+            val body = at + 8
+            when (id) {
+                "fmt " -> if (size >= 16 && body + 16 <= wav.size) {
+                    channels = le16(wav, body + 2)
+                    rate = le32(wav, body + 4)
+                    bits = le16(wav, body + 14)
+                }
+                "data" -> {
+                    val end = minOf(body + size, wav.size)
+                    if (end > body) data = wav.copyOfRange(body, end)
+                }
+            }
+            at = body + size + (size % 2)
+        }
+        val pcm = data ?: return null
+        if (channels <= 0 || rate <= 0 || bits != 16) return null
+        if (channels == 1 && rate == SAMPLE_RATE) return pcm
+        return toMono16k(pcm, channels, rate)
+    }
+
+    /**
+     * 下混 + 线性插值重采样。**不是高保真，够一句话听懂**：TTS 的频带本来就窄，
+     * 带限滤波在手机上换来的只有延迟，而屏那头是 80ms 一块、实时播的。
+     */
+    fun toMono16k(pcm: ByteArray, channels: Int, rate: Int): ByteArray {
+        val frames = pcm.size / (2 * channels)
+        if (frames <= 0) return ByteArray(0)
+        // 先下混成一个 int16 序列，重采样只面对一条线
+        val mono = ShortArray(frames)
+        for (i in 0 until frames) {
+            var sum = 0
+            for (c in 0 until channels) sum += le16(pcm, (i * channels + c) * 2)
+            mono[i] = (sum / channels).toShort()
+        }
+        if (rate == SAMPLE_RATE) return shortsToBytes(mono, 0, frames)
+        val outFrames = (frames.toLong() * SAMPLE_RATE / rate).toInt().coerceAtLeast(1)
+        val out = ShortArray(outFrames)
+        val step = rate.toDouble() / SAMPLE_RATE
+        for (i in 0 until outFrames) {
+            val pos = i * step
+            val i0 = pos.toInt().coerceAtMost(frames - 1)
+            val i1 = (i0 + 1).coerceAtMost(frames - 1)
+            val frac = pos - i0
+            out[i] = (mono[i0] + (mono[i1] - mono[i0]) * frac).toInt().toShort()
+        }
+        return shortsToBytes(out, 0, outFrames)
+    }
+
+    private fun shortsToBytes(s: ShortArray, from: Int, count: Int): ByteArray {
+        val b = ByteArray(count * 2)
+        for (i in 0 until count) {
+            val v = s[from + i].toInt()
+            b[i * 2] = (v and 0xff).toByte()
+            b[i * 2 + 1] = ((v shr 8) and 0xff).toByte()
+        }
+        return b
+    }
+
+    private fun le16(b: ByteArray, at: Int): Int =
+        (b[at].toInt() and 0xff) or ((b[at + 1].toInt() and 0xff) shl 8)
+
     private fun le32(b: ByteArray, at: Int): Int =
         (b[at].toInt() and 0xff) or ((b[at + 1].toInt() and 0xff) shl 8) or
             ((b[at + 2].toInt() and 0xff) shl 16) or ((b[at + 3].toInt() and 0xff) shl 24)

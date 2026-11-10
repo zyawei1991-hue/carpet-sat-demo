@@ -124,12 +124,12 @@ fun MeTab(
             ToggleRow(
                 "守护服务",
                 status.running,
-                "关掉会断开与圆屏的连接，锁屏后的定时上报也会停",
+                "关掉后圆屏会断开，锁屏时也不再报位置",
             ) { on -> app.setGuard(on) }
-            ToggleRow("允许圆屏接入", flags.acceptScreens, "开起来才能配对圆屏；关掉时白名单外一律拒绝") {
+            ToggleRow("允许圆屏接入", flags.acceptScreens, "开着才能把新圆屏配对进来；关掉后陌生设备一律拒绝") {
                 app.setFlag(flags.copy(acceptScreens = it))
             }
-            ToggleRow("演示模式", flags.demoMode, "把等待和窗口压缩到几分钟内，一次能看完") {
+            ToggleRow("演示模式", flags.demoMode, "把等待和过境都缩到几分钟，演示时一次看完") {
                 app.setFlag(flags.copy(demoMode = it))
             }
         }
@@ -138,11 +138,11 @@ fun MeTab(
             ToggleRow(
                 "哨兵模式",
                 status.snapshot?.sentinel?.armed == true,
-                "静止超阈值上报，动了打点") { app.setSentinel(it) }
+                "车停稳一段时间就报个平安，动过就留一个轨迹点") { app.setSentinel(it) }
             ToggleRow(
                 "电子围栏：西湖景区",
                 status.snapshot?.fence?.active == true,
-                "越界走卫星发一条，不等蜂窝") { app.setFence(it, "西湖景区") }
+                "车开出这个范围就用卫星发一条，不用等手机信号") { app.setFence(it, "西湖景区") }
         }
         AssistantSettings(app)
         RenderCard("usage", scope)
@@ -152,7 +152,7 @@ fun MeTab(
             onClick = onEngineer,
             colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("工程模式（原始数据与开关）") }
+        ) { Text("开发者模式") }
     }
 }
 
@@ -176,13 +176,13 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
 }
 
 /**
- * 主理人的"能碰什么"。首页那张卡只管问与答，这一张管权限：
+ * AI 助手的"能碰什么"。首页那张卡只管问与答，这一张管权限：
  * **档位逐条列出每条技能当前准不准** —— 只写一句"已放开"的话，用户不知道放开的是什么，
  * 出事时也读不出是哪一条越了档（§6 第 3 条要的是能核对，不是能开关）。
  *
  * **拆成两张卡**。上一版这是一张七百多 dp 高的方块：端点、密钥、五档芯片、七行准入清单、
  * 一句脚注全在一个圆角里 —— 那是五张卡挤在一个描边里，「我的」整页读下来只有七个同宽方块，
- * 没有一处告诉用户哪儿换了一件事。现在「主理人与模型」管配置，「它现在会做什么」管清单，
+ * 没有一处告诉用户哪儿换了一件事。现在「AI 助手与模型」管配置，「它现在会做什么」管清单，
  * 中间那道缝就是这两件事的分界。
  */
 @Composable
@@ -191,25 +191,24 @@ private fun AssistantSettings(app: AppRuntime) {
     val granted by app.aiGranted.collectAsState()
     val rows = remember(granted) { app.aiSkills() }
     InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
-        CardTitle("主理人与模型", trailing = if (endpoint.configured) endpoint.model else "只用本机状态作答")
-        ValueRow("端点", endpoint.baseUrl.takeIf { it.isNotBlank() } ?: "没配（只用本机状态）")
-        ValueRow("密钥", if (endpoint.apiKey.isBlank()) "没存" else "已存本机")
+        // 端点与密钥不再摆出来（V1.18）：出包时就配好了，车主没有需要填的东西
+        CardTitle("它能帮到什么程度", trailing = if (endpoint.configured) endpoint.model else "只用手上的信息回答")
         // 档位标题必须大过它管的三枚芯片。之前这里用 11sp 的 SectionLabel，
         // 而下面的芯片是 12.5sp —— 屏幕上是小字在领读，标题在当注脚
-        SectionHead("权限档：${granted.label}", "往右每高一档都更危险")
+        SectionHead("放手交给它多少", "现在停在「${granted.label}」")
         // 五档一行装不下，横向滚的话最后一枚「不可逆动作」只剩半个词 —— 这是权限档，
         // 切掉的那半恰恰是最该看清的一档。折成 3+2，一枚都不缺字
         ChipBand(PermissionTier.entries.map { t ->
             ChipSpec(t.label, selected = t === granted) { app.setAiGranted(t) }
         })
         Text(
-            "密钥只存这台手机。「发求救」不会由对话发出，只会提示你自己去长按。",
+            "「发求救」它不会自己发，只会提醒你长按那颗按钮。",
             style = Type.Caption,
             color = Ink.TextLow,
         )
     }
     InkCard(icon = MIcons.task) {
-        CardTitle("它现在会做什么", trailing = "${rows.count { it.allowed }}/${rows.size} 条放开")
+        CardTitle("这 ${rows.size} 件事它能做吗", trailing = "${rows.count { it.allowed }} 件可以做")
         rows.forEach { r ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -217,9 +216,9 @@ private fun AssistantSettings(app: AppRuntime) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(r.title, style = Type.Body, modifier = Modifier.weight(1f))
-                // 准许的那几条不重复标档位：它们要的都≤上面那个当前档，只有拦下的那条需要说清差在哪
-                if (!r.allowed) Text(r.needs.label, style = Type.Caption, color = Ink.TextLow)
-                Badge(if (r.allowed) "准许" else "拦下", if (r.allowed) Tone.Ok else Tone.Wait)
+                // 放行的那几条不重复标档位：它们要的都≤上面那个当前档，只有拦下的那条需要说清差在哪
+                if (!r.allowed) Text("要「${r.needs.label}」", style = Type.Caption, color = Ink.TextLow)
+                Badge(if (r.allowed) "可以做" else "被拦下", if (r.allowed) Tone.Ok else Tone.Wait)
             }
         }
     }

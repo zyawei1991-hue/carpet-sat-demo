@@ -17,10 +17,10 @@ enum class CardGroup(val label: String, val note: String?) {
     /** 越界、静止、求救 —— 三件事都是"出事了怎么办"，所以是一组 */
     Guard("守护", null),
     Vehicle("车况", null),
-    Satellite("卫星兜底", "蜂窝不通的时候才轮到它"),
+    Satellite("卫星兜底", "手机没信号的时候才轮到它"),
     /**
      * 亲子与健康分开。原来这两堆共用一个 `Family("家人")`，于是家人页分段等于没分：
-     * 管控、成长、AI 育儿、体征、打卡、主理人六张卡挂在同一个标题下面，
+     * 管控、成长、AI 育儿、体征、打卡、AI 助手六张卡挂在同一个标题下面，
      * 而家长找"今天新词"和找"血压"根本不是一件事。
      */
     Kids("亲子陪伴", null),
@@ -41,7 +41,7 @@ object Cards {
             CardDescriptor("link", "链路", CardGroup.Inline, setOf(Capability.SatelliteLink)) { LinkCard(it) },
             CardDescriptor("pass", "下次过境", CardGroup.Satellite, setOf(Capability.Ephemeris)) { PassWindowCard(it) },
             CardDescriptor("terminal", "卫星终端", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TerminalCard(it) },
-            CardDescriptor("queue", "待发队列", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { QueueCard(it) },
+            CardDescriptor("queue", "待发消息", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { QueueCard(it) },
             CardDescriptor("usage", "卫星用量", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { UsageCard(it) },
             CardDescriptor("tpi", "终端位置", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TpiCard(it) },
             CardDescriptor("position", "位置", CardGroup.Guard, setOf(Capability.PositionSource)) { PositionCard(it) },

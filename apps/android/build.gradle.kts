@@ -26,14 +26,36 @@ android {
         // 星历 SDK 要 26（基础通信 SDK 只要 24），装到 24/25 上是 native 库起不来，不是少个功能
         minSdk = 26
         targetSdk = 34
-        versionCode = 11300
-        versionName = "1.13.0"
+        versionCode = 12000
+        versionName = "1.20.0"
 
         // 星历 aar 只带 arm64-v8a 的 libdecodeutil.so。真机都是 arm64，
         // 但别在这里加 abiFilters 之外的假设：换了 SoC 就得回来改
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+
+        // **模型口径烧进包**（V1.18）。首页不再让用户填 Base URL / Key / 模型名：
+        // 出包时就该是能用的那一套。值放在根目录 `local.properties`（gitignore 第 5 行），
+        // 公开仓库里没有这个文件，字段就退成空串 —— 那种构只能走本机规则，但**编得过**。
+        // 密钥因此进得了 APK，这是刻意的取舍：它原本就要落到手机上才能用。
+        val baked = Properties().apply {
+            rootProject.file("local.properties").takeIf { it.exists() }?.let { f ->
+                f.inputStream().use { load(it) }
+            }
+        }
+        fun bakedField(key: String): String =
+            "\"" + (baked.getProperty(key) ?: "").replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        buildConfigField("String", "AI_BASE_URL", bakedField("maomao.baseUrl"))
+        buildConfigField("String", "AI_API_KEY", bakedField("maomao.apiKey"))
+        buildConfigField("String", "AI_MODEL", bakedField("maomao.model"))
+        // Azure Speech F0（D13 的正路）：真·晓伊走公开 REST，不再靠逆向令牌。
+        // key/region 同样只落在 local.properties（gitignore），公开仓库里退成空串，链路自动跳过
+        buildConfigField("String", "AZURE_SPEECH_REGION", bakedField("azure.speechRegion"))
+        buildConfigField("String", "AZURE_SPEECH_KEY", bakedField("azure.speechKey"))
+        // 硅基流动 ASR（手机侧语音输入）：同上只落 local.properties，没配就退成空串，
+        // 麦克风按钮退回"未接"的提示语，链路自动跳过
+        buildConfigField("String", "SILICONFLOW_ASR_KEY", bakedField("siliconflow.asrKey"))
     }
 
     signingConfigs {
@@ -81,6 +103,8 @@ android {
      */
     buildFeatures {
         compose = true
+        // 上面 defaultConfig 里的 buildConfigField 靠它生成 BuildConfig
+        buildConfig = true
     }
 
     composeOptions {

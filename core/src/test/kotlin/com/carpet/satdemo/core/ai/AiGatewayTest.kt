@@ -168,6 +168,206 @@ class AiGatewayTest {
     }
 
     @org.junit.jupiter.api.Test
+    fun `用户抄进来的整条调用地址要收回基址`() {
+        // 2026-11-08 现场填的就是这一条：Responses API 的调用地址被当成 Base URL，
+        // 旧实现拼成 /v1/responses/chat/completions，网关回 404，界面只剩「未接模型」
+        assertEquals("https://api.maomaoai.pro/v1", normalizeBaseUrl("https://api.maomaoai.pro/v1/responses"))
+        assertEquals("https://api.maomaoai.pro/v1", normalizeBaseUrl("https://api.maomaoai.pro/v1/chat/completions"))
+        assertEquals("https://api.maomaoai.pro/v1", normalizeBaseUrl("  https://api.maomaoai.pro/v1/  "))
+        assertEquals("https://x/v1", normalizeBaseUrl("https://x/v1/completions"))
+        // 没写 /v1 的不许猜：那是网关自己的路径口径
+        assertEquals("https://x", normalizeBaseUrl("https://x"))
+        assertEquals("https://api.maomaoai.pro/v1/chat/completions", AiEndpoint("https://api.maomaoai.pro/v1/responses", "k", "m").chatUrl)
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `发不出去时要说得出是哪一种失败`() = runBlocking {
+        val rejected = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro/v1", "k", "m"),
+        ) { _, _, _ -> throw HttpStatusException(404, "Invalid URL") }
+        assertEquals(null, rejected.complete("f", emptyList(), "q"))
+        assertContains(rejected.lastError ?: "", "404")
+        assertContains(rejected.lastError ?: "", "Invalid URL")
+
+        val timeout = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro/v1", "k", "m"),
+        ) { _, _, _ -> throw java.net.SocketTimeoutException("Read timed out") }
+        assertEquals(null, timeout.complete("f", emptyList(), "q"))
+        assertContains(timeout.lastError ?: "", "超时")
+
+        // 网关回 200 但正文不是对话格式（错误页 / 流式残片），原因里要留下它长什么样
+        val html = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro/v1", "k", "m"),
+        ) { _, _, _ -> "<html>bad gateway</html>" }
+        assertEquals(null, html.complete("f", emptyList(), "q"))
+        assertContains(html.lastError ?: "", "不是对话格式")
+        assertContains(html.lastError ?: "", "html")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `网关不认 thinking 时去掉重发而不是整句丢掉`() = runBlocking {
+        var calls = 0
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://x/v1", "k", "m", true),
+        ) { _, body, _ ->
+            calls++
+            if (body.contains("thinking")) throw HttpStatusException(400, "unknown field thinking") else
+                """{"choices":[{"message":{"role":"assistant","content":"关掉思考也能答"}}]}"""
+        }
+        assertEquals("关掉思考也能答", p.complete("f", emptyList(), "q"))
+        assertEquals(2, calls)
+        assertEquals(null, p.lastError)
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `地址少写 v1 时自检会补一次并把正确基址留下来`() = runBlocking {
+        // 2026-11-09：填 https://api.maomaoai.pro（少了 /v1）→ 网关回 200 的 HTML 首页，
+        // 旧实现只会说"不是对话格式"，用户没有任何线索想到是少了三个字符
+        assertEquals(
+            listOf("https://api.maomaoai.pro", "https://api.maomaoai.pro/v1"),
+            baseUrlCandidates("https://api.maomaoai.pro"),
+        )
+        // 已经有路径的（可能是自建网关的 /api）不许再补：那是另一种 404
+        assertEquals(listOf("https://x/v1"), baseUrlCandidates("https://x/v1"))
+        assertEquals(listOf("https://x/api"), baseUrlCandidates("https://x/api"))
+        // 多抄了一层 /v1：直接收成一层。回头再试那条错的两层只是白等一次 404
+        assertEquals(
+            listOf("https://api.maomaoai.pro/v1"),
+            baseUrlCandidates("https://api.maomaoai.pro/v1/v1"),
+        )
+
+        val tried = mutableListOf<String>()
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro", "k", "m"),
+        ) { url, _, _ ->
+            tried += url
+            if (url.startsWith("https://api.maomaoai.pro/chat")) "<html>首页</html>"
+            else """{"choices":[{"message":{"content":"在"}}]}"""
+        }
+        assertEquals("在", p.complete("f", emptyList(), "q"))
+        assertEquals(listOf("https://api.maomaoai.pro/chat/completions", "https://api.maomaoai.pro/v1/chat/completions"), tried)
+        assertEquals("https://api.maomaoai.pro/v1", p.correctedBase)
+        assertEquals(null, p.lastError)
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `超时这类错不换地址再试一遍`() = runBlocking {
+        var calls = 0
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro", "k", "m"),
+        ) { _, _, _ ->
+            calls++
+            throw java.net.SocketTimeoutException("Read timed out")
+        }
+        assertEquals(null, p.complete("f", emptyList(), "q"))
+        // 地址换一种写法也是同一个超时，多试一次只是让用户多等十二秒
+        assertEquals(1, calls)
+        assertContains(p.lastError ?: "", "超时")
+        assertEquals(null, p.correctedBase)
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `只认 Responses 的网关也能接上`() = runBlocking {
+        // 2026-11-09 现场那条能跑通的 curl 打的是 /v1/responses，而 chat/completions 回 404。
+        // 旧实现只会把 404 原样报成"未接模型"，用户换模型名换到天亮也没用
+        val tried = mutableListOf<String>()
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro/v1", "k", "qwen3.8-flash"),
+        ) { url, body, _ ->
+            tried += url
+            if (url.endsWith("/chat/completions")) throw HttpStatusException(404, "not found") else {
+                assertContains(body, "\"instructions\"")
+                assertContains(body, "\"input\"")
+                """{"output":[{"type":"message","content":[{"type":"output_text","text":"响应接口答的"}]}]}"""
+            }
+        }
+        assertEquals("响应接口答的", p.complete("f", emptyList(), "q"))
+        assertEquals(listOf("https://api.maomaoai.pro/v1/chat/completions", "https://api.maomaoai.pro/v1/responses"), tried)
+        assertEquals(null, p.lastError)
+        assertEquals(null, p.correctedBase, "同一基址换了形状，不用改用户的地址")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `400 说 Invalid URL 也算路径不对 会去试 Responses`() = runBlocking {
+        // maomaoai 对没实现的 /chat/completions 回的是 400 + "Invalid URL"，不是 404。
+        // 只认状态码的话这条备份路永远走不到
+        val tried = mutableListOf<String>()
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://api.maomaoai.pro/v1", "k", "qwen3.8-flash"),
+        ) { url, _, _ ->
+            tried += url
+            if (url.endsWith("/chat/completions")) throw HttpStatusException(400, """{"error":{"message":"Invalid URL"}}""") else
+                """{"output_text":"走通了"}"""
+        }
+        assertEquals("走通了", p.complete("f", emptyList(), "q"))
+        assertTrue(tried.last().endsWith("/responses"), "没去试 Responses：$tried")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `密钥失效的 400 不会被当成路径不对`() = runBlocking {
+        var calls = 0
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://x/v1", "k", "m"),
+        ) { _, _, _ ->
+            calls++
+            throw HttpStatusException(401, """{"error":"invalid api key"}""")
+        }
+        assertEquals(null, p.complete("f", emptyList(), "q"))
+        assertEquals(1, calls, "密钥错换接口也是同一个错，多打一发只是白等")
+        assertContains(p.lastError ?: "", "401")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `两条接口都不认时原因里两条都在`() = runBlocking {
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://x/v1", "k", "m"),
+        ) { _, _, _ -> throw HttpStatusException(404, "not found") }
+        assertEquals(null, p.complete("f", emptyList(), "q"))
+        val err = p.lastError ?: ""
+        assertContains(err, "404")
+        assertContains(err, "Responses")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `两条接口都超时就不再换形状白等`() = runBlocking {
+        var calls = 0
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://x/v1", "k", "m"),
+        ) { _, _, _ ->
+            calls++
+            throw java.net.SocketTimeoutException("Read timed out")
+        }
+        assertEquals(null, p.complete("f", emptyList(), "q"))
+        assertEquals(1, calls, "超时不是地址口径问题，换形状只是让用户再等十二秒")
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `Responses 的几种回答形状都认`() {
+        assertEquals("便捷字段", OpenAiCompatProvider.parseResponses("""{"output_text":"便捷字段"}"""))
+        assertEquals(
+            "正式形状",
+            OpenAiCompatProvider.parseResponses(
+                """{"output":[{"type":"reasoning","content":[]},{"type":"message","content":[{"type":"output_text","text":"正式形状"}]}]}""",
+            ),
+        )
+        assertEquals(null, OpenAiCompatProvider.parseResponses("""{"error":"bad"}"""))
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `模型清单只取 id 两种返回形状都认`() {
+        assertEquals(
+            listOf("qwen3.6-flash", "qwen3.8-flash"),
+            OpenAiCompatProvider.parseModels("""{"data":[{"id":"qwen3.8-flash"},{"id":"qwen3.6-flash"}]}"""),
+        )
+        assertEquals(
+            listOf("glm-5-turbo"),
+            OpenAiCompatProvider.parseModels("""{"models":[{"model":"glm-5-turbo"}]}"""),
+        )
+        assertEquals(emptyList(), OpenAiCompatProvider.parseModels("<html>bad gateway</html>"))
+        assertEquals(emptyList(), OpenAiCompatProvider.parseModels("""{"error":"bad key"}"""))
+    }
+
+    @org.junit.jupiter.api.Test
     fun `转义不漏引号也不漏换行`() {
         assertEquals("a\\\"b", OpenAiCompatProvider.escape("a\"b"))
         assertEquals("a\\nb", OpenAiCompatProvider.escape("a\nb"))

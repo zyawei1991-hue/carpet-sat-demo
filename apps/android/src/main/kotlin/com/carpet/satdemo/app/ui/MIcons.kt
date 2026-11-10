@@ -71,7 +71,7 @@ object MIcons {
     val pairing = Icons.AutoMirrored.Outlined.BluetoothSearching
     val pass = Icons.AutoMirrored.Outlined.AltRoute
 
-    /** AI 主理人。Chat=对话，SmartToy=本机规则（不是真模型），VoiceChat=语音，SupportAgent=主动提醒 */
+    /** AI 助手。Chat=对话，SmartToy=本机规则（不是真模型），VoiceChat=语音，SupportAgent=主动提醒 */
     val chat = Icons.AutoMirrored.Outlined.Chat
     val model = Icons.Outlined.SmartToy
     val voice = Icons.Outlined.VoiceChat

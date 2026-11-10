@@ -8,59 +8,91 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.LinkPrimary
 import com.carpet.satdemo.core.protocol.SatPhase
 import com.carpet.satdemo.core.protocol.ScreenPage
+import com.carpet.satdemo.core.protocol.SosLevel
 import com.carpet.satdemo.core.protocol.StatePayload
 import com.carpet.satdemo.core.protocol.UiCard
+import com.carpet.satdemo.core.protocol.UiEmotion
+import kotlinx.coroutines.delay
 
 /**
- * 圆屏镜像：**这一格画的就是手机每 1 Hz 推给屏的那一帧**，不是又写一套 UI。
+ * 圆屏镜像：**这一格画的就是那块屏此刻在画的东西**。
  *
- * 为什么手机上要能看见屏：这套 demo 的主场景是"圆屏连上了、能跟它说话"，而在此之前
- * 手机上关于屏的全部信息是"1 台在线"四个字 —— 连上了也不知道连上了什么、屏上在显示什么。
- * 屏不在手边（在车上、在支架上）的时候，这一格就是那块屏。
+ * 屏自己报页（`page_report`），所以这里不猜：它报哪一页，就按固件那张版式把同一页画出来
+ * （L1 场景宫格 / L2 场景页 / 脸那一格）。屏没报页（老固件）或没接入时才退回上一版那张
+ * 示意图 —— 那时候圆里是手机凭空算的，底下那行必须自己说清楚。
  *
- * 版式抄自展示端那一侧的绘制（`simulator/screen.html` 是同一口径的冒充件）：
- * 外圈链路、内圈卫星相位、圆心一摞状态、底下那段空白是触摸区。
- * **只有字号不跟着缩** —— 466px 缩到 224dp，字要跟着缩就只剩一块好看的黑圆，那就不必读了。
+ * 版式尺寸抄的是 `firmware/screen/muse/muse-carpet.patch`：面板 466 px、列宽 300、
+ * 行高 52、格子 116、字号 28/22/30。这里按 `直径 / 466` 等比缩，**不另起一套数** ——
+ * 两套数一改就会对不上，而这一格存在的理由恰恰是"手机上看到的和屏上一致"。
  *
- * 两条刻意的偏离，都不是手滑：
- *  - **颜色走本端这一套 token**（蜂窝绿、卫星蓝、告警红）。屏那侧卫星是琥珀，同语义两个色相，
- *    要统一得连着固件和 §5.2 那张色表一起改，不能在这一格里私加一支琥珀绕过 [Tone]。
- *  - **屏上那整句失败文案不进圆**（星历那句）。圆里只放词和数，句子归下面的卡 ——
- *    128dp 宽的弦上放长话只会折成三行，而这块镜像的用途是"抬一眼"，不是读说明。
+ * 两处刻意的偏离：
+ *  - **颜色走本端 token**（蓝 = 动作/强调、绿 = 正常、琥珀 = 等待、灰 = 结构）。
+ *    固件那套紫色强调/橙色链路其实很好认，但 App 里已经有 [Tone] 这一支色表，
+ *    在这一格里私加紫/橙，等于让"红=出事、绿=正常"这条再裂一条缝。
+ *  - **屏上的整句失败文案不进圆**（星历那句）。圆里只放词和数，句子归下面的卡。
  *
- * **没有屏接入时这一帧是"演"的，界面必须自己承认**（V1.10.9）：上一版只把外环打灰，
- * 可圆里照旧亮着一屏彩色数字、倒计时还在 1Hz 往下跳 —— 那读起来就是"这块屏亮着"，
- * 而它其实是手机凭空算出来的。所以未接入时：屏底从真黑退到 [Ink.Sunk]（没点亮的面板），
- * 内环、卫星名、数字全部退成结构灰。语义色只留给"真的有屏在看这一帧"的时候用。
+ * 没屏接入时（或接入点起不来）屏底从真黑退到 [Ink.Sunk]，内环和字一起退成结构灰：
+ * 上一版圆里照旧亮着彩色数字、倒计时还在跳，读起来就是"这块屏亮着"，而它其实没亮。
  */
+
+/**
+ * 屏收到的最后一帧下行对话。**屏上"手机在说 · 本地规则"那一行只由收到的帧决定**，
+ * 所以手机这边也要照收帧的时点记，而不是照自己说了什么 —— 问句在屏起头时是不回镜的，
+ * 拿"我说过什么"去算会和屏对不上。
+ *
+ * [source] 用线上的值：`DialogPayload.source` 等于默认 `local_rule` 时不上线
+ * （[com.carpet.satdemo.core.protocol.ScreenLink] 的 `encodeDefaults = false`），
+ * 屏那边就只画"手机在说"四个字，这里也照这个规则省掉尾巴。
+ */
+data class ScreenDialogLine(val source: DialogSource, val atMs: Long)
+
+/** 固件那句对话只挂 5 秒（`age_s > 5` 就清） */
+private const val DIALOG_HOLD_MS = 5_000L
+
+/** 固件面板的物理尺寸，缩放的分母 */
+private const val PANEL_PX = 466f
+
 @Composable
 fun ScreenMirror(
     snap: StatePayload?,
     online: Boolean,
     modifier: Modifier = Modifier,
     diameter: Dp = 224.dp,
+    /** 屏自己报上来的那一页；null = 没报（老固件）或没接入 */
+    page: ScreenPage? = null,
+    /** 屏收到的最后一帧下行对话；用来画条目行和"在画"旁边那句 */
+    line: ScreenDialogLine? = null,
 ) {
     val reduce = LocalReduceMotion.current
     val sat = snap?.sat
@@ -68,13 +100,24 @@ fun ScreenMirror(
     val left = sat?.nextPassInS
     val phase = sat?.phase ?: SatPhase.idle
 
-    // 外圈 = 主链路。没屏接入、或者还没算出状态时打灰：灰在这套原语里只有一个意思 —— 没有这一帧的观众
+    // 对话只挂 5 秒：链路断了、两边不说话了，这一行不该一直写着"手机在说"
+    val dialogAlive = remember(line?.atMs) { mutableStateOf(line != null) }
+    LaunchedEffect(line?.atMs) {
+        if (line != null) {
+            delay(DIALOG_HOLD_MS)
+            dialogAlive.value = false
+        }
+    }
+    val freshLine = if (dialogAlive.value) line else null
+
+    // 能按屏报的页画，才叫镜像。屏没报页 / 没接入 / 接入点起不来，圆里只能是示意图
+    val mirroringPage = if (online && snap != null) page else null
+
     val linkColor by animateColorAsState(
         mirrorLinkColor(snap, online),
         Motion.colorSpec(reduce),
         label = "mirrorLink",
     )
-    // 内圈 = 卫星相位走到哪儿了。这几档填充比是抄展示端 draw() 的，两边不许各调一套
     val fill by animateFloatAsState(
         when (phase) {
             SatPhase.idle -> 0f
@@ -93,14 +136,13 @@ fun ScreenMirror(
         Motion.colorSpec(reduce),
         label = "mirrorPhase",
     )
+    val scale = diameter.value / PANEL_PX
 
     Box(modifier = modifier.size(diameter), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.matchParentSize()) {
             val hub = Offset(size.width / 2f, size.height / 2f)
             val r0 = size.minDimension / 2f
-            // 屏本体。接入时是一枚真黑（OLED 熄了就是黑的，它坐在 #212834 的卡底上，
-            // 不用画边框就读得出"那是一块屏"）；**没屏接入时退到 [Ink.Sunk]** ——
-            // 画一块纯黑的"亮着的屏"是这一格里最容易读假的一处
+            // OLED 熄了就是黑的；没接入时退到 [Ink.Sunk] —— 画一块纯黑的"亮着的屏"是这一格里最容易读假的一处
             drawCircle(if (online) Oled else Ink.Sunk, radius = r0 - 1.6.dp.toPx(), center = hub)
             drawCircle(
                 color = Ink.Outline,
@@ -108,95 +150,413 @@ fun ScreenMirror(
                 center = hub,
                 style = Stroke(width = 1.6.dp.toPx()),
             )
-            val linkW = 3.dp.toPx()
-            val linkR = r0 - 8.dp.toPx()
-            val linkBox = Size(linkR * 2f, linkR * 2f)
-            val linkAt = Offset(hub.x - linkR, hub.y - linkR)
-            // 底部那段缺口是触摸区（屏上那颗"按住说一句"）。它不表态，所以永远是结构灰
-            drawArc(
-                color = Ink.Track,
-                startAngle = 140.4f,
-                sweepAngle = 79.2f,
-                useCenter = false,
-                topLeft = linkAt,
-                size = linkBox,
-                style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round),
-            )
-            // 链路环：从左上绕到右下的那 280.8°
-            drawArc(
-                color = linkColor,
-                startAngle = -140.4f,
-                sweepAngle = 280.8f,
-                useCenter = false,
-                topLeft = linkAt,
-                size = linkBox,
-                style = Stroke(width = linkW, cap = StrokeCap.Round),
-            )
-            if (snap != null && online && snap.link.primary === LinkPrimary.sat) {
-                // 卫星为主时把缺口也接上，半透明 —— 屏那侧这条说的是"整圈都在卫星上"
+            // 两圈弧只在画示意图的时候有：屏真的报了页，它画的是那一页，不是这两个环
+            if (mirroringPage == null) {
+                val linkW = 3.dp.toPx()
+                val linkR = r0 - 8.dp.toPx()
+                val linkBox = Size(linkR * 2f, linkR * 2f)
+                val linkAt = Offset(hub.x - linkR, hub.y - linkR)
                 drawArc(
-                    color = linkColor.copy(alpha = 0.55f),
+                    color = Ink.Track,
                     startAngle = 140.4f,
-                    sweepAngle = 39.2f,
+                    sweepAngle = 79.2f,
+                    useCenter = false,
+                    topLeft = linkAt,
+                    size = linkBox,
+                    style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawArc(
+                    color = linkColor,
+                    startAngle = -140.4f,
+                    sweepAngle = 280.8f,
                     useCenter = false,
                     topLeft = linkAt,
                     size = linkBox,
                     style = Stroke(width = linkW, cap = StrokeCap.Round),
                 )
-            }
-            val phaseW = 4.dp.toPx()
-            val phaseR = r0 - 20.dp.toPx()
-            val phaseBox = Size(phaseR * 2f, phaseR * 2f)
-            val phaseAt = Offset(hub.x - phaseR, hub.y - phaseR)
-            drawArc(
-                color = Ink.Track,
-                startAngle = 0f,
-                sweepAngle = 360f,
-                useCenter = false,
-                topLeft = phaseAt,
-                size = phaseBox,
-                style = Stroke(width = phaseW),
-            )
-            if (fill > 0f) {
+                if (snap != null && online && snap.link.primary === LinkPrimary.sat) {
+                    drawArc(
+                        color = linkColor.copy(alpha = 0.55f),
+                        startAngle = 140.4f,
+                        sweepAngle = 39.2f,
+                        useCenter = false,
+                        topLeft = linkAt,
+                        size = linkBox,
+                        style = Stroke(width = linkW, cap = StrokeCap.Round),
+                    )
+                }
+                val phaseW = 4.dp.toPx()
+                val phaseR = r0 - 20.dp.toPx()
+                val phaseBox = Size(phaseR * 2f, phaseR * 2f)
+                val phaseAt = Offset(hub.x - phaseR, hub.y - phaseR)
                 drawArc(
-                    color = phaseColor,
-                    startAngle = -90f,
-                    sweepAngle = 360f * fill,
+                    color = Ink.Track,
+                    startAngle = 0f,
+                    sweepAngle = 360f,
                     useCenter = false,
                     topLeft = phaseAt,
                     size = phaseBox,
-                    style = Stroke(width = phaseW, cap = StrokeCap.Round),
+                    style = Stroke(width = phaseW),
                 )
+                if (fill > 0f) {
+                    drawArc(
+                        color = phaseColor,
+                        startAngle = -90f,
+                        sweepAngle = 360f * fill,
+                        useCenter = false,
+                        topLeft = phaseAt,
+                        size = phaseBox,
+                        style = Stroke(width = phaseW, cap = StrokeCap.Round),
+                    )
+                }
             }
         }
 
-        if (snap == null) {
-            // 首帧：五条垫的就是最终那五行字的形状和高度。少一条，真值落地时整摞字就往上一跳
-            Column(
-                modifier = Modifier.width(diameter * 0.60f),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(Grid.x4),
-            ) {
-                SkeletonBar(width = 56.dp, height = 11.dp)
-                SkeletonBar(width = 84.dp, height = 15.dp)
-                SkeletonBar(width = 64.dp, height = 24.dp)
-                SkeletonBar(width = 96.dp, height = 13.dp)
-                SkeletonBar(width = 104.dp, height = 11.dp)
+        val ui = snap?.ui
+        when {
+            snap == null -> SkeletonColumn(diameter)
+            mirroringPage != null -> ScreenPageView(mirroringPage, snap, freshLine, scale, diameter, online)
+            ui?.card == UiCard.emotion -> PixelAvatar(
+                emotion = ui.emotion,
+                diameter = diameter * 0.62f,
+                live = online,
+            )
+            else -> MirrorText(snap, moduleOff, left, diameter, online)
+        }
+    }
+}
+
+/** 屏真的报了页：画那一页。脸那一格归 Muse 自己，这边用同一张像素脸顶上 */
+@Composable
+private fun ScreenPageView(
+    page: ScreenPage,
+    snap: StatePayload,
+    line: ScreenDialogLine?,
+    scale: Float,
+    diameter: Dp,
+    live: Boolean,
+) {
+    when (page) {
+        ScreenPage.face -> PixelAvatar(
+            emotion = snap.ui?.emotion,
+            diameter = diameter * 0.62f,
+            live = live,
+        )
+        ScreenPage.picker -> PickerPage(scale, live)
+        // 数字分身这一页屏上画的是那张像素脸（脸那一格归 Muse，页里只有答句/情绪两行）。
+        // 镜像里两行字读不出"分身"，直接拿同一张像素脸顶上，情绪跟着 ui.emotion 走。
+        ScreenPage.avatar -> PixelAvatar(
+            emotion = snap.ui?.emotion,
+            diameter = diameter * 0.62f,
+            live = live,
+        )
+        else -> ScenePage(page, snap, line, scale, live)
+    }
+}
+
+/** 固件字号：条目名/标题 28、按钮/值/副行 22、宫格那颗字 30 */
+private fun big(scale: Float, color: Color) = TextStyle(
+    fontSize = (28 * scale).sp,
+    lineHeight = (34 * scale).sp,
+    fontWeight = FontWeight.Medium,
+    color = color,
+)
+
+private fun small(scale: Float, color: Color) = TextStyle(
+    fontSize = (22 * scale).sp,
+    lineHeight = (26 * scale).sp,
+    color = color,
+)
+
+/** 一列：宽 300、按内容长、在圆里居中（固件 `make_col`） */
+@Composable
+private fun ScenePage(
+    page: ScreenPage,
+    snap: StatePayload,
+    line: ScreenDialogLine?,
+    scale: Float,
+    live: Boolean,
+) {
+    val colW = (300 * scale).dp
+    val worried = snap.ui?.card == UiCard.maint && snap.ui?.emotion == UiEmotion.worried
+    val rows = pageRows(page)
+    Column(
+        modifier = Modifier.width(colW),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy((6 * scale).dp),
+    ) {
+        Pill("返回", colW, 44 * scale, small(scale, Ink.Sat))
+        Band(colW, 34 * scale) { Text(pageTitle(page), style = big(scale, Ink.TextHigh), maxLines = 1) }
+        rows.forEach { row ->
+            RowCard(
+                name = row.first,
+                value = rowValue(row.second, snap, line),
+                scale = scale,
+                valueColor = rowColor(row.second, snap, live),
+                dot = worried && (row.second == Field.DIALOG || row.second == Field.EMOTION),
+            )
+        }
+        when {
+            page == ScreenPage.gallery -> Band(colW, 26 * scale) {
+                Text(GALLERY_NOTE, style = small(scale, Ink.TextLow), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-        } else {
-            val ui = snap.ui
-            if (ui?.card == UiCard.emotion) {
-                // 屏正在演那张脸的时候，手机这块镜像不许还画着卫星那五行字：
-                // 两边看的是同一帧，画成两件事就是骗人。这也是 App 第一次把 ui.emotion 画出来
-                PixelAvatar(
-                    emotion = ui.emotion,
-                    diameter = diameter * 0.62f,
-                    live = online,
+            pageCardBar(page) -> Band(colW, 26 * scale) {
+                Text(
+                    "在画 ${snap.ui?.card?.let(::cardCn) ?: "—"}",
+                    style = small(scale, if (live) Ink.TextHigh else Ink.TextLow),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-            } else {
-                MirrorText(snap, moduleOff, left, diameter, online)
             }
         }
+        if (pageCardBar(page)) {
+            Row(
+                modifier = Modifier.width(colW),
+                horizontalArrangement = Arrangement.spacedBy((12 * scale).dp),
+            ) {
+                listOf("上一张", "下一张", "交回").forEach {
+                    Pill(it, (92 * scale).dp, 44 * scale, small(scale, Ink.Sat))
+                }
+            }
+        }
+    }
+}
+
+/** 固件 `build_picker`：一行三个、116 方卡、字是实色、底托只有 20%（没接的那格 10%） */
+@Composable
+private fun PickerPage(scale: Float, live: Boolean) {
+    val gridW = (364 * scale).dp
+    val gap = (8 * scale).dp
+    Column(
+        modifier = Modifier.width(gridW),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Band(gridW, 26 * scale) {
+            Text(
+                if (live) "已接入" else "未接入",
+                style = small(scale, if (live) Ink.Sat else Ink.Wait),
+                maxLines = 1,
+            )
+        }
+        Spacer(Modifier.height((35 * scale).dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            PickerCell("车载", "车", Ink.Sat, dim = false, scale = scale)
+            PickerCell("亲子", "亲", Ink.Ok, dim = false, scale = scale)
+            PickerCell("数字分身", "分", Ink.Sat, dim = false, scale = scale)
+        }
+        Spacer(Modifier.height(gap))
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            PickerCell("时钟", "钟", Ink.Wait, dim = false, scale = scale)
+            PickerCell("图片播放", "图", Ink.TextLow, dim = true, scale = scale)
+        }
+        Spacer(Modifier.height((9 * scale).dp))
+        Pill("返回", (300 * scale).dp, 44 * scale, small(scale, Ink.Sat))
+    }
+}
+
+@Composable
+private fun PickerCell(name: String, glyph: String, hue: Color, dim: Boolean, scale: Float) {
+    Box(
+        modifier = Modifier
+            .size((116 * scale).dp)
+            .clip(RoundedCornerShape((26 * scale).dp))
+            .background(Ink.Card),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = (12 * scale).dp)
+                .size((56 * scale).dp)
+                .clip(CircleShape)
+                .background(hue.copy(alpha = if (dim) 0.10f else 0.20f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(glyph, fontSize = (30 * scale).sp, color = hue, maxLines = 1)
+        }
+        Text(
+            name,
+            style = small(scale, if (dim) Ink.TextLow else Ink.TextHigh),
+            modifier = Modifier.padding(top = (78 * scale).dp),
+            maxLines = 1,
+        )
+    }
+}
+
+/** 条目行：名实色、值吃满剩下的宽右对齐并省略号、行首那枚琥珀点只在养护到点时亮 */
+@Composable
+private fun RowCard(
+    name: String,
+    value: String,
+    scale: Float,
+    valueColor: Color,
+    dot: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .width((300 * scale).dp)
+            .height((52 * scale).dp)
+            .clip(RoundedCornerShape((18 * scale).dp))
+            .background(Ink.Card)
+            .padding(horizontal = (16 * scale).dp),
+        horizontalArrangement = Arrangement.spacedBy((12 * scale).dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(name, style = big(scale, Ink.TextHigh), maxLines = 1)
+        if (dot) {
+            Box(Modifier.size((12 * scale).dp).clip(CircleShape).background(Ink.Wait))
+        }
+        Text(
+            value,
+            style = small(scale, valueColor),
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 定高条：标题和副行借它，免得 label 自己长高把列顶歪（固件 `make_band`） */
+@Composable
+private fun Band(widthDp: Dp, heightDp: Float, content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier.width(widthDp).height(heightDp.dp),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+@Composable
+private fun Pill(label: String, widthDp: Dp, heightDp: Float, style: TextStyle) {
+    Box(
+        modifier = Modifier
+            .width(widthDp)
+            .height(heightDp.dp)
+            .clip(RoundedCornerShape((18 * heightDp / 44f).dp))
+            .background(Ink.Card),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = style, maxLines = 1)
+    }
+}
+
+/** 行里装的是契约的哪一项（固件 `F_*`） */
+private enum class Field { SAT, DIALOG, SOS, CARD, EMOTION, NONE }
+
+private fun pageRows(page: ScreenPage): List<Pair<String, Field>> = when (page) {
+    ScreenPage.vehicle -> listOf("卫星" to Field.SAT, "对话" to Field.DIALOG, "呼救" to Field.SOS)
+    ScreenPage.kids -> listOf("对话" to Field.DIALOG, "过境" to Field.SAT, "安全" to Field.SOS)
+    ScreenPage.avatar -> listOf("答句" to Field.DIALOG, "情绪" to Field.EMOTION)
+    ScreenPage.clock -> listOf("钟面" to Field.CARD)
+    ScreenPage.gallery -> listOf("图片" to Field.NONE)
+    else -> emptyList()
+}
+
+private fun pageTitle(page: ScreenPage): String = when (page) {
+    ScreenPage.vehicle -> "车载"
+    ScreenPage.kids -> "亲子"
+    ScreenPage.avatar -> "数字分身"
+    ScreenPage.clock -> "时钟"
+    ScreenPage.gallery -> "图片播放"
+    else -> ""
+}
+
+private fun pageCardBar(page: ScreenPage): Boolean = page == ScreenPage.vehicle || page == ScreenPage.kids
+
+private const val GALLERY_NOTE = "还没接上 · 不放假数据"
+
+private fun rowValue(field: Field, snap: StatePayload, line: ScreenDialogLine?): String = when (field) {
+    Field.SAT -> satText(snap)
+    Field.DIALOG -> dialogText(line)
+    Field.SOS -> sosCn(snap.sos.level)
+    Field.CARD -> snap.ui?.card?.let(::cardCn) ?: "—"
+    Field.EMOTION -> snap.ui?.emotion?.let(::emotionCn) ?: "中性"
+    Field.NONE -> "还没接"
+}
+
+private fun rowColor(field: Field, snap: StatePayload, live: Boolean): Color = when {
+    // 只有"不正常"的呼救抢强调色；正常那一值不该一直晃人眼（固件 `field_color`）
+    field == Field.SOS && snap.sos.level != SosLevel.normal -> Ink.Sat
+    live -> Ink.TextHigh
+    else -> Ink.TextLow
+}
+
+/** `"已锁定 下次3:05"`：倒计时是数字且 ≥0 才拼；否则只写相位 */
+private fun satText(snap: StatePayload): String {
+    val cn = satPhaseCn(snap.sat.phase)
+    val left = snap.sat.nextPassInS ?: return cn
+    if (left < 0) return cn
+    return "%s 下次%d:%02d".format(cn, left / 60, left % 60)
+}
+
+private fun dialogText(line: ScreenDialogLine?): String {
+    if (line == null) return "没人说话"
+    // source 等于契约默认值 local_rule 时不上线，屏上也就只剩"手机在说"
+    if (line.source == DialogSource.local_rule) return "手机在说"
+    return "手机在说 · ${dialogSrcCn(line.source)}"
+}
+
+/** 固件那张表里没有 muse_cloud → 落"未知"（`kv_lookup` 的兜底），这里照抄 */
+private fun dialogSrcCn(src: DialogSource): String = when (src) {
+    DialogSource.asr -> "你说的"
+    DialogSource.local_rule -> "本地规则"
+    DialogSource.model -> "模型答的"
+    DialogSource.local_fallback -> "兜底话术"
+    DialogSource.denied -> "被拦住"
+    DialogSource.xiaozhi_cloud -> "小智云"
+    DialogSource.muse_cloud -> "未知"
+}
+
+/** 固件的 SAT_PHASE；和 App 卡片正文那套措辞故意不是同一串 —— 屏上就印这几个字 */
+private fun satPhaseCn(phase: SatPhase): String = when (phase) {
+    SatPhase.idle -> "空闲"
+    SatPhase.searching -> "找星"
+    SatPhase.locked -> "已锁定"
+    SatPhase.tx_pending -> "发送中"
+    SatPhase.tx_ok -> "星上已应答"
+    SatPhase.tx_fail -> "发送失败"
+    SatPhase.tx_no_ack -> "无回执"
+}
+
+private fun sosCn(level: SosLevel): String = when (level) {
+    SosLevel.normal -> "正常"
+    SosLevel.armed -> "待命"
+    SosLevel.pending -> "待发送"
+    SosLevel.sent -> "已发出"
+    SosLevel.acked -> "已确认"
+}
+
+private fun cardCn(card: UiCard): String = when (card) {
+    UiCard.status -> "状态卡"
+    UiCard.sat -> "卫星卡"
+    UiCard.dialog -> "对话卡"
+    UiCard.emotion -> "表情卡"
+    UiCard.clock -> "钟面"
+    UiCard.maint -> "养车卡"
+}
+
+private fun emotionCn(emotion: UiEmotion): String = when (emotion) {
+    UiEmotion.neutral -> "中性"
+    UiEmotion.happy -> "开心"
+    UiEmotion.excited -> "兴奋"
+    UiEmotion.sad -> "难过"
+    UiEmotion.worried -> "担心"
+    UiEmotion.sleepy -> "犯困"
+    UiEmotion.thinking -> "思考"
+}
+
+@Composable
+private fun SkeletonColumn(diameter: Dp) {
+    // 首帧：五条垫的就是最终那五行字的形状和高度。少一条，真值落地时整摞字就往上一跳
+    Column(
+        modifier = Modifier.width(diameter * 0.60f),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Grid.x4),
+    ) {
+        SkeletonBar(width = 56.dp, height = 11.dp)
+        SkeletonBar(width = 84.dp, height = 15.dp)
+        SkeletonBar(width = 64.dp, height = 24.dp)
+        SkeletonBar(width = 96.dp, height = 13.dp)
+        SkeletonBar(width = 104.dp, height = 11.dp)
     }
 }
 
@@ -215,7 +575,7 @@ internal fun mirrorPhaseColor(phase: SatPhase, online: Boolean): Color = when {
 }
 
 /**
- * 圆里那一摞字。**宽 = 直径的 0.60**：最宽那行（坐标）落在离圆心最远的高度上，
+ * 圆里那一摞字（示意图）。**宽 = 直径的 0.60**：最宽那行（坐标）落在离圆心最远的高度上，
  * 那个高度的弦长就这么多，再宽一点字尾就被相位环切掉。
  * 每行 maxLines=1：这一格宁可裁，也不能折行把圆撑破。
  *
@@ -297,12 +657,11 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
 }
 
 /**
- * 圆底下那两行。
+ * 圆底下那几行。
  *
- * 第一行是**图例**：外环 = 链路、内环 = 过境相位，这是展示端固件的几何，可手机上此前一个字没说，
- * 两圈快满的弧第一次看只会读成"两个都在跑"。颜色直接复用 [mirrorLinkColor] / [mirrorPhaseColor] ——
- * 图例和环必须是同一支色，否则图例就成了装饰。
- * 第二行只回答一件事：这一帧现在有没有人在看。几台是卡标题右边那格的活，这里不重复。
+ * **两种真相只能有一种说法**：屏报了页就把那一页的页名写出来（"屏上此刻就是这一页"）；
+ * 没报页就是示意，图例（外环链路 / 内环过境）也只在示意的时候有意义 ——
+ * 屏真画着场景页的时候它没有这两圈弧，配一条图例等于在解释不存在的东西。
  */
 @Composable
 fun MirrorCaption(
@@ -312,13 +671,16 @@ fun MirrorCaption(
     page: ScreenPage? = null,
     modifier: Modifier = Modifier,
 ) {
+    val mirroring = serverError == null && online && snap != null && page != null
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            LegendDot(mirrorLinkColor(snap, online), "链路")
-            LegendDot(mirrorPhaseColor(snap?.sat?.phase ?: SatPhase.idle, online), "过境")
+        if (!mirroring) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LegendDot(mirrorLinkColor(snap, online), "信号")
+                LegendDot(mirrorPhaseColor(snap?.sat?.phase ?: SatPhase.idle, online), "卫星")
+            }
         }
         Row(
             modifier = Modifier.padding(top = Grid.x4),
@@ -328,25 +690,15 @@ fun MirrorCaption(
             Dot(if (serverError != null) Tone.Alert else if (online) Tone.Ok else Tone.Neutral)
             Text(
                 when {
-                    serverError != null -> "接入点起不来，这一帧还没地方推"
-                    online -> "屏上此刻就是这一帧"
+                    serverError != null -> "圆屏这一帧还没接上，稍等一下"
+                    mirroring -> "屏上此刻就是这一页 · ${screenPageLabel(page!!)}"
+                    online -> "屏还没说自己在哪一页，圆里先按默认画"
                     // 不再写"还没有屏接入"：卡标题右边那格已经写着"未连接"，下面那行又给做法，
                     // 同一屏三次陈述同一个负状态，第三句就是噪音。这句只负责承认数据来源
-                    else -> "这一帧是手机凭空算的 · 示意数据"
+                    else -> "这是手机上的预览，还没连屏"
                 },
                 style = Type.Caption,
                 color = if (serverError != null) Ink.Alert else Ink.TextMid,
-            )
-        }
-        // **哪一页归屏自己定**，所以这一行是屏报上来的原话，不是手机算出来的（见 protocol/screen-link.md
-        // 「页面归屏、内容归手机」）。连着屏却没报页 = 老固件，那时候要写的是"它没报"，
-        // 而不是拿上一屏的页或者圆里那张卡反推一个位置 —— 这块镜像唯一的价值就是不替屏说话
-        if (online && serverError == null) {
-            Text(
-                page?.let { "屏上现在 · ${screenPageLabel(it)}" } ?: "屏没报它在哪一页",
-                style = Type.Caption,
-                color = if (page == null) Ink.TextLow else Ink.TextMid,
-                modifier = Modifier.padding(top = Grid.x4),
             )
         }
     }

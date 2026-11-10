@@ -38,6 +38,7 @@ import com.carpet.satdemo.core.protocol.UiState
 import com.carpet.satdemo.core.protocol.hexToBytes
 import com.carpet.satdemo.core.screen.CardPolicy
 import com.carpet.satdemo.core.screen.ScreenLinkServer
+import java.net.BindException
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.UUID
@@ -67,7 +68,7 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class DemoRuntime(
     val engine: DemoEngine = DemoEngine(SimulatedModem(), DEFAULT_OWNER_ID),
-    val server: ScreenLinkServer = ScreenLinkServer(),
+    server: ScreenLinkServer = ScreenLinkServer(),
     private val clockMs: () -> Long = System::currentTimeMillis,
     /** 心跳间隔（tick 数，1 tick = 1 秒）。演示时调小，否则观众等不到一条心跳 */
     private val heartbeatEvery: Int = 60,
@@ -77,6 +78,19 @@ class DemoRuntime(
      */
     val devices: DeviceBus = DeviceBus(),
 ) {
+    /**
+     * 每次 [start] 都换一个新对象。Java-WebSocket 1.5.6 的 `start()` 只看 `selectorthread`
+     * 是不是 null，而 `stop()` 不清它 —— 同一个实例第二次起永远抛 `can only be started once.`，
+     * 而这正是「停止演示 → 再开始演示」在 App 里走的那条路。
+     * 构造参数保留下来是为了单测/彩排台能注入，但**每次 start 都会被覆盖**。
+     */
+    var server: ScreenLinkServer = server
+        private set
+
+    /** stop() 之后、下一次 start() 之前，别让旧对象迟到的关闭异常重新点亮红字 */
+    @Volatile
+    private var stopping = false
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var loop: Job? = null
 
@@ -119,6 +133,12 @@ class DemoRuntime(
         val phase: LinkPhase = LinkPhase.CELL,
         val snapshot: StatePayload? = null,
         val clients: Int = 0,
+        /**
+         * 这个接入点起来之后，**有没有任何一条接入尝试到过这台手机**（连上就被挡下的也算）。
+         * 和 [clients] 分开记的理由见 [ScreenLinkServer.attemptCount]：
+         * 0 台在线 + 0 次尝试 = 屏根本没进这张网；有尝试 = 屏到了但被挡，原因在日志里。
+         */
+        val attempts: Int = 0,
         val lastSos: SatResult? = null,
         val localIp: String? = null,
         /** 展示端接入点没起来的原因。非空 = 1Hz 在跑但屏连不上，首页必须说实话 */
@@ -139,6 +159,15 @@ class DemoRuntime(
      */
     fun start(autoTick: Boolean = true) {
         if (loop != null) return
+        stopping = false
+        // 换对象而不是重开：旧实例的 selectorthread 永远不清，start() 必抛。
+        // 白名单和「允许圆屏接入」是这个对象的现场状态，换的时候必须带过去，
+        // 否则第二次开始演示，配好的屏会被 unknown screen / demo lock 挡在门外
+        val previous = server
+        server = ScreenLinkServer(previous.allowed().toMutableSet()).also { next ->
+            next.accepting = previous.accepting
+            next.onServerError = { ex -> reportServerFailure(next, ex) }
+        }
         engine.modem.attachPassthrough(passthrough)
         server.onMessage = { msg ->
             if (msg.t == MsgType.command) {
@@ -152,7 +181,7 @@ class DemoRuntime(
                 onCommand(msg)
             }
             if (msg.t == MsgType.dialog) onDialog(msg)
-            _status.value = _status.value.copy(clients = server.clientCount)
+            _status.value = _status.value.copy(clients = server.clientCount, attempts = server.attemptCount)
         }
         server.onHello = hello@{ msg ->
             // 谈得下来 = 双方版本有交集。v1 的屏**不是**"契约不匹配"，它只是不能说话 ——
@@ -204,6 +233,9 @@ class DemoRuntime(
         }
         // 屏发来的帧解不开时，原文进日志。明天烧固件那天，这一行就是唯一的线索
         server.onContractError = { raw, why -> log("展示端帧解不开：$why｜${raw.take(200)}") }
+        // 到了门口被挡下的也要有一行：现场「屏连着热点但 App 不认」最需要的就是这一句 ——
+        // 它证明包到过手机，问题在准入不在网络
+        server.onRejected = { why -> log("展示端接入被挡：$why") }
         // 往死连接上写会抛。不记这一句，"屏掉线之后另一块屏也不更新了"就只能靠猜
         server.onSendError = { why -> log("展示端写入失败，已断开这条连接：$why") }
         devices.subscribe { _devices.value = it }
@@ -218,19 +250,52 @@ class DemoRuntime(
         _status.value = _status.value.copy(
             running = true,
             localIp = lan?.host,
-            serverError = bindFail?.let { it.message ?: it.javaClass.simpleName },
+            serverError = bindFail?.let { serverFailureLine(it) },
         )
         if (bindFail == null) {
             // 接口名要一起进日志：手机同时开着 Wi-Fi 和热点时，"报哪个地址"就是现场最难查的那件事
             log("展示端接入点 ws://${lan?.host ?: "没找到"}:${ScreenLinkServer.PORT}" +
                 (lan?.let { "（取自 ${it.iface}）" } ?: " —— 手机没连 Wi-Fi 也没开热点，屏找不到这条路"))
         } else {
-            log("展示端接入点起不来：${_status.value.serverError} —— 1Hz 照跑，但屏连不上")
+            log(
+                "展示端接入点起不来：${_status.value.serverError}" +
+                    "（${bindFail.message ?: bindFail.javaClass.simpleName}）—— 1Hz 照跑，但屏连不上",
+            )
         }
         if (autoTick) loop = scope.launch { tickForever() }
     }
 
+    /**
+     * 服务端级异常是**异步**来的：Java-WebSocket 的 bind 在选择线程里做，
+     * `start()` 当场返回之后才把 `BindException` 交给 `onError(null, ex)`。
+     * 不接这一句，端口被占时首页会一直显示"服务运行中"，屏那边则每 11 秒重连一次。
+     */
+    private fun reportServerFailure(origin: ScreenLinkServer, ex: Exception) {
+        if (stopping || origin !== server) return
+        val line = serverFailureLine(ex)
+        _status.value = _status.value.copy(serverError = line, localIp = null)
+        log(
+            "展示端接入点起不来：$line" +
+                "（${ex.message ?: ex.javaClass.simpleName}）—— 1Hz 照跑，但屏连不上",
+        )
+    }
+
+    /** 两种失败必须说成两句：端口被占能靠关掉另一个实例解决，二次 start 只能完全退出 App */
+    private fun serverFailureLine(ex: Throwable): String {
+        // Java-WebSocket 会把通道上的 IOException 包一层 WrappedIOException 再交出来
+        var cause: Throwable? = ex
+        while (cause != null) {
+            when (cause) {
+                is BindException -> return "端口 ${ScreenLinkServer.PORT} 被占了，先关掉另一个实例"
+                is IllegalStateException -> return "这个接入点已经起过一次，停止演示再开始也不会重来 —— 需要完全退出 App"
+            }
+            cause = cause.cause?.takeIf { it !== cause }
+        }
+        return ex.message ?: ex.javaClass.simpleName
+    }
+
     fun stop() {
+        stopping = true
         loop?.cancel()
         loop = null
         // stop() 会等选择线程退场，最多阻塞一秒级；这一句在 Activity.onDestroy 里，
@@ -485,6 +550,12 @@ class DemoRuntime(
     /** 这台屏能不能说话（契约 v2）。首页那句提示读这个，不靠猜 */
     val screenCanTalk: Boolean get() = server.dialogReady
 
+    /**
+     * 屏谈下来的契约版本（0 = 没接上）。能不能对话看 ≥2，能不能收语音看 ≥3 ——
+     * 界面上要把这个数字摆出来，因为"没有声音"在 v2 上就是固件的事，不是 App 的事。
+     */
+    val screenProtocol: Int get() = server.negotiatedVersion
+
     private suspend fun tickForever() {
         while (true) {
             tickOnce()
@@ -527,6 +598,7 @@ class DemoRuntime(
             phase = engine.phase,
             snapshot = shown,
             clients = server.clientCount,
+            attempts = server.attemptCount,
         )
     }
 

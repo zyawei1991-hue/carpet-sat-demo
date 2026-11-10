@@ -1,12 +1,15 @@
 package com.carpet.satdemo.app
 
 import android.app.Application
+import android.content.Context
 import com.carpet.satdemo.core.ai.AiEndpoint
 import com.carpet.satdemo.core.ai.AiGateway
+import com.carpet.satdemo.core.ai.AzureSpeech
 import com.carpet.satdemo.core.ai.DialogBridge
 import com.carpet.satdemo.core.ai.OpenAiCompatProvider
 import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.ai.ReplySource
+import com.carpet.satdemo.core.ai.SiliconFlowAsr
 import com.carpet.satdemo.core.ai.SkillContext
 import com.carpet.satdemo.core.ai.screenSceneOf
 import com.carpet.satdemo.core.ai.skillContext
@@ -34,6 +37,7 @@ import com.carpet.satdemo.app.ui.Availability
 import com.carpet.satdemo.app.ui.Capability
 import com.carpet.satdemo.app.ui.PrivacyTier
 import com.carpet.satdemo.app.ui.Scene
+import com.carpet.satdemo.app.ui.ScreenDialogLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,6 +47,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.carpet.satdemo.core.link.SosCopy
 import java.io.File
 import java.io.PrintWriter
@@ -103,8 +108,15 @@ class AppRuntime(private val host: Application) {
         val passthrough: Boolean = false,
     )
 
-    private val _flags = MutableStateFlow(Flags())
+    private val _flags = MutableStateFlow(Flags(acceptScreens = prefs.getBoolean(KEY_ACCEPT_SCREENS, false)))
     val flags: StateFlow<Flags> = _flags
+
+    init {
+        // 上一个版本这个开关只活到进程结束：每次重开 App 屏都被「拒绝所有展示端接入」挡回去，
+        // 现场表现是"明明配对过，第二天又连不上"，而界面上那个开关还停留在关闭。
+        // 配过的屏是用户的长期决定，不是本次演示的临时状态，所以它跟其它开关不一样，要落盘。
+        if (_flags.value.acceptScreens) runtime.setAcceptScreens(true)
+    }
 
     /** 家长设的隐私档。生效档位 = 底座默认与这一档里更严的那个（§6 第 3 条） */
     private val _privacyChoice = MutableStateFlow(PrivacyTier.Guarded)
@@ -218,7 +230,13 @@ class AppRuntime(private val host: Application) {
         }
         location?.start()
         startAiLoop()
+        // 端点存过、但网关换了口径或密钥过期：不点「试一次」就永远不报，首屏只写着"未接模型"。
+        // 每次冷启动只自动试一次，**不为失败重试** —— 那会每十秒打一次网关
+        if (!probedOnce) probeModel(quiet = true)
     }
+
+    /** 这一进程里有没有自动试过端点。用户手动点「试一次」不受它限制 */
+    private var probedOnce = false
 
     fun setFlag(next: Flags) {
         val prev = _flags.value
@@ -237,7 +255,10 @@ class AppRuntime(private val host: Application) {
             modem.reachable = !next.gt1005Offline
             runtime.log(if (next.gt1005Offline) "GT1005 已断开，心跳只能留在 App 队列" else "GT1005 已恢复")
         }
-        if (prev.acceptScreens != next.acceptScreens) runtime.setAcceptScreens(next.acceptScreens)
+        if (prev.acceptScreens != next.acceptScreens) {
+            runtime.setAcceptScreens(next.acceptScreens)
+            prefs.edit().putBoolean(KEY_ACCEPT_SCREENS, next.acceptScreens).apply()
+        }
         if (prev.demoMode != next.demoMode) runtime.setDemoMode(next.demoMode)
     }
 
@@ -333,18 +354,21 @@ class AppRuntime(private val host: Application) {
     val devices: StateFlow<List<Device>> get() = runtime.devicesSnapshot
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // AI 主理人。对话是首页两个主区之一（V1.7 重排），所以它跟链路一样挂在连接层，
+    // AI 助手。对话是首页两个主区之一（V1.7 重排），所以它跟链路一样挂在连接层，
     // 不挂在页面上 —— 用户发完问题去切 Tab，回答回来时不该丢上下文。
     // ─────────────────────────────────────────────────────────────────────────────
 
-    private val _endpoint = MutableStateFlow(
-        AiEndpoint(
-            baseUrl = prefs.getString(KEY_AI_URL, "") ?: "",
-            apiKey = prefs.getString(KEY_AI_KEY, "") ?: "",
-            model = prefs.getString(KEY_AI_MODEL, "") ?: "",
-        ),
-    )
+    private val _endpoint = MutableStateFlow(loadEndpoint())
     val aiEndpoint: StateFlow<AiEndpoint> = _endpoint
+
+    init {
+        // Azure Speech F0（D13 正路）：region/key 从 BuildConfig 灌进 :core 的合成器。
+        // 没配就是空串，AzureSpeech.configured 不过，NetVoice 自动跳过这条
+        AzureSpeech.region = BuildConfig.AZURE_SPEECH_REGION
+        AzureSpeech.speechKey = BuildConfig.AZURE_SPEECH_KEY
+        // 硅基流动 ASR（手机侧语音输入）：同一个纪律，没配 key 麦克风就退回"未接"
+        SiliconFlowAsr.apiKey = BuildConfig.SILICONFLOW_ASR_KEY
+    }
 
     private val aiProvider = OpenAiCompatProvider(_endpoint.value)
 
@@ -368,6 +392,22 @@ class AppRuntime(private val host: Application) {
     val aiGranted: StateFlow<PermissionTier> = _aiGranted
 
     /**
+     * 屏幕语音。**答句的嘴在手机上**：圆屏只负责放，合成和切块都在这台设备里
+     * （见 [ScreenVoice] 那段为什么桌面有声音、手机没有）。
+     */
+    private val voice = ScreenVoice(
+        host = host,
+        // **每次用时重新读**：`runtime.server` 在每次 start 之后是一个新对象，
+        // 抓一个引用下来，第二次启动之后的声音就会推给上一代那个已经关掉的服务器
+        server = { runtimeRef?.server },
+        log = { line -> runtimeRef?.log(line) },
+        // 选过的引擎和音色是用户的长期决定，和"允许圆屏接入"一样要跨进程活着
+        initialEngine = prefs.getString(KEY_VOICE_ENGINE, null),
+        initialTone = VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)),
+        initialFace = prefs.getString(KEY_VOICE_FACE, null),
+    )
+
+    /**
      * 对话的唯一一条接线：入账 → 该不该触发技能 → 答 → 回镜给圆屏。
      * 逻辑本体在 `core/ai/DialogBridge`（那边才有真单测，彩排台和手机跑的也才是同一份），
      * 这里只填三个口子：事实表、往屏发一帧、宿主自己的协程作用域。
@@ -375,12 +415,18 @@ class AppRuntime(private val host: Application) {
     private val dialog = DialogBridge(
         gateway = ai,
         facts = { aiContext() },
-        push = { d -> runtime.pushDialog(d) },
+        push = { d ->
+            _screenLine.value = ScreenDialogLine(d.source, System.currentTimeMillis())
+            runtime.pushDialog(d)
+        },
         launch = { body -> scope.launch { body() } },
         note = { line -> runtime.log(line) },
         // 屏起的那一轮归哪一页，读屏自己报上来的那个字段。屏没报过页就不归页 ——
         // 那种句子只在首页的总时间线里出现，比"猜一个亲子"诚实
         screenScene = { screenSceneOf(runtime.status.value.screenPage) },
+        // 答句落地之后合成语音推给屏。**问句不回镜的那一侧也不会走到这儿**，
+        // 所以屏上不会把车主自己问的那句又念一遍
+        onAnswer = { d -> voice.speak(d.turnId, d.text) },
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
@@ -389,8 +435,190 @@ class AppRuntime(private val host: Application) {
     /** 发出去的那句还在等回答。首屏那条占位气泡靠它，不然按了发送屏幕不动 */
     val aiThinking: StateFlow<Boolean> get() = dialog.thinking
 
+    /**
+     * 上一次真模型没答上来的具体原因（404 / 超时 / 密钥…）。
+     * 「未接模型」只是状态，车主还得知道下一步是改地址还是换网络，所以这一句要原样摆到界面上。
+     */
+    private val _aiError = MutableStateFlow<String?>(null)
+    val aiError: StateFlow<String?> = _aiError
+
+    /** 正在打那句自检请求。界面据此把按钮改成"正在试…"，避免连点发出五次 */
+    private val _aiProbing = MutableStateFlow(false)
+    val aiProbing: StateFlow<Boolean> = _aiProbing
+
+    /**
+     * 端点的初值。**出包时就该能直接用**（V1.18）：地址/密钥/模型烧在 BuildConfig 里，
+     * 首次起来写进 prefs 一次，之后 prefs 优先 —— 工程模式里手改过的不被覆盖。
+     *
+     * 公开仓库里没有 `local.properties` 里的那一组，BuildConfig 三个字段是空串，
+     * 这时行为与旧版一致：读 prefs，读不到就走本机规则。
+     *
+     * 种子用版本号当标记：换了一家网关/一把新密钥就改 [AI_SEED]，老机器上那份旧配置才会被顶掉。
+     * 不能每次启动都盖 —— 那样工程模式里调的模型活不过一次重启。
+     */
+    private fun loadEndpoint(): AiEndpoint {
+        val baked = AiEndpoint(BuildConfig.AI_BASE_URL, BuildConfig.AI_API_KEY, BuildConfig.AI_MODEL, disableThinking = true)
+        // 我们发的是纯文本问答、不回收思维链；这家网关在思考模式下会要求把 thinking 回传，
+        // 不回传就 400。默认关掉思考，网关不认这一项时 provider 会去掉重发
+        if (baked.configured && prefs.getString(KEY_AI_SEED, null) != AI_SEED) {
+            prefs.edit()
+                .putString(KEY_AI_URL, baked.baseUrl)
+                .putString(KEY_AI_KEY, baked.apiKey)
+                .putString(KEY_AI_MODEL, baked.model)
+                .putString(KEY_AI_SEED, AI_SEED)
+                .apply()
+        }
+        return AiEndpoint(
+            baseUrl = prefs.getString(KEY_AI_URL, "") ?: "",
+            apiKey = prefs.getString(KEY_AI_KEY, "") ?: "",
+            model = prefs.getString(KEY_AI_MODEL, "") ?: "",
+            disableThinking = true,
+        )
+    }
+
+    /**
+     * 屏收到的最后一帧下行对话。首页那格镜像要照屏的规矩画出"手机在说 · …"那一行，
+     * 而那行只由**屏收到的帧**决定（屏自己没收到，屏上就是空的），所以记在 push 的口子上。
+     */
+    private val _screenLine = MutableStateFlow<ScreenDialogLine?>(null)
+    val screenLine: StateFlow<ScreenDialogLine?> = _screenLine
+
     /** 工程模式/演示要用：屏在不在、能不能说话 */
     val screenDialog: Boolean get() = runtime.screenCanTalk
+
+    /** 屏谈下来的契约版本（0 = 没连上）。语音要 ≥3，这句话得能摆到界面上 */
+    val screenProtocol: Int get() = runtime.screenProtocol
+
+    /**
+     * 最近一次答句**为什么没送到屏上**。null = 最近一次是好的，或者还没念过。
+     *
+     * 这一格存在的理由就是"没声音"这件事：屏只报到 v2 时旧实现静默返回，界面上什么都看不见。
+     * 现在这条原因直接摆到设置页，而且它说的下一步是什么（刷固件 / 去配对 / 换引擎）。
+     */
+    val voiceIssue: StateFlow<String?> get() = voice.issue
+
+    /** 这台手机念答句用的 TTS 引擎（系统引擎，不是桌面那侧的 Edge） */
+    val voiceEngine: StateFlow<String?> get() = voice.engine
+
+    /**
+     * 最近一句是谁念的：`net` = 网络合成，`system` = 本机引擎。
+     * 用户问"现在你接的是哪个声音"，这一格就是答案
+     */
+    val voiceSource: StateFlow<String?> get() = voice.source
+
+    /** 这台手机上装了哪些中文引擎。换一台可能就有更甜的女声，不替用户认定默认最好 */
+    val voiceEngines: StateFlow<List<VoiceEngine>> get() = voice.engines
+
+    /**
+     * 换了引擎之后 [voiceEngine] 报的是**新引擎自己的默认值**，不是用户选的那个包名。
+     * 界面要能勾中"用户选过的那一台"，所以这里单独存一份选择（null = 系统默认）
+     */
+    private val _voiceChoice = MutableStateFlow(prefs.getString(KEY_VOICE_ENGINE, null))
+    val voiceChoice: StateFlow<String?> = _voiceChoice
+
+    /** 当前音色档。可爱女声不是换模型，是同一句合成成什么音高语速 */
+    private val _voiceTone = MutableStateFlow(VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)))
+    val voiceTone: StateFlow<VoiceTone> = _voiceTone
+
+    /** 这台引擎里的中文人声。空 = 引擎没报清单；这也是"默认给的是男声"最常见的坑 */
+    val voiceFaces: StateFlow<List<VoiceFace>> get() = voice.faces
+
+    /** 用户选过的发音人（引擎自己那个 name）。null = 引擎默认 */
+    private val _voiceFaceChoice = MutableStateFlow(prefs.getString(KEY_VOICE_FACE, null))
+    val voiceFaceChoice: StateFlow<String?> = _voiceFaceChoice
+
+    /** 换发音人。同一台引擎里换人，比换引擎的动静小，通常也最接近"可爱女声" */
+    fun setVoiceFace(name: String?) {
+        _voiceFaceChoice.value = name
+        prefs.edit().putString(KEY_VOICE_FACE, name).apply()
+        voice.setFace(name)
+    }
+
+    /** 换语音引擎。[engineName] 为 null = 回到系统默认那台 */
+    fun setVoiceEngine(engineName: String?) {
+        _voiceChoice.value = engineName
+        prefs.edit().putString(KEY_VOICE_ENGINE, engineName).apply()
+        voice.setEngine(engineName)
+    }
+
+    /** 换音色档，立刻用新音高语速试听一句，用户不用再去点那颗试听键 */
+    fun setVoiceTone(tone: VoiceTone) {
+        _voiceTone.value = tone
+        prefs.edit().putString(KEY_VOICE_TONE, tone.id).apply()
+        voice.setTone(tone)
+    }
+
+    /** 本机试听有没有在念 */
+    val voicePreviewing: StateFlow<Boolean> get() = voice.previewing
+
+    /** 在手机上试听一句：不经过圆屏，用来先把"引擎有没有声"和"圆屏收没收"分开 */
+    fun previewVoice(text: String = "我在。信号正常，卫星还有十二分钟过顶。") {
+        voice.speakOnPhone(text)
+    }
+
+    /**
+     * 模型端点自检：**直接打一次真请求**，不经过技能路由、不经过对话记录。
+     *
+     * 用户填了端点、界面上每次仍是「规则兜底」，却看不到原因 —— 因为旧版只有真问一句才会去试，
+     * 而问的那句可能命中了技能、模型只是没轮上。这里用一句最小的自检文去试：通了就写一行日志，
+     * 不通就把 HTTP 状态 / 超时 / DNS 原样摆到首页。圆屏在不在都不影响这一步。
+     */
+    fun probeModel(quiet: Boolean = false) {
+        if (_aiProbing.value) return
+        probedOnce = true
+        if (!_endpoint.value.configured) {
+            // 冷启动时不把"还没配"写成红色报错：空态由卡片上那句中性提示负责，
+            // 红线只留给"配了也通不了"（那才是用户需要动手的）
+            if (!quiet) {
+                _aiError.value = missingOf(_endpoint.value)
+                say("模型自检：${missingOf(_endpoint.value)}")
+            }
+            return
+        }
+        _aiProbing.value = true
+        _aiError.value = null
+        scope.launch {
+            runtime.log("模型自检：用 ${_endpoint.value.model} 发一句最小请求")
+            val answer = aiProvider.complete(
+                facts = "（自检请求，不是真实车况）",
+                history = emptyList(),
+                question = "只回两个字：在。",
+            )
+            _aiProbing.value = false
+            // 地址写错被自检纠回来：直接落盘，否则下一次开 App 还是那条错地址。
+            // 这一步只在**真通了**之后做 —— 没通就改用户填的东西，等于替他瞎猜
+            val fixed = aiProvider.correctedBase
+            if (answer != null && fixed != null) {
+                val current = _endpoint.value
+                val next = current.copy(baseUrl = fixed)
+                _endpoint.value = next
+                aiProvider.setEndpoint(next)
+                prefs.edit().putString(KEY_AI_URL, next.baseUrl).apply()
+                runtime.log("模型自检：地址已按网关口径改成 $fixed")
+            }
+            _aiError.value = aiProvider.lastError
+            runtime.log(
+                if (answer != null) "模型自检：通了，回了「${answer.take(24)}」"
+                else "模型自检：没通 —— ${aiProvider.lastError ?: "原因未知"}",
+            )
+        }
+    }
+
+    /**
+     * 端点缺哪一项，**就说缺哪一项**。
+     *
+     * 旧的那句"地址 / 密钥 / 模型名少填了一项"在三项全空和三缺一时长得一模一样 ——
+     * 而这正是现场最常见的一态（新装、或换了包名 SharedPreferences 没跟上）。
+     * 车主照着这句话去改，改哪一项都是猜。
+     */
+    private fun missingOf(e: AiEndpoint): String {
+        val miss = buildList {
+            if (e.baseUrl.isBlank()) add("地址")
+            if (e.apiKey.isBlank()) add("密钥")
+            if (e.model.isBlank()) add("模型名")
+        }
+        return "这个版本没带 AI 连接信息（缺" + miss.joinToString("、") + "），先按手机上的规则回答"
+    }
 
     private var aiLoop: Job? = null
 
@@ -403,7 +631,79 @@ class AppRuntime(private val host: Application) {
      * 回答回来时用户可能已经切走了，那一条也不该跑到别的页里去。
      */
     fun askAi(question: String, via: DialogOrigin = DialogOrigin.phone, turnId: String? = null, scene: TurnScene? = null) {
-        scope.launch { dialog.ask(question, via, turnId, scene) }
+        scope.launch {
+            dialog.ask(question, via, turnId, scene)
+            // 每一次问完把失败原因带上来。成功时 provider 会清掉它，界面上的那句提示也就一起消失
+            _aiError.value = ai.lastModelError
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 手机侧语音输入（硅基流动 ASR）。圆屏的麦克风链路在板子上还没修通（README §2：
+    // muse_audio_read() 开机 5.7s 后就失败），所以"说话"这一半先落在手机上：
+    // 按住麦克风 → 录 16k WAV → SenseVoiceSmall 转写 → 文本直接进对话，和打字同一入口。
+    // 转写结果走 askAi 本身，不另开通道 —— 屏上镜像、技能路由全部白得。
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    private val mic = MicRecorder()
+
+    private val _listening = MutableStateFlow(false)
+    /** 麦克风正在录音，输入框那枚按钮拿它画"按住说话中"的状态 */
+    val listening: StateFlow<Boolean> = _listening
+
+    private val _transcribing = MutableStateFlow(false)
+    /** 转写进行中（松手后到出文本之间），UI 用它挡住重复按 */
+    val transcribing: StateFlow<Boolean> = _transcribing
+
+    /** ASR 有没有配好 key：没配的时候按钮还是"未接"那套 */
+    val voiceInputConfigured: Boolean get() = SiliconFlowAsr.configured
+
+    /** UI 层的权限询问：有没有录音权限（没有就由按钮去弹系统对话框） */
+    fun micPermissionGranted(ctx: Context): Boolean = mic.hasPermission(ctx)
+
+    /**
+     * 按下麦克风。返回 false = 没权限或录音起不来，调用方直接给人话提示。
+     */
+    fun startVoiceInput(): Boolean {
+        if (_transcribing.value) return false
+        if (!voiceInputConfigured) {
+            say("语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包")
+            return false
+        }
+        val ok = mic.start()
+        if (!ok) say("麦克风没起来：检查有没有给录音权限")
+        _listening.value = ok
+        return ok
+    }
+
+    /**
+     * 松开麦克风：取 WAV → 后台转写 → 文本当一句用户提问走 [askAi]。
+     * 录得太短（<0.4s）当成误触，不出题、不报错。
+     */
+    fun stopVoiceInput(scene: TurnScene? = null) {
+        if (!_listening.value) return
+        _listening.value = false
+        val wav = mic.stop() ?: return
+        // 16k/16bit/单声道 = 32KB/s。0.4s 以下基本是碰了一下
+        if (wav.size < 32 * 1024 * 2 / 5) return
+        _transcribing.value = true
+        scope.launch(Dispatchers.IO) {
+            val text = SiliconFlowAsr.transcribe(wav)
+            _transcribing.value = false
+            if (text.isNullOrBlank()) {
+                say("没听清：转写失败或这句话是空的")
+            } else {
+                runtime.log("语音输入：「$text」")
+                withContext(Dispatchers.Main) { askAi(text, scene = scene) }
+            }
+        }
+    }
+
+    /** 取消这次录音（用户拖出去松手），不出题 */
+    fun cancelVoiceInput() {
+        if (!_listening.value) return
+        _listening.value = false
+        mic.cancel()
     }
 
     /**
@@ -455,13 +755,17 @@ class AppRuntime(private val host: Application) {
 
     /** 端点配置。**只填不全就当作没配**：宁可显示"未接真源"，也不要现场等一次 12 秒超时 */
     fun setAiEndpoint(url: String, key: String, model: String) {
-        val next = AiEndpoint(url.trim(), key.trim(), model.trim())
+        val next = AiEndpoint(url.trim(), key.trim(), model.trim(), disableThinking = true)
         _endpoint.value = next
         aiProvider.setEndpoint(next)
         prefs.edit().putString(KEY_AI_URL, next.baseUrl).putString(KEY_AI_KEY, next.apiKey)
             .putString(KEY_AI_MODEL, next.model).apply()
         runtime.log(if (next.configured) "模型端点已配：${next.model}" else "模型端点未配齐，回到本机规则")
+        // 上一版换完端点旧报错还挂在首页上：用户以为新端点也没通，其实还没试过
+        _aiError.value = null
         greet()
+        // 填完就立刻试一次，不必等用户先问一句才知道通没通
+        if (next.configured) probeModel()
     }
 
     fun setAiGranted(tier: PermissionTier) {
@@ -639,6 +943,7 @@ class AppRuntime(private val host: Application) {
         location?.stop()
         monitor?.stop()
         ephSource?.release()
+        voice.release()
         runtime.shutdown()
         scope.cancel()
     }
@@ -647,10 +952,18 @@ class AppRuntime(private val host: Application) {
         /** 假模块的"永远在过境窗口内"。真机的窗口由星历算，不靠这个数 */
         private const val ALWAYS_VISIBLE = Long.MAX_VALUE / 4
         private const val KEY_VENDOR_EPH = "vendor_eph"
+        private const val KEY_ACCEPT_SCREENS = "accept_screens"
         private const val KEY_AI_URL = "ai_url"
         private const val KEY_AI_KEY = "ai_key"
         private const val KEY_AI_MODEL = "ai_model"
+
+        /** 烧进包的那套端点已经写进 prefs 的标记。改网关/换密钥时改这个值，老机器才会被顶掉 */
+        private const val KEY_AI_SEED = "ai_seed"
+        private const val AI_SEED = "1.18"
         private const val KEY_AI_TIER = "ai_tier"
+        private const val KEY_VOICE_ENGINE = "voice_engine"
+        private const val KEY_VOICE_TONE = "voice_tone"
+        private const val KEY_VOICE_FACE = "voice_face"
 
         /** 主动扫描的间隔。比 1Hz 慢一个量级：提醒是"这事值得说一句"，不是刷屏 */
         private const val AI_SCAN_MS = 10_000L

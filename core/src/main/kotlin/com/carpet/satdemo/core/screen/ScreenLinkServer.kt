@@ -6,6 +6,7 @@ import com.carpet.satdemo.core.protocol.ScreenCodec
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import java.net.InetSocketAddress
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
@@ -36,6 +37,17 @@ class ScreenLinkServer(
     var onHello: (ScreenMessage) -> Unit = {}
 
     /**
+     * 有没有任何一条 TCP 接入尝试到过这台手机。**它与 clientCount 是两件事**：
+     * 0 台在线 + 0 次尝试 = 屏根本没进这张网（包到不了手机，App 改什么都不会好）；
+     * 0 台在线 + 有尝试 = 屏进来了但被 demo lock / 白名单挡了，App 该把原因说清。
+     * 现场分不清这两种时只能两头互相甩锅，所以这一格单独可测。
+     */
+    val attemptCount: Int get() = attempts.get()
+
+    /** 每次重开接入点清零：这一格说的是"这个接入点起来之后来过几拨"，不是进程一辈子 */
+    private val attempts = AtomicInteger(0)
+
+    /**
      * 断开回调。参数是 screen_id，**识别不出来时给 null**（连上没发 hello 就走的连接）。
      * 设备总线要靠这一句把屏标成离线 —— 只靠 clientCount 变化的话，
      * 三台屏里断一台，台账上会留下两台"刚才还在"的幽灵。
@@ -51,11 +63,27 @@ class ScreenLinkServer(
     var onContractError: (String, String) -> Unit = { _, _ -> }
 
     /**
+     * 一条已经到手的连接被我们亲手关掉：(原因, 说明了什么)。
+     * **必须能被宿主记进日志** —— 现场三种失败（屏没进网 / 被 demo lock 挡 / 编号不在白名单）
+     * 在「未连接」三个字里长得一模一样，只有这一行能把后两种从前一种里摘出来。
+     */
+    var onRejected: (String) -> Unit = {}
+
+    /**
      * 往一条已经不算活着的连接上写帧。参数是原因，由宿主记进运行时日志。
      * 现场最常见的触发是拔屏的电源：不设这一句，1Hz 那圈循环整个死掉，
      * 表现是"拔了一块屏，另一块屏从此再也不更新"。
      */
     var onSendError: (String) -> Unit = {}
+
+    /**
+     * 接入点本身起不来（端口被占、进程里还留着旧 accept）。
+     *
+     * Java-WebSocket 1.5.6 的 bind 发生在选择线程里（`doSetupSelectorAndServerThread`），
+     * `start()` 当场不会抛，`BindException` 是从 `onError(null, ex)` 异步出来的 ——
+     * 不把这一句接出来，端口冲突在 App 上就只剩一页「服务运行中」。
+     */
+    var onServerError: (Exception) -> Unit = {}
 
     private val known = ConcurrentHashMap<String, WebSocket>()
 
@@ -87,7 +115,9 @@ class ScreenLinkServer(
     fun allowed(): Set<String> = whitelist.toSet()
 
     override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
+        attempts.incrementAndGet()
         if (!accepting) {
+            onRejected("「允许圆屏接入」没开（屏到了，是 App 把它挡下的）")
             conn.close(CLOSE_POLICY, "demo lock")
             return
         }
@@ -103,6 +133,7 @@ class ScreenLinkServer(
         val hello = msg.hello
         if (hello != null) {
             if (hello.screenId !in whitelist) {
+                onRejected("编号 ${hello.screenId} 不在白名单里（屏到了，是 App 把它挡下的）")
                 conn.close(CLOSE_POLICY, "unknown screen")
                 return
             }
@@ -141,7 +172,9 @@ class ScreenLinkServer(
     }
 
     override fun onError(conn: WebSocket?, ex: Exception?) {
-        ex?.printStackTrace()
+        if (ex == null) return
+        // conn == null 是服务端级别（bind 失败、选择器关闭失败），不是某一条连接的事
+        if (conn == null) onServerError(ex) else ex.printStackTrace()
     }
 
     fun broadcast(messages: List<ScreenMessage>) {
@@ -167,6 +200,15 @@ class ScreenLinkServer(
 
     /** 有没有任何一条连接能收语音。彩排台/App 用它决定要不要跑 TTS —— 白跑一遍 TTS 是白等一秒 */
     val audioReady: Boolean get() = negotiated.values.any { it >= 3 } && connections.any { it.isOpen }
+
+    /**
+     * 在线连接里谈下来的最高契约版本；0 = 一条都没接上。
+     *
+     * **必须能被外面读到**：屏上没声音的两种原因（没连 / 固件只报到 v2）在界面上长得一样，
+     * 而用户能做的事完全不同 —— 前者去配对，后者要去刷固件。旧版只有 `audioReady` 一个布尔，
+     * 语音那条路撞上 v2 时静默返回，一行日志都没有，现场只能猜。
+     */
+    val negotiatedVersion: Int get() = negotiated.values.maxOrNull() ?: 0
 
     /**
      * 出站唯一出口（`broadcast` 每条连接、`sendTo` 单发），所以**按版本降级也只在这儿做一次**：

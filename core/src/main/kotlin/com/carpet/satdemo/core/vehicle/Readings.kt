@@ -13,7 +13,7 @@ package com.carpet.satdemo.core.vehicle
 enum class ValueSource(val real: Boolean, val badge: String?) {
 
     /** 我们为了演示编的值 */
-    Stub(false, "示意数据 · 未接真源"),
+    Stub(false, "示意数字 · 还没接上真车"),
 
     /** 车上真接了设备读上来的：OBD 盒子、独立胎压传感器 */
     Device(true, null),
@@ -22,16 +22,16 @@ enum class ValueSource(val real: Boolean, val badge: String?) {
     Cloud(true, null),
 
     /** 从别的读数算出来的。输入是桩，输出就不是真的 */
-    Observed(false, "推算值 · 未接真源"),
+    Observed(false, "推算的 · 还没接上真车"),
 
     /** 车主自己填的。它不是测出来的，但它是问出来的 —— 这两种在界面上必须分得开 */
     User(true, "你填的"),
 
     /** 标定值（B 柱标签、手册上的额定值），还没拿到真资料 */
-    Nominal(false, "示意判据 · 未接手册"),
+    Nominal(false, "标准值还是示意，手册没到"),
 
     /** 保养手册的间隔，还没拿到真资料 */
-    Manual(false, "示意判据 · 未接手册"),
+    Manual(false, "保养周期还是示意，手册没到"),
 
     /** 第二阶段：车型养车知识库里的一条，带 docId + version + clause */
     Kb(true, null),

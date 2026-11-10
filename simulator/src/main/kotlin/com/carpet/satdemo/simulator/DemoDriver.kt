@@ -185,7 +185,9 @@ object DemoDriver {
             ephemeris = EphemerisTracker(ephemeris, MonoClock { clock.ms }),
         )
         val runtime = DemoRuntime(engine, server, clock::now, heartbeatEvery = 3)
-        server.accepting = true
+        // DemoRuntime 每次 start() 都换新 server 对象，之后只能读 runtime.server ----
+        // 拿住这个局部变量再改，改的是被换掉的那个对象，彩排台会永远听不到 v3
+        runtime.server.accepting = true
         /**
          * 指令的处理收在 [DemoRuntime.handleScreenCommand] 一处，真机和彩排台共用那一份 ——
          * 驱动器再写一个 when 的话，彩排演过的就不是装到手机上的那个东西。
@@ -247,7 +249,7 @@ object DemoDriver {
             nowMs = { clock.ms },
             onAnswer = { d ->
                 if (voiceOn) voicePool.execute {
-                    if (!server.audioReady) {
+                    if (!runtime.server.audioReady) {
                         println("语音     不发：连上来的屏没报 v3（hello.protocols 里没这一档），只留文字")
                         return@execute
                     }
@@ -258,7 +260,7 @@ object DemoDriver {
                         return@execute
                     }
                     println("语音     ${d.turnId} ${frames.size} 帧推给屏")
-                    server.broadcast(frames)
+                    runtime.server.broadcast(frames)
                 }
             },
         )

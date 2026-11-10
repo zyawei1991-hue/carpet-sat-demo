@@ -105,6 +105,17 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
             app.simulateScreenQuestion("救援已在路上", source = DialogSource.xiaozhi_cloud)   // 红线样本
         }
 
+        Text(
+            "模型与声音（都不需要圆屏）",
+            style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        )
+        // 这两颗键把"模型通不通"和"引擎有没有声"从圆屏那条链里拆出来。
+        // 之前只能靠真问一句去猜，而那句若命中技能就根本轮不到模型
+        EngButton("模型端点自检（直接发一句最小请求）", Ink.Track) { app.probeModel() }
+        val engine by app.voiceEngine.collectAsState()
+        Text("答句引擎：${engine ?: "还没报上来（初始化中或不可用）"}", style = Type.Caption, color = Ink.TextMid)
+        EngButton("在手机上试听一句（不经过圆屏）", Ink.Track) { app.previewVoice() }
+
         EngRow("工程模式日志窗", flags.passthrough) { app.setFlag(flags.copy(passthrough = it)) }
 
         if (flags.passthrough) {

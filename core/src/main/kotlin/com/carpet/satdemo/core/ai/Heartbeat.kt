@@ -3,7 +3,7 @@ package com.carpet.satdemo.core.ai
 /**
  * Heartbeat 主动扫描（附录 D.1 里 digivita 那条闭环的另一半）。
  *
- * 「主理人」和普通聊天框的区别就在这：它会在**没人问的时候开口**。但一次误报的代价比沉默大得多 ——
+ * 「AI 助手」和普通聊天框的区别就在这：它会在**没人问的时候开口**。但一次误报的代价比沉默大得多 ——
  * 所以规则表里每一条都必须同时满足「有真数据源」和「到了阈值」，且带冷却时间，同一条不会连着念。
  */
 data class ProactiveTip(val skill: String, val text: String)

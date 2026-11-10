@@ -114,14 +114,14 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
     InkCard(icon = MIcons.action) {
-        CardTitle("常用动作", trailing = "要车机总线")
+        CardTitle("常用操作", trailing = "还没连上车")
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
             ) {
             actions.forEach { a ->
                 OutlinedButton(
-                    onClick = { app.say("「$a」还没接：需要车辆总线或账号通道") },
+                    onClick = { app.say("「$a」还没连上车，现在做不了") },
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(Round.Chip),
                     border = BorderStroke(1.dp, Ink.Outline),

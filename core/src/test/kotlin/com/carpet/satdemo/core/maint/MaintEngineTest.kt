@@ -181,11 +181,11 @@ class MaintEngineTest {
     fun `badge follows the reading, not the demo switch`() {
         // 桩胎压：建议带「示意数据」。换成设备读数：那个标自己没了，判据的标还在
         val stubbed = MaintEngine.suggest(full(ValueSource.Stub), c).single { it.rule == "tire.low" }
-        assertEquals("示意数据 · 未接真源", stubbed.badge)
+        assertEquals("示意数字 · 还没接上真车", stubbed.badge)
         val real = MaintEngine.suggest(full(ValueSource.Device), c).single { it.rule == "tire.low" }
         assertNull(real.badge, "接上真源还带着示意标，就是长期说谎")
         // 两条轴各自独立：读数是假的，判据也是假的，界面上得同时看得见
-        assertEquals("示意判据 · 未接手册", c.badge)
+        assertEquals("标准值还是示意，手册没到", c.badge)
     }
 
     @Test

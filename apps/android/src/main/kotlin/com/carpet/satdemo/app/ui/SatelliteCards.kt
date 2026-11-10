@@ -69,16 +69,16 @@ private fun phaseTone(p: LinkPhase): Tone = when (p) {
 }
 
 private fun phaseLine(p: LinkPhase, clients: Int): String = when (p) {
-    LinkPhase.CELL -> "蜂窝在线，卫星待命（圆屏 $clients 台）"
-    LinkPhase.PROBE -> "蜂窝已经不通，正用卫星试一条探活消息"
-    LinkPhase.SAT -> "已切卫星链路，蜂窝不再参与上报"
-    LinkPhase.RECOVER -> "蜂窝已恢复，正在补发离线期间攒下的消息"
+    LinkPhase.CELL -> "手机信号正常，卫星在旁边等着（圆屏 $clients 台）"
+    LinkPhase.PROBE -> "手机没信号了，正在试卫星能不能发出去"
+    LinkPhase.SAT -> "已经改用卫星发送，不再依赖手机信号"
+    LinkPhase.RECOVER -> "手机信号回来了，正在把离线时攒下的消息补发出去"
 }
 
 /** 那一行大字。枚举原名（CELL/PROBE）是线格式里的词，不该出现在车主屏幕上 */
 private fun linkWord(p: LinkPhase): String = when (p) {
-    LinkPhase.CELL -> "蜂窝"
-    LinkPhase.PROBE -> "探活中"
+    LinkPhase.CELL -> "有信号"
+    LinkPhase.PROBE -> "在试"
     LinkPhase.SAT -> "卫星"
     LinkPhase.RECOVER -> "补发中"
 }
@@ -151,7 +151,7 @@ fun LinkCard(s: CardScope) {
             ValueRow("卫星终端", null, warming = true)
             ValueRow("载噪比", null, warming = true)
         } else {
-            ValueRow("主路", if (snap.link.primary.name == "cell") "蜂窝" else "卫星", if (snap.link.cellOk) Tone.Ok else Tone.Wait)
+            ValueRow("现在走哪条", if (snap.link.primary.name == "cell") "手机信号" else "卫星", if (snap.link.cellOk) Tone.Ok else Tone.Wait)
             ValueRow(
                 "卫星终端",
                 if (snap.sat.moduleOk) "在线" else "离线",
@@ -544,16 +544,16 @@ fun QueueCard(s: CardScope) {
     val full = capacity != null && pending >= capacity
     val tone = if (dropped != null || full) Tone.Alert else if (pending > 0) Tone.Wait else Tone.Ok
     InkCard(icon = MIcons.queue, tone = tone) {
-        CardTitle("待发队列", trailing = capacity?.let { "$pending / $it 条" } ?: "$pending 条")
+        CardTitle("待发消息", trailing = capacity?.let { "$pending / $it 条" } ?: "$pending 条")
         if (capacity != null && capacity > 0 && pending > 0) {
             StackedBar(listOf(pending to tone.color, (capacity - pending).coerceAtLeast(0) to Ink.Track))
         }
         Text(
             when {
-                dropped != null -> "有 $dropped 条因为超时或队列满被挤掉，已重新排队"
-                full -> "队列满了，新的内容先进不来"
-                pending > 0 -> "蜂窝断了也不丢：链路一恢复就补发出去"
-                else -> "没有欠账"
+                dropped != null -> "有 $dropped 条没赶上发送窗口，已经重新排到后面"
+                full -> "排满了，新消息要等这些都发出去"
+                pending > 0 -> "手机没信号也不会丢，一恢复就发出去"
+                else -> "没有待发的内容"
             },
             style = Type.Caption,
             color = if (dropped != null || full) Ink.Alert else Ink.TextMid,
@@ -575,7 +575,7 @@ fun TpiCard(s: CardScope) {
         CardTitle("终端里的位置")
         Text(
             when {
-                age == null -> "这条链路还没推过位置"
+                age == null -> "还没往外发过位置"
                 stale -> "位置已过期 ${minuteSecond(age)}，卫星可能投递失败"
                 else -> "最近一次推送于 ${minuteSecond(age)}前"
             },
@@ -633,7 +633,7 @@ fun FenceCard(s: CardScope) {
         CardTitle("电子围栏", trailing = f?.name ?: "未命名")
         Text(
             when {
-                f == null || !f.active -> "围栏没开。开了之后越界会走卫星发一条，不等蜂窝"
+                f == null || !f.active -> "围栏还没开。开了以后车一出范围，就用卫星通知你"
                 d == null -> if (f.inside) "已在围栏内" else "已越界"
                 f.inside -> "在围栏内，离边界 %.0f 米".format(d)
                 else -> "已越界 %.0f 米".format(-d)
@@ -652,7 +652,7 @@ fun SentinelCard(s: CardScope) {
     InkCard(icon = MIcons.sentry, tone = if (armed) Tone.Ok else Tone.Neutral, mock = s.mock(Capability.Sentinel)) {
         CardTitle("哨兵模式", trailing = if (armed) "布防中" else "未布防")
         Text(
-            if (armed) "布防中：静止超过阈值发一条状态，动了就打一个轨迹点" else "未布防",
+            if (armed) "布防中：车停稳一阵会报个平安，动过就留一个轨迹点" else "未布防",
             style = Type.Body,
         )
         // 这里原来直接把 epoch 毫秒念上屏（一串 1730…）。那不是"时间"，那是我们内部的数：
@@ -698,23 +698,23 @@ fun UsageCard(s: CardScope) {
         CardTitle("卫星用量", trailing = u.model?.name)
         if (u.invalidCard) {
             // 无效卡的时候连额度都不能信：那组数是从没就绪的模组里读出来的
-            Text("这张卡没就绪。额度、等级都不可信，先查卡是否插反", style = Type.Body, color = Ink.Alert)
+            Text("这张卡没读出来，下面的数都不可信。先看看卡是不是插反了", style = Type.Body, color = Ink.Alert)
         }
         ValueRow("长度等级", u.level?.let { "${it.level} · ${it.maxBytes} B" }, mono = true)
-        ValueRow("单条可用载荷", "${u.budget.dataFieldBytes} B（按最保守的一档）")
+        ValueRow("一条最多发多长", "${u.budget.dataFieldBytes} B（按最保守的一档）")
         ValueRow(
-            "回复接收",
-            u.service?.let { if (it == AccessService.LONG) "终端自动收" else "要主动查" },
+            "回执",
+            u.service?.let { if (it == AccessService.LONG) "终端自己收" else "要主动去查" },
         )
         ValueRow("卡号", u.cardId?.takeIf { it != "1" }, mono = true)
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
-        ValueRow("已交终端 / 额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 未知")
+        ValueRow("交给终端 / 总额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 还不知道")
         ValueRow("还在手机里排队", "${u.waiting} 条")
-        ValueRow("手机这边丢弃", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
-        ValueRow("过境后收回", "${u.reclaimed} 条")
+        ValueRow("没发出去丢掉的", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
+        ValueRow("过境后收回来", "${u.reclaimed} 条")
         Text(
-            if (u.model == null) "还没读到终端型号，额度总数先空着"
-            else "「已交终端」只代表交给了终端，不代表已经发出去",
+            if (u.model == null) "还没认出台端型号，总额度先空着"
+            else "「交给终端」只是交到了终端手上，还不算发出去",
             style = Type.Caption,
             color = Ink.TextLow,
         )

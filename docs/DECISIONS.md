@@ -4,6 +4,95 @@
 
 ---
 
+## D14 · 手机侧语音输入走硅基流动 ASR；形象文件只在本机、不进 public 仓库
+
+**状态**：生效（2026-11-11）
+
+### 14.1 手机为什么也要能说话
+
+固件侧的语音链一路有一处硬伤：`muse_audio_read()` 在上电后约 5.7 秒内取不到音频
+（`firmware/screen/muse/README.md` §2 记的现状），屏上"按一下说话"这条在接入初期不可靠。
+所以这一轮手机 App 自己补一条输入：按住话筒 → 手机采 16k 单声道 PCM → 转写 → 走现有
+`askAi`（复用对话/镜像/技能路由，不新开一条播报链）。
+
+- 引擎：**硅基流动**（`FunAudioLLM/SenseVoiceSmall`），`POST /v1/audio/transcriptions`，
+  multipart（`file` + `model`），响应 `{"text": "…"}`。落在 `core/ai/SiliconFlowAsr.kt`。
+- 采集：`apps/android/.../MicRecorder.kt`，`AudioRecord(VOICE_RECOGNITION)`，
+  16kHz/mono/16-bit，44 字节 RIFF 头封装后上行。
+- 交互：`HomeShell` 的按住手势（`pointerInput` + `awaitFirstDown(requireUnconsumed=false)`
+  轮询到抬起），转写中显示等待色，失败/空句给一句"没听清"，不静默。
+- **迟到不足 0.4 秒的录音直接丢**（`wav.size < 32K*2/5`）：防止误触把半秒静音送上去换来一句空转写。
+- key 的走法和别的密钥一样：`local.properties` → `bakedField()` → `BuildConfig.SILICONFLOW_ASR_KEY`
+  → `AppRuntime.init` 注入。**key 不进仓库、不回显。**
+
+**被推翻的条件**：固件那条链稳定后，如果屏上按住说话已经够用，手机这条可以降级成"只在
+屏不在线时兜底"；或者硅基流动换模型/换供应商时只改 `SiliconFlowAsr` 的 `MODEL`/`BASE_URL`。
+
+### 14.2 镜像里"数字分身"页要画出那张脸
+
+用户报的现象：接上真屏后，手机镜像圆里**看不到 avatar**。根因不是没接上，是**镜像那格的
+分页表少画了一页** —— `ScreenMirror.ScreenPageView` 只对 `ScreenPage.face` 画 `PixelAvatar`，
+屏报上来的 `ScreenPage.avatar`（数字分身）落进了 `else -> ScenePage(...)`，那一页在手机上被
+画成一列字（"数字分身 / 答句… / 情绪…"），于是一张脸都没有。
+
+修法：`ScreenPage.avatar` 和 `face` 一样交给 `PixelAvatar`，情绪跟 `ui.emotion` 走。
+这不改屏侧契约 —— 屏的 `avatar` 页在固件里本来就是行列表版式（`AVATAR_ROWS`），
+换的是**手机上那格的画法**，让镜像和"屏上有一张会演的脸"这件事对齐。
+
+**被推翻的条件**：如果屏侧的 avatar 页日后真改成画脸（而不是行列表），那两边要一起改版式；
+判据是"手机上那格和屏上那格看着一致"，不一致以固件 `PAGE_DEFS` 为准。
+
+### 14.3 形象文件留在本机，不进 public 仓库（对屏侧 agent 的说明）
+
+`docs/AVATAR.md` §5 的红线原本写"我们的形象源文件必须在本仓库里"。**这一条内部演示期
+由负责人明确豁免**，理由是仓库是 public、形象素材有版权顾虑。所以现在的状态是：
+
+- 手机侧形象代码 `apps/android/.../ui/PixelAvatar.kt`、`ui/MuseAvatarData.kt`、
+  测试 `PixelAvatarRenderTest.kt`、对照图 `docs/reference/avatar-7-emotions.png`
+  **只在本机工作区，不提交、不推远端。**
+- 因此**屏侧 agent 不能从远端仓库同步到手机这版的几何数字**。需要核对时：
+  以 `docs/AVATAR.md` §1 的表为准（那份是进仓库的规范），或直接在群里要最新的
+  `PixelAvatar.kt`/`MuseAvatarData.kt` 文件。**别假设远端 HEAD 里有它。**
+- 若日后决定把形象放进仓库，先在本文件补一条许可出处，再动 `AVATAR.md` §5。
+
+**被推翻的条件**：换成私有仓库，或形象素材的许可问题理清。
+
+---
+
+## D13 · 手机自己也念晓伊：把 Edge 的令牌算法搬进 `:core`
+
+**状态**：生效（2026-11-10）
+
+用户的原话是"保持就用 edge 晓伊"。桌面彩排台一直是 `tools/tts-edge.py` → pip 装的
+`edge_tts` → `zh-CN-XiaoyiNeural`，而手机那条一直是百度 `gettts`（音色是"度小美"）或系统 TTS。
+两边听感不同不是退化，是**根本用了两个声音**，这个差别用户每次都能听出来。
+
+先排除了所有更便宜的路，每条都有落地的状态码，不是猜的：
+
+| 想走的路 | 结果 |
+|---|---|
+| 网关 `api.maomaoai.pro` 出 TTS | 31 个模型全 text；`tts-1`/`cosyvoice-v2`/`qwen-tts` 等 7 个逐条 POST `/audio/speech`，全是 503 `model_not_found` |
+| 百度换童声（`per=4/103/110/111`、`tts.baidu.com`、`pit`） | `tts.baidu.com` 一律 `err_no 502 / "Not verified user"`；`gettts` 忽略 `per`/`pit`（4 种组合 md5 相同），只剩 `per=0` 可合成 |
+| 微软翻译那条 keyless 口 | `edge.microsoft.com/translate/auth` 与 `api-edge.cognitive.microsofttranslator.com` 都 404/401，已关闭 |
+| 公共 Edge 代理 | travisvn 404、vercel 超时、HF 超时、`/tfetspkt` 404 |
+| 简化令牌 / 降 Chromium 版本 | 各种前缀拼法 + 1-100…1-143 全 403，CS64 半段伪造不出来 |
+
+**所以只剩一条**：让手机自己连 Edge。`Sec-MS-GEC` v2 是准入令牌，`edge_tts/drm.py` 里是
+**改过的 SHA-256**（换初值、换第 15 个轮常量、两处 σ 修正）加一台 CS64 混合器 ——
+标准库的 `MessageDigest` 算出来和它对不上，逐位比过。移植落在 `core/ai/EdgeToken.kt`，
+向量钉在上游亲手算的两个时间点上（`EdgeTokenTest`）。
+
+**许可这件事必须写明，因为仓库是 public**：这段算法出自 `edge-tts`（LGPL-3.0），
+上游自己声明是对 Microsoft Edge 朗读接口的逆向实现，**不是微软公开的规范**；令牌算法随服务端变，
+不是稳定契约。这次照搬的是同一份开源实现，出处记在 `docs/THIRD-PARTY.md`。
+**被推翻的条件**：接口改算法时这条会先坏（表现是 403，然后自动退百度兜底）；
+到时候的正路是换 Azure Speech F0 的订阅 key（真·晓伊、50 万字符/月免费），而不是再逆向一次。
+
+**兜底顺序写死在 `NetVoice.fetch`**：晓伊 → 百度 `gettts` → 本机 TTS。三档在设置页的
+「答句声音」那一格分开显示（`edge`/`baidu`/`system`），因为这三档的听感差别就是用户会来问的东西。
+
+---
+
 ## D12 · 养车推荐是规则，不是推荐流
 
 **状态**：生效（2026-11-05，规格在 `docs/MAINTENANCE.md`，这条只记为什么这么定）

@@ -98,7 +98,10 @@ enum class ReplySource {
     /** 真模型端点生成的 */
     Model,
 
-    /** 该走模型但端点没配，退回本地话术 —— 这条必须让界面看得出来 */
+    /**
+     * 该走模型但最后没用上模型的话术：端点没配**或这次没答上来**（密钥、地址、网络）。
+     * 界面必须结合端点是否填齐来标 —— 两种情况的下一步不同，见 [com.carpet.satdemo.core.ai.AiProvider.lastError]。
+     */
     LocalFallback,
 
     /** 权限没开，网关拦下了 */

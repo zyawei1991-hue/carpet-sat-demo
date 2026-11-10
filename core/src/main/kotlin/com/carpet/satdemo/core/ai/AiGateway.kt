@@ -23,6 +23,12 @@ class AiGateway(
 
     val history: List<ChatTurn> get() = turns.toList()
 
+    /**
+     * 上一次真模型为什么没答上来。设置页要把它原样摆出来 ——
+     * 「未接模型」是状态，用户还得知道下一步该改地址、换密钥还是换网络。
+     */
+    val lastModelError: String? get() = provider.lastError
+
     /** 界面要能逐条说"这条现在准不准"，所以判定得能被外面问一句 */
     fun can(skillId: String): Boolean = skills.byId(skillId)?.let { PermissionTier.allows(granted, it.needs) } ?: false
 
@@ -41,6 +47,7 @@ class AiGateway(
             // 没命中关键词也要能答：走模型，但事实表里只有状态机给得出的东西
             val facts = summarize(ctx)
             val out = if (provider.live) provider.complete(facts, history.toList(), q) else null
+            if (provider.live && out == null) log("${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}）")
             return record(
                 if (out != null) AiReply(guard(out), skill = null, source = ReplySource.Model)
                 else AiReply(NO_MATCH, skill = null, source = ReplySource.LocalFallback),
@@ -69,7 +76,10 @@ class AiGateway(
         val model = if (provider.live) provider.complete(facts + summarize(ctx), history.toList(), q) else null
         // 真模型没答上来时这行是唯一说得清「屏上那句到底是谁写的」的痕迹。
         // 不打出来的话，现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错。
-        if (provider.live && model == null) log("${provider.label} 这句没回来（超时/非 JSON/被拒），用技能自己的话术兜底")
+        // 原因必须带上 —— "HTTP 404"和"域名解析不了"要用户做的事完全不同。
+        if (provider.live && model == null) {
+            log("${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}），用技能自己的话术兜底")
+        }
         return record(
             AiReply(
                 text = model?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",
