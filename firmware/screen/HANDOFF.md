@@ -2175,3 +2175,124 @@ App 侧整包要求写在 `docs/APP-SCREEN-CONNECT.md` 第十节。
 **`:core:test --rerun-tasks` 同轮跑过：305 条、0 失败 0 错误**（含 `SchemaDriftTest` 13 条 ——
 它就是逼着 `CommandType` 和 schema 的 `cmd` 一起加 `wake` 的那条，只改 schema 会直接红）。
 `components/screen_link/` 不进 patch，走 §3 那条 `cp -r`。
+
+### 15.16 「App 显示连不上圆屏」这一趟：称到了真因，也称到了链路本来是通的
+
+现场事实是手机 App 报「无法连接圆屏」，而 App 侧那一轮排查没找到东西。这一趟把屏侧的串口
+从头到尾称过一遍，结论和之前的猜测不一样：**屏能连上 App，而且当天就连上过**；
+连不上是另外两件事，都在这台板子的内存上，而且都是**一次性的死法** —— 一旦踩到，本轮再也回不来。
+
+**① 链路本身是通的（这一条最重要，先把方向定下来）。** COM8，出厂地址、手机热点、板上就是演示那块：
+
+```
+I (2864) link.wifi: got IP 192.168.43.4
+I (3046) carpet: dialing ws://192.168.43.1:8443 (built-in)
+I (3262) screen_link: ws 接入 ws://192.168.43.1:8443
+I (3265) screen_link: hello 已发：WS175B-A3F7  电量未知
+I (3266) carpet: linked, contract v3
+I (3292) carpet: sent page_report
+```
+
+所以「App 连不上屏」里没有任何一条是「手机端服务端不通 / 白名单不通 / 契约谈不拢」。
+屏的 `@status` 那一份 `link.paired=false state="Connecting"` 说的是**屏自己没拨号**，
+不是手机拒了 —— 拨号根本没发生：`>url` 回的是 `dialed=0`，`>carpet` 回的是 `fails=0`。
+
+**② 第一种死法：开机那一刻内部 RAM 不够，建链路任务失败，而 gate 是一条一次性的路。**
+同一块板子重开机一次（前面那次因为 ③ 复位过），原文：
+
+```
+I (27087) link.wifi: got IP 192.168.43.4
+E (29043) carpet: screen_link_start: ESP_ERR_NO_MEM
+I (33407) link.heartbeat: hb t=32s ... wifi=up ws=down ... int=16K/7K min=7K
+```
+
+`carpet_link.c` 的 `gate_task` 是「等 Wi-Fi 起来 → 开链路 → `vTaskDelete(NULL)`」。
+开失败它只印一条 `E` 然后把这条任务删掉，于是那一整次开机 `dialed=0 fails=0` 一直到 t=113s，
+一次都不会再拨。**屏有网、地址对、服务端活着，但永远连不上** —— 现场看到的就是 App 那句「无法连接」。
+改：`gate_task` 现在带阶梯重试（5 / 15 / 30 / 60 秒封顶），每轮重读地址、真的重开一次；
+`screen_link_start()` 的失败路径全部走新加的 `start_fail()` 把已经拿到的东西退回去
+（不退的话 `s_ws` 还挂着，下一轮只会撞 `ESP_ERR_INVALID_STATE`，「重试」就是个空壳）。
+
+**③ 第二种死法：链路起来一秒之后，编解码器把整机撞崩。** 就是 ② 那次复位的真身，panic 现场：
+
+```
+E (4342) i2s_common: i2s_alloc_dma_desc(542): allocate DMA buffer failed
+E (4348) i2s_std: i2s_std_set_slot(158): allocate memory for dma descriptor failed
+E (4361) I2S_IF: Failed to reconfig STD slot, reGuru Meditation Error: Core  1 panic'ed (LoadProhibited)
+EXCVADDR: 0x00000000
+Backtrace: 0x421014d1 ... 0x4204b453
+```
+
+`addr2line` 对 `build-muse-s3-175-carpet/muse-gadget.elf`（ELF SHA256 前缀 `b283b092f`）解出来是
+`i2s_rx_channel_start`(i2s_common.c:153) ← `i2s_channel_enable` ← `_i2s_drv_enable` ←
+`esp_codec_dev_open` ← `open_codecs`(muse_audio.c:115) ← `muse_audio_init` ←
+`muse_voice_start` ← `muse_app_run` ← `boot_task` —— 也就是说 DMA 缓冲要不到之后，
+`esp_codec_dev` 里那个 slot 重配没检查失败，回头 enable 时照着没 alloc 出来的描述符解引用，
+NULL 直接踩。这是 Espressif 组件的形状，**我们不改它，改的是让它要不到内存的那一口气**。
+§15.11 / §15.13 那两次「5 分钟窗口里死」和这一次「开机 4 秒死」现在能并成一条：
+都是这一条 panic，只是被叫起来的时机不同。
+
+**④ 那口气是什么：链路的三条任务栈都写大了。** 同一个坑（`usStackDepth` 是**字**不是字节）
+在 `screen_link.c` 里比 §15.14 那条更深：
+`xTaskCreate(link_task, "screen_link", 8192, …)` 要的是 **32 KB**，不是作者以为的 8 KB。
+这一版改完称到的余量（连上、收过 state、发过 `page_report`、走完一轮断线之后回读）：
+
+```
+I (153859) screen_link: link_task 栈还剩 2004 字      # 峰值 2092 字，4096 字这一档余量翻倍
+```
+
+所以 `link_task` 4096 字（16 KB）、`carpet_url` 那条从 4096 → 2048 字，两条都留了高水位回读；
+`carpet_gate` 维持 4096 字（它正在干「建不起来」那一段，减它是减余量）也加了回读。
+**注意别把这次改动读成「32 KB 就是 panic 的凶手」：这一条我没单独称过** ——
+内部最大连续块只剩 19K 的时候那 32 KB 照样建起来了，说明这一版任务栈是能落 PSRAM 的。
+改小是拿量到的峰值减的，不是拿 panic 反推的。
+
+**⑤ 第三种形状（顺手称到，同一条根）：`>url` 改地址会「改了没反应」。**
+
+```
+E (472819) carpet: url restart task out of memory
+@url now=ws://192.168.43.1:8443 src=factory saved=ws://192.168.43.1:8443 linked=1 dialed=1
+```
+
+稳态内部 RAM 只剩 10K 空闲 / 4K 最大连续，那条一次性任务（原 16 KB 栈）建不出来，
+地址写进 NVS 了但没重拨。上面 ④ 把它减到 8 KB，并在失败那一条日志里带上内存数。
+
+**⑥ 还改了一条已经死过一次的：`esp_websocket_client_start()` 失败之后不能原地重拨。**
+`E websocket_client: Error create websocket task` 之后，组件的 state 已经停在 INIT，
+以后每一次 `start()` 都在入口回 `E The client has started`（真机 t=154859 / t=157352 两条），
+屏这边表现为「退避阶梯在跑但永远连不上」。`screen_link.c` 现在在 start 失败时
+换掉整个句柄（destroy + 重新 init）再走阶梯。
+**这一条改完还没在真机上制造过同一种失败**（要造它得在内部 RAM 只剩 4K 的那一刻拨号，
+造不出来），称到的只有代码路径和那条旧证据。
+
+**⑦ 心跳里 `ws=` 那一栏不是我们的链路。** `hb … ws=down` 读的是 `noise_ctrl_is_connected()`
+（Muse 官方 Home Link 云端），`setup=advertising` 同理；彩排链路好不好看的是
+`>carpet` 的 `linked=` / `>url` 的 `dialed=`。这一条以前每次都要解释一遍，写在这。
+
+**⑧ 热点侧的量还是要补**：这一趟看到的 `no saved wifi network nearby`（屏扫到 3~6 个 AP
+但没有一个叫「Mate 60」）说明华为热点在没人连之后会自己关；§10.3 那条放大关系仍在。
+现场顺序仍然是**先开热点 → 再按一下屏**（叫醒会立刻强制一次全量扫描，实测）。
+
+### 15.17 同步状态
+
+`muse-carpet.patch` 这一轮（11-10 深夜，§15.16 那一趟）重打过：
+**27 个文件（26 个文本 + 那份字库二进制）、4333 行新增 / 86 行删，patch 7418 行 / 387,845 字节**
+（相对上一版：`carpet_link.c` 1135 → 1169 行，改动是 `gate_task` 的阶梯重试、
+`start_fail()` 那条不退回去就永远拨不出去的清理、`carpet_url` 栈 4096 → 2048 字、
+两条高水位回读；没有新增文件）。
+**干净 worktree 这轮只做到「解得干净 + 解出来就是工作树」这一层**：
+新开了一个 `D:/dev/tmp/muse-clean-v4`（`git worktree add --detach … cdc169d`），
+`git apply --check` 过、真 `git apply` 过、解出 17 条改动、字库 154,528 字节
+（sha256 前缀 `a77558a4`，和工作树同一份），
+`diff --strip-trailing-cr` 比过 `carpet_link.c` / `muse_input.c` / `muse_input.h` /
+`muse_ui.c` / `main/muse_glue.c` / `main/app.c` / `devices/sdkconfig.carpet` —— **七个全 SAME**。
+**没在干净 worktree 里从头重编这一版**（上一版编过，见 §15.15；这一轮的源码是在
+带 patch 的工作树里编 + 刷 + 上板称的：`Project build complete`、esptool
+`Hash of data verified`，板上跑的就是这一份）。
+`components/screen_link/` 不进 patch，走 §3 那条 `cp -r`；
+这轮它改了（`screen_link.c` 794 → 900 行：`mem_note()`/`fill_ws_cfg()`/`client_open()` 三条拆出来、
+`link_task` 栈 8192 → 4096 字 + 高水位回读、start 失败换句柄），
+两份树之间 `diff --strip-trailing-cr` 比过：**SAME**。
+`apps/android` 和 `core/` 这轮**一行没动**（没有协议改动，所以 `SchemaDriftTest` 那 13 条
+用不上，`:core:test` 也就没重跑）；App 侧要的东西仍在 `docs/APP-SCREEN-CONNECT.md` 第十节，
+本轮新加的排障判据在第十一节。

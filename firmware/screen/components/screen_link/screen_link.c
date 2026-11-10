@@ -585,6 +585,58 @@ static void sleep_backoff(uint32_t seconds)
     }
 }
 
+/* 这一句存在的唯一理由：失败的时候现场要能一眼看出是"内存"而不是"网络"。
+ * 光一条 ESP_ERR_NO_MEM 分不开 —— 内部 RAM 空闲多少、最大连续块多少，才是那条判据。
+ * 调用处的缓冲区一律 96 字节：这三个数拼起来最长 66 字节，而 -Wformat-truncation
+ * 按 unsigned 的十位最坏情况算，48 字节那种写法直接编不过。 */
+static void mem_note(char *out, size_t n)
+{
+    snprintf(out, n, "内部 RAM %uK 空闲/最大连续 %uK，PSRAM %uK",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+}
+
+/* 组件 config 的填法只留这一处：开机建一次，start 失败换句柄时还要建同一份。
+ * 抄两遍的下场是以后改一处漏一处。 */
+static void fill_ws_cfg(esp_websocket_client_config_t *ws_cfg)
+{
+    memset(ws_cfg, 0, sizeof(*ws_cfg));
+    ws_cfg->uri = s_cfg.url;
+    ws_cfg->buffer_size = SCREEN_LINK_MAX_FRAME;
+    /* 两份 buffer_size 的缓冲（rx/tx）是 `malloc` 出来的：这一版
+     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096，正好 4096 字节这一档留在**内部 RAM**，
+     * 所以链路一起来就固定要走 8 KB 内部 —— 这就是真机稳态内部空闲从 22K 掉到 10K
+     * （2026-11-10，`hb t=7s int=10K/4K min=2K`）里最大的那一块。
+     * task_stack 这一格收的是**字**（不是字节），4096 字 = 16 KB，跟组件默认档
+     * WEBSOCKET_TASK_STACK(4*1024) 同一档，先不动。
+     * 2026-11-10 真机 153366 那条 `Error create websocket task` 就是这一档要不到：
+     * 那一刻内部只剩 10K 空闲 / 4K 最大连续；换句柄那条出路在下面 link_task 里。 */
+    ws_cfg->task_stack = 4096;
+    /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
+     * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
+     * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
+    ws_cfg->disable_auto_reconnect = true;
+    ws_cfg->reconnect_timeout_ms = 1000;
+}
+
+/* 建出一个装好事件回调的句柄（不含 start）。成功时 s_ws 非空。 */
+static esp_err_t client_open(void)
+{
+    esp_websocket_client_config_t ws_cfg;
+    char mem[96];
+
+    fill_ws_cfg(&ws_cfg);
+    s_ws = esp_websocket_client_init(&ws_cfg);
+    if (s_ws == NULL) {
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "ws 句柄建不出来 %s：%s", s_cfg.url, mem);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_handler, s_ws);
+    return ESP_OK;
+}
+
 static void link_task(void *arg)
 {
     (void)arg;
@@ -598,12 +650,28 @@ static void link_task(void *arg)
          * 2026-11-05 真机抓到 "Error create websocket task"：那会儿内部 RAM 最大连续块
          * 只剩 4K。以前这里不看返回值，失败后直接撞进下面那个 portMAX_DELAY 死等，
          * UP/DOWN 两个位再没人置过，退避阶梯一次都没跑 —— 表现是"永远连不上，且再也不试"。
-         * 重复 start() 是安全的：create_transport 进来先把上一轮的 transport_list 销毁。 */
+         * **但"重复 start() 是安全的"那一条是错的**，2026-11-10 真机称到：start 在建任务
+         * 那一步失败后组件的 state 已经停在 INIT，于是以后每一次 start() 都在入口就回
+         * `The client has started`（t=154859 / t=157352 两条 E，之后到本轮结束再没连上）。
+         * 出路不是再 start 一次，是这个句柄整个换掉。 */
         if (esp_websocket_client_start(s_ws) != ESP_OK) {
+            char mem[96];
             if (s_stopping) break;
             s_dial_fails++;
+            mem_note(mem, sizeof mem);
+            ESP_LOGE(TAG, "start 没起来（第 %lu 次连续失败）：%s；换掉整个 ws 句柄重来",
+                     (unsigned long)s_dial_fails, mem);
             sleep_backoff(BACKOFF_S[step]);
             if (step < BACKOFF_STEPS - 1) step++;
+            /* 只有链路任务自己在这一刻持有 s_ws：s_up 是 false，发帧那条(第 139 行)
+             * 有 `s_up && s_ws != NULL` 兜着，screen_link_stop() 也在 s_ws==NULL 时直接返回。 */
+            esp_websocket_client_destroy(s_ws);
+            s_ws = NULL;
+            if (client_open() != ESP_OK) {
+                ESP_LOGE(TAG, "换句柄也没换成，%d 秒后再试一轮", (int)BACKOFF_S[step]);
+                sleep_backoff(BACKOFF_S[step]);
+                if (step < BACKOFF_STEPS - 1) step++;
+            }
             continue;
         }
         EventBits_t bits = xEventGroupWaitBits(s_eg, BIT_UP | BIT_DOWN | BIT_STOP, pdTRUE, pdFALSE,
@@ -660,6 +728,15 @@ static void link_task(void *arg)
 
             if (s_cb.on_disconnected != NULL) s_cb.on_disconnected();
             xEventGroupWaitBits(s_eg, BIT_DOWN, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
+            /* 这一行是量体裁衣用的，不是装饰。这条任务的 `8192` 一直是按**字节**写的，
+             * 而这个 kernel 的 usStackDepth 收的是**字**（FreeRTOS-Kernel task.h:315 +
+             * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），
+             * 所以真机上一口吃掉的是 32 KB 连续内部 RAM —— 和 carpet_cmd 那次同一个坑。
+             * 2026-11-10 真机：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
+             * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 → LoadProhibited panic，
+             * 而那 32 KB 就是在这中间拿走的。高水位从这里读，改小才有依据。 */
+            ESP_LOGI(TAG, "link_task 栈还剩 %u 字",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
         }
         /* 这条 else 分支以前是一行 `continue`，退避根本没跑到就撞回 start()。
          * "服务端还没起来"是演示现场最常见的一种断法，实测那时每 10 秒撞一次
@@ -683,6 +760,24 @@ static void link_task(void *arg)
 
 /* ---------------- 公共 API ---------------- */
 
+/* 开到一半失败就把已经拿到的全部退回去，好让下一次 start 是**真的再试一遍**。
+ * 不退的形状是称出来的：esp_websocket_client_init 成功、随后 xTaskCreate 因为内部 RAM
+ * 开不出那一整块栈而失败，s_ws 还挂在那儿 —— 下一轮进来先撞
+ * `if (s_ws != NULL) return ESP_ERR_INVALID_STATE`，"重试"于是永远只会返回同一个错误，
+ * 而 ws 那两份 4 KB 缓冲和 PSRAM 那块攒包每轮再漏一遍。
+ * 2026-11-10 真机：t=27s 关联上热点，t=29s `screen_link_start: ESP_ERR_NO_MEM`，
+ * 之后一直到 t=113s `ws=down fails=0 dialed=0`，一次都没再拨。 */
+static esp_err_t start_fail(esp_err_t err)
+{
+    if (s_ws != NULL) { esp_websocket_client_destroy(s_ws); s_ws = NULL; }
+    if (s_asm != NULL) { free(s_asm); s_asm = NULL; }
+    if (s_rx_q != NULL) { vQueueDelete(s_rx_q); s_rx_q = NULL; }
+    if (s_eg != NULL) { vEventGroupDelete(s_eg); s_eg = NULL; }
+    s_task = NULL;
+    s_up = false;
+    return err;
+}
+
 esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_callbacks_t *cb)
 {
     if (cfg == NULL || cfg->url == NULL || cfg->screen_id == NULL) return ESP_ERR_INVALID_ARG;
@@ -698,32 +793,43 @@ esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_call
 
     s_eg = xEventGroupCreate();
     s_rx_q = xQueueCreate(8, sizeof(rx_item_t));
-    if (s_eg == NULL || s_rx_q == NULL) return ESP_ERR_NO_MEM;
+    if (s_eg == NULL || s_rx_q == NULL) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "链路的小对象（事件组/队列）建不出来：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
 
     /* 攒分片那 4KB 从 PSRAM 要（理由见上面 s_asm 的注释）。要不到就明确失败，
      * 不悄悄退回 .bss —— 那正是这次把链路饿死的形状。 */
     s_asm = heap_caps_malloc(SCREEN_LINK_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_asm == NULL) return ESP_ERR_NO_MEM;
+    if (s_asm == NULL) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "攒包那 4KB（PSRAM）也要不到：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
 
-    esp_websocket_client_config_t ws_cfg = {0};
-    ws_cfg.uri = s_cfg.url;
-    ws_cfg.buffer_size = SCREEN_LINK_MAX_FRAME;
-    /* 4096 = 组件自己在 task_stack 不给时的默认档（esp_websocket_client.c 里
-     * WEBSOCKET_TASK_STACK）。这里原来是 8192：内部 RAM 要一整块 8K，真机上开不出来。
-     * 走的是明文 ws://，没有 TLS 握手要吃栈，4K 这一档就是它设计的用途。 */
-    ws_cfg.task_stack = 4096;
-    /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
-     * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
-     * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
-    ws_cfg.disable_auto_reconnect = true;
-    ws_cfg.reconnect_timeout_ms = 1000;
+    if (client_open() != ESP_OK) return start_fail(ESP_ERR_NO_MEM);
 
-    s_ws = esp_websocket_client_init(&ws_cfg);
-    if (s_ws == NULL) return ESP_FAIL;
-    esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_handler, s_ws);
-
-    BaseType_t ok = xTaskCreate(link_task, "screen_link", 8192, NULL, 5, &s_task);
-    return ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    /* 这条以前写 8192。这个 kernel 的 usStackDepth 收的是**字**（task.h:315 +
+     * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），所以那一行要的
+     * 是 32 KB，不是作者以为的 8 KB —— 和 carpet_cmd 那次是同一个坑。
+     * 真机 2026-11-10：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
+     * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 LoadProhibited panic。
+     * 这 24 KB 差额是不是那一下的直接凶手**没单独称过**（栈这一版是能落 PSRAM 的：
+     * 内部最大连续块只剩 19K 时那 32 KB 照样建起来了），所以这一条的依据不是那条 panic，
+     * 是量出来的高水位：连上、收过 state、发过 page_report、走完一轮断线之后
+     * **还剩 2004 字**（峰值 2092 字）—— 4096 字这一档余量翻倍，够用。
+     * 每轮断线会回读一次那个数（链路任务里那条 `link_task 栈还剩`），不够就往抬。 */
+    BaseType_t ok = xTaskCreate(link_task, "screen_link", 4096, NULL, 5, &s_task);
+    if (ok != pdPASS) {
+        char mem[96];
+        mem_note(mem, sizeof mem);
+        ESP_LOGE(TAG, "链路任务建不出来：%s", mem);
+        return start_fail(ESP_ERR_NO_MEM);
+    }
+    return ESP_OK;
 }
 
 esp_err_t screen_link_stop(void)

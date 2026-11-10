@@ -3366,10 +3366,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..05bf211
+index 0000000..c14f405
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1135 @@
+@@ -0,0 +1,1169 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -4250,6 +4250,12 @@ index 0000000..05bf211
 +        ESP_LOGI(TAG, "url saved (%s); the link starts on its own once Wi-Fi is up", s_url);
 +    }
 +    xSemaphoreGive(s_link_mtx);
++    /* 这一行量的是"这一趟吃到多深"，留给下一次改这一档用。
++     * 原来是 4096 字（16 KB），2026-11-10 真机稳态内部 RAM 只剩 10K/4K 的时候，
++     * `>url` 直接回 `E carpet: url restart task out of memory` —— 地址改了但没重拨，
++     * 现场看到的表现是"改了没反应"。现在这一档 2048 字（8 KB），余量够不够看这里。 */
++    ESP_LOGI(TAG, "carpet_url 这一趟用完还剩 %u 字",
++             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
 +
@@ -4259,8 +4265,11 @@ index 0000000..05bf211
 +        ESP_LOGE(TAG, "no link mutex, url change not applied");
 +        return;
 +    }
-+    if (xTaskCreate(url_restart_task, "carpet_url", 4096, NULL, 4, NULL) != pdPASS) {
-+        ESP_LOGE(TAG, "url restart task out of memory");
++    if (xTaskCreate(url_restart_task, "carpet_url", 2048, NULL, 4, NULL) != pdPASS) {
++        /* 带数字的那一条：现场只有"内存"和"别的"两种死法分得开。 */
++        ESP_LOGE(TAG, "url restart task out of memory: 内部 RAM %uK 空闲/最大连续 %uK",
++                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
++                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 +    }
 +}
 +
@@ -4330,13 +4339,38 @@ index 0000000..05bf211
 +    s_cb.on_dialog = on_dialog;
 +    s_cb.on_command = on_command;
 +
-+    xSemaphoreTake(s_link_mtx, portMAX_DELAY);
-+    url_read();
-+    esp_err_t err = link_open();
-+    xSemaphoreGive(s_link_mtx);
-+    if (err != ESP_OK) {
-+        ESP_LOGE(TAG, "screen_link_start: %s", esp_err_to_name(err));
++    /* 开不出去就阶梯再来一次，而不是印一条 E 然后把这条任务删掉。
++     * 删掉那一种的代价是 2026-11-10 真机称出来的：t=27s 关联上热点、t=29s
++     * `screen_link_start: ESP_ERR_NO_MEM`（link_task 那一整块栈那轮开不出来），
++     * 之后一直到 t=113s 都是 `ws=down dialed=0 fails=0` —— 屏有网、地址对、
++     * 手机上的服务端也确实活着（同一个固件 t=3.3s 报过 `linked, contract v3`），
++     * 但 App 那边永远显示"连不上圆屏"，屏这边一次都不再拨。
++     * 开机那几十秒正好是内部 RAM 最紧的一段时间（显示、字体、编解码器都在这时候抢），
++     * 撑过去就好了，所以这一条只需要等，不需要别的。 */
++    static const int GATE_RETRY_S[] = {5, 15, 30, 60};
++    const int LAST = (int)(sizeof GATE_RETRY_S / sizeof GATE_RETRY_S[0]) - 1;
++    for (int tries = 0; !s_link_started; tries++) {
++        esp_err_t err = ESP_OK;
++        xSemaphoreTake(s_link_mtx, portMAX_DELAY);
++        /* 拿到锁再说：`>url` 改地址那条（url_restart_task）也在这把锁后面开链路，
++         * 它先开成了的话这里就别再开 —— 第二次 start 只会撞 INVALID_STATE，
++         * 而这一条会把重试阶梯一直跑到 60 秒封顶，日志里全是假故障。 */
++        if (!s_link_started) {
++            url_read();
++            err = link_open();
++        }
++        xSemaphoreGive(s_link_mtx);
++        if (err == ESP_OK) break;
++        int wait_s = GATE_RETRY_S[tries > LAST ? LAST : tries];
++        ESP_LOGE(TAG, "screen_link_start: %s; %d 秒后再拨（第 %d 次）", esp_err_to_name(err),
++                 wait_s, tries + 1);
++        vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
 +    }
++    /* 这一档还是 4096 字（16 KB），没动它：它跑的是 url_read（读 NVS）+ link_open
++     * （里面 ws 句柄和链路任务都在建），现在正是建不起来的那一段时间，减它就是减余量。
++     * 先把它用完时的余量称出来，下次要抬要压都有数。 */
++    ESP_LOGI(TAG, "carpet_gate 这一趟用完还剩 %u 字",
++             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
 +

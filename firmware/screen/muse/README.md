@@ -25,9 +25,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 26 个文件、4217 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，7,290 行，`git diff --binary` 打的，字库在里面是 base85 段。
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-09 深夜「断电验尸那台诊断」那轮重打后实读的）：
+- 我们的全部改动 = 27 个文件、4333 行新增 / 86 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，7,418 行 / 387,845 字节，`git diff --binary` 打的，字库在里面是 base85 段。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 下面这组是 2026-11-10 深夜「拨号那次死掉」那轮重打后实读的）：
   ```
   esp32/components/muse/CMakeLists.txt       |  23 +-   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行)
   esp32/components/muse/Kconfig              |  31 +-   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
@@ -38,12 +38,13 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_audio.h |  54 +   (新)
   esp32/components/muse/carpet/carpet_diag.c | 226 +   (新，11-09 深夜「断电验尸」：NVS 命名空间 `cdiag` 一圈 24 条，每条带同一组 PMU 原始寄存器 + VBAT；`>diag` 翻、`>diag clear` 抹。开机那两条**先存 RAM**，等 NVS 写得动了再补 —— 第一版没绕这一道，刷完实测 `>diag seq=0`，两条开机记录当场静默丢失，根因就是 §2 下面那条"`carpet_link_start()` 早于 `muse_settings_init()`"。)
   esp32/components/muse/carpet/carpet_diag.h |  41 +   (新，那五个入口：latched / boot / event / tick / dump)
-  esp32/components/muse/carpet/carpet_link.c | 1067 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()`)
+  esp32/components/muse/carpet/carpet_link.c | 1169 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」)
   esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
   esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 243 +   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear`）
+  esp32/components/muse/muse_input.c         | 248 +-   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口，链接任务收到 App 的 `cmd:"wake"` 就点它)
+  esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
@@ -57,7 +58,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/main/muse_glue.c                     |  51 +-   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，26 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  再 `git apply`，27 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
   2026-11-08 这天打了四次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
   （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
   里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
@@ -157,6 +158,27 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     6144 那版量到 5211 字、剩 933 字（约 3.7 KB）—— 注意 `usStackDepth` 是**字数**不是字节数。
     **这一轮还没称的**：`on_command` 里真认 `cmd:"wake"` 那一行走的是 ws，要一个拨得通的服务器，
     这台 PC 和屏在华为热点上互不通，留到现场由 App 那一头发。
+  - 2026-11-10 深夜「App 显示无法连接圆屏」这轮（`HANDOFF.md` §15.16、`docs/APP-SCREEN-CONNECT.md` §11）
+    —— 干净 worktree `D:/dev/tmp/muse-clean-v4`（`git worktree add --detach … cdc169d`）
+    `git apply --check` 过、真 `git apply` 过、解出 patch 里那 27 个文件（`git status` 只看得到 17 条：
+    15 个改过的 + 新目录 `carpet/`（内含 10 个文件）+ 新的 `sdkconfig.carpet`）/ 字库 154,528 字节
+    （sha256 前缀 `a77558a4`，和工作树同一份），
+    `diff --strip-trailing-cr` 比 `carpet_link.c` / `muse_input.c` / `muse_input.h` / `muse_ui.c` /
+    `main/muse_glue.c` / `main/app.c` / `devices/sdkconfig.carpet` 七个全 SAME。
+    **这一轮没在干净 worktree 里从头重编**（上一轮编过，见上面那条），源码是在带 patch 的工作树里
+    编 + 刷 + 上板称的：`Project build complete`、esptool `Hash of data verified`。
+    落下的东西全在内存那一条线上：`gate_task` 拨号失败改成 5/15/30/60 秒阶梯重试、
+    `carpet_url` 那条一次性任务 4096 → 2048 字（真机称到过 `url restart task out of memory`）、
+    `carpet_cmd`/`carpet_gate` 各留一条高水位回读。`components/screen_link/`（不进 patch 那份）
+    同一轮改了：`link_task` 栈 8192 → **4096 字**（那个数一直是按字节写的，`usStackDepth` 收字数），
+    高水位实测「还剩 2004 字」，`screen_link_start()` 失败路径统一走新加的 `start_fail()` 退回已拿到的东西，
+    `esp_websocket_client_start()` 失败时换掉整个句柄再来。**板上称到链路本来是通的**：
+    `dialing ws://192.168.43.1:8443 (built-in)` → `ws 接入` → `hello 已发：WS175B-A3F7` →
+    `linked, contract v3` → `sent page_report`；同一次开机 1 秒之后
+    `i2s_alloc_dma_desc: allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 panic
+    （backtrace 已用 `addr2line` 对 `muse-gadget.elf` 解过，ELF SHA256 前缀 `b283b092f`）。
+    **§6 那三条 `errno` 现在多了一种用法**：`dialed=0` 说明屏从没拨号（这一轮修的正是它），
+    `dialed=1 fails>0` 才轮到那三条去分"网的锅还是 App 的锅"。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
