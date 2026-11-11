@@ -643,7 +643,7 @@ return when { screenGot && phoneGot -> NetResult.Both; … }
    `network_security_config.xml` 那条全局禁明文跟蜂窝无关
 2. ~~齿轮面板里 `ai_url` 填的是哪家端点？~~ **已答（2026-11-10 owner 给了 `https://hanbao.party/v1`）：
    这家只有对话面，没有任何语音入口。** 当场称的原文（都在 `protocol/screen-link.md` v4 那一节）：
-   `GET /v1/models` → 200，三档：`deepseek-v4-pro` / `deepseek-v4.1-flash-1017` / `glm-5.3-flash`；
+   `GET /v1/models` → 200，三档：`deepseek-v4-pro` / `deepseek-v4.1-flash` / `glm-5.3-flash`；
    `POST /v1/audio/transcriptions`、`/v1/audio/speech`、`/v1/asr`、`/v1/stt`、`/v1/tts`、`/v1/audio`
    → **全部 `404 page not found`，和随手编一个路径的回话一字不差**；对照组 `/v1/embeddings`、`/v1/messages`
    回 `400`（路由在、body 不对）—— 所以那六个 404 是"真没有"，不是"我用错了方法"。
@@ -662,7 +662,7 @@ return when { screenGot && phoneGot -> NetResult.Both; … }
 
 | 模型 | 用时 | 备注 |
 | --- | --- | --- |
-| `deepseek-v4.1-flash-1017` | 3.95 s | `max_tokens=120` 时**英文思考草稿被当成正文返回**（`reasoning_tokens=120`，正文全是 "We need answer in Chinese…"） |
+| `deepseek-v4.1-flash` | 3.95 s | `max_tokens=120` 时**英文思考草稿被当成正文返回**（`reasoning_tokens=120`，正文全是 "We need answer in Chinese…"） |
 | `glm-5.3-flash` | 4.13 s | 正常；另一次给 `max_tokens=220` 跑到 **10.14 s** |
 | `deepseek-v4-pro` | 7.74 s | 答案最干净 |
 
@@ -862,7 +862,7 @@ sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现
 6. `OpenAiCompatProvider` 那个写死的 `Duration.ofSeconds(12)` 读超时要抬（§12.5），并抑制推理草稿。
    **答句长度按 §12.10：靠 system 提示压到一句 ≤30 字，`max_tokens` 反而要给到 250 以上**
    （实测 20 字答句烧 158 个 completion token、其中 145 个是思考，给 120 会截断漏草稿）；
-   对话面默认模型选 **`deepseek-v4.1-flash-1017`**（压缩提示下实测 3.05 s，三档里最快）
+   对话面默认模型选 **`deepseek-v4.1-flash`**（压缩提示下实测 3.05 s，三档里最快）
 
 **这一节里仍然没称到的，别当已实现讲：**
 
@@ -920,7 +920,7 @@ sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现
 
 | 模型 | 用时 | 答句字数 | completion tokens（其中思考） |
 | --- | --- | --- | --- |
-| **`deepseek-v4.1-flash-1017`** | **3.05 s** | 20 | 158（**145 是 reasoning**） |
+| **`deepseek-v4.1-flash`** | **3.05 s** | 20 | 158（**145 是 reasoning**） |
 | `glm-5.3-flash` | 3.67 s | 25 | 53（35 是 reasoning） |
 | `deepseek-v4-pro` | 6.61 s | 23 | 15 |
 
@@ -937,7 +937,7 @@ sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现
    所以 **3 s 左右是这条对话面的地板**，再要快只能换模型或上流式 —— 那是下一次决策，不是这次
 3. **这轮探测没有喂事实表**（真 App 里 `facts = { aiContext() }` 会喂星历/位置），所以答句内容不代表真实表现：
    两档 flash 都回"需提供卫星编号和当前位置"，而 **`deepseek-v4-pro` 直接编了一个「预计 5 分钟后过顶」**。
-   ⇒ **选 `deepseek-v4.1-flash-1017`**（最快，而且在缺数据时要数据而不是编数据）；
+   ⇒ **选 `deepseek-v4.1-flash`**（最快，而且在缺数据时要数据而不是编数据）；
    同时这条正好说明 §12.5 那道文案红线为什么必须在出口 —— 模型会编"已送达/几分钟后"这类句子
 
 **三、屏上显示与帧预算按 17~30 字这一档算**
