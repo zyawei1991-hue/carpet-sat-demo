@@ -91,9 +91,11 @@ class AppRuntime(private val host: Application) {
         }
         val ok = blePipe.connect()
         if (!ok) _bleState.value = "failed"
-        // 连接结果靠回调推进：轮询 BleBytePipe.state 同步给 UI
+        // 连接结果靠回调推进：轮询 BleBytePipe.state 同步给 UI。
+        // 终态是 linked/failed/scan-failed/closed —— 注意 connect() 先置 "scanning"，
+        // 轮询条件若只认 "connecting" 首轮就会退出，UI 永远卡在扫描
         scope.launch {
-            while (_bleState.value == "connecting" || _bleState.value == "connecting-scan") {
+            while (_bleState.value !in setOf("linked", "failed", "scan-failed", "closed")) {
                 _bleState.value = blePipe.state
                 kotlinx.coroutines.delay(500)
             }

@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -77,6 +78,11 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
             Button(onClick = { app.bleConnect() }) { Text(if (bleState == "linked") "已连接" else "连接 GT1005") }
             Spacer(Modifier.width(Grid.x8))
             Text("状态：$bleState", style = Type.Body)
+        }
+        // 现场排障就靠这几行：扫描失败码（2=应用未注册 1=不支持）、found 的地址、CCCD 状态
+        val bleEvents = remember(bleState) { app.blePipe.events.toList().takeLast(6) }
+        bleEvents.forEach { ev ->
+            Text(ev, style = Type.Caption, color = Ink.TextLow, maxLines = 2)
         }
         if (bleState == "linked") {
             EngRow("走 BLE 真模组（替换模拟模组）", flags.bleModem) { app.setFlag(flags.copy(bleModem = it)) }
