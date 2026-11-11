@@ -177,6 +177,19 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
 **所以对着现在装在手机上的 v3 App 发一条 `mic_chunk`，表现是链路当场被手机关掉、一句话不说**，
 和「App 无法连接圆屏」那两次现场故障同一个观感。
 
+- **2026-11-11 复核（远端 tip `26bbfc4`，逐行看过原码）**：这条风险**从"将来"变成"现在"**。
+  App 已经在 `core/.../runtime/DemoRuntime.kt:513` 的 `ackNow()` 里申报
+  `protocols = listOf(ScreenCodec.CONTRACT_VERSION, 4)`，可 `core/.../protocol/ScreenLink.kt:112`
+  的 `CommandType` **仍然没有 `mic_chunk` 这一项**；入站关线那两行也从文档里原来的 :97-102 挪到了
+  `core/.../screen/ScreenLinkServer.kt:128-131`（`runCatching { ScreenMessage.decode(...) }` 的
+  失败分支 `conn.close(CLOSE_POLICY, "bad contract")`，`CLOSE_POLICY = 1000`，:247），
+  而且彩排台复用同一个服务端（`simulator/.../DemoDriver.kt:169`），**同一风险**。
+  ⇒ **`ack.protocols` 里那个 4 现在不能当门用**：申报和实现分家了。
+  ⇒ 屏侧的规矩：**在手机上实测到这一轮真的收到 `dialog{dir:"up"}` 回写之前，不许对真 App 发
+  `mic_chunk`**；上行实现先只接开发口（`>micup`），默认关。
+  ⇒ 给 App 的两条路（挑一条，别都放着）：**补上 `CommandType.mic_chunk` + 拼装 + 转写**，
+  或者**先把 ack 里的 4 撤掉**。要求写在 `docs/APP-CHANGES-2026-11-11.md` 第 5 节。
+
 屏又**没法自己算出对面是几版**：协商号是服务端算的，`ack` 帧里没有版本字段可以回读，
 固件只能取自己申报的那一档（`components/screen_link/screen_link.c:59-63`，
 `s_negotiated = SCREEN_LINK_CONTRACT_MAX`）。这条不对称是 v1 时就写进注释的已知代价，

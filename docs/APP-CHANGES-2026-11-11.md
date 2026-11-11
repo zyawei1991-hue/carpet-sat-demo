@@ -85,13 +85,39 @@
   —— 两头都在线上，**加大一块会整帧被屏丢掉**（`screen_link.c:538` 是超尺寸直接丢）。
 - `seq` 从 0 连续；**跳号 ⇒ 屏整段丢**（不放半句），`total` 每帧都要带且 ≤ 2 MB。
 
-## 5. v4 上行（`mic_chunk`）：顺序是硬的
+## 5. v4 上行（`mic_chunk`）：**申报已经发出去了，处理还没有 —— 现在屏一按规矩上行就会被你关线**
 
-- 「对着屏说话」需要屏把采集上来的 PCM 推给手机转写。契约形状在 `protocol/screen-link.md` v4 那节，
-  **四张表（schema `command.cmd` ↔ Kotlin `CommandType` ↔ 固件 `CMD_NAMES` ↔ 组件 `ALLOWED`）
-  这轮故意没改**，等 App 先落地申报。
-- **发版顺序不许倒：App 先发**，并在 `AckPayload.protocols` 里带上 v4 版本号；屏看到版本号才打开上行。
-  屏侧不会凭空猜。（v3 那一次就是这么要求的，也是这么撞到过问题的。）
+先说最要紧的一条，2026-11-11 在远端 tip `26bbfc4` 逐行看过：
+
+- `DemoRuntime.kt:513` 的 `ackNow()` 已经在报 `protocols = listOf(CONTRACT_VERSION, 4)`；
+- 但 `ScreenLink.kt:112` 的 `CommandType` **没有 `mic_chunk`**；
+- 入站解码 `ScreenLinkServer.kt:128-131` 是
+  `runCatching { ScreenMessage.decode(message) }.getOrElse { … conn.close(CLOSE_POLICY, "bad contract"); return }`，
+  `CLOSE_POLICY = 1000`（:247）；`Json { ignoreUnknownKeys = true }`（ScreenLink.kt:67）**救不了枚举取值**，
+  serialization-json 1.6.3 对未知枚举值必抛。
+- 彩排台复用同一个 `ScreenLinkServer`（`simulator/.../DemoDriver.kt:169`），**同一风险**。
+
+⇒ 现在这台 App 上，屏只要按 v4 的规矩发第一块 `mic_chunk`，**这条 WebSocket 当场被你关掉**，
+屏侧自有退避重连，现场观感就是"对话和语音全断、链路一直抖"—— 和之前两次「App 无法连接圆屏」一模一样。
+屏这边我已经把上行实现先只接开发口、默认关，**不会拿真 App 试**。
+
+要做的（顺序照这个来，形状细节以 `protocol/screen-link.md` 的 v4 那一节为准）：
+
+1. `CommandType` 加 `mic_chunk`，**同时**改 `protocol/screen-link.schema.json` 里 `command.cmd` 的枚举
+   （`SchemaDriftTest` 就是称这四张表一致的，漏一张单测当场红）。
+2. 入站拼装：按 `turn_id` 收段，`seq` 从 0 必须连续，**断号就整段作废**（和 v3 下行同一套规矩，
+   半句比没句更难解释），段长上限 8 秒 = 256 KB PCM。
+3. 拼完的裸 PCM **补 44 字节 RIFF 头**（16000 / 单声道 / 16 bit）再喂现成的
+   `SiliconFlowAsr.transcribe(wav, timeoutMs)`（`core/.../ai/SiliconFlowAsr.kt:34`，
+   它是**阻塞 HTTP** ⇒ 要放 `Dispatchers.IO`，参考手机自己按键那条：`AppRuntime.kt:753 → :757 → :764`）。
+4. 转写出来的那句回 `dialog{dir:"up", turn_id:屏给的那个, text:…}` ——
+   **`turn_id` 是屏在按下那一刻生成的，不许手机另起一个**（它是这一轮的唯一编号：拼段靠它、去重靠它、答句配对靠它）。
+   然后把这句喂进对话入口（`DialogBridge.ask(question, via="screen", turnId=同一个)`），
+   答句照旧走**已经跑通**的 `dialog{dir:"down"}` + `audio_chunk`，由圆屏念（规矩一，不再本机放）。
+5. 如果这一轮不打算做 2~4，**就把 `ackNow()` 里那个 `4` 撤掉**。申报和实现分家比"屏不知道对面能干什么"危险得多。
+
+四张表这轮的分工：屏侧的 `CMD_NAMES` / 组件 `ALLOWED` 我这边同步加，**schema 和 Kotlin 那两张在你那边**；
+发版顺序照旧不许倒 —— **App 先发、装机、屏才允许真发这一帧**。
 
 ## 6. 一律不许做的事（都撞过，写在最前面省一轮返工）
 
