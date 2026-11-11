@@ -1026,7 +1026,7 @@ class AppRuntime(private val host: Application) {
 
         /** 烧进包的那套端点已经写进 prefs 的标记。改网关/换密钥时改这个值，老机器才会被顶掉 */
         private const val KEY_AI_SEED = "ai_seed"
-        private const val AI_SEED = "1.19"
+        private const val AI_SEED = "1.20"
         private const val KEY_AI_TIER = "ai_tier"
         private const val KEY_VOICE_ENGINE = "voice_engine"
         private const val KEY_VOICE_TONE = "voice_tone"

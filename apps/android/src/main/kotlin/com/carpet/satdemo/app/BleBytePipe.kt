@@ -10,12 +10,10 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
-import android.os.ParcelUuid
 import com.carpet.satdemo.core.modem.ModemBytePipe
 import com.carpet.satdemo.core.modem.RawLine
 import java.util.ArrayDeque
@@ -65,15 +63,19 @@ class BleBytePipe(private val context: Context) : ModemBytePipe {
         val adapter: BluetoothAdapter = mgr.adapter ?: run { log("no-adapter"); return false }
         val scanner = adapter.bluetoothLeScanner ?: run { log("no-scanner"); return false }
 
+        // 上一轮扫描若还挂着（点连接→scan-failed→再点），先停掉再开新的：
+        // 叠加注册会报 SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES(5)
+        runCatching { scanner.stopScan(scanCb) }
+
         state = "scanning"
-        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE)).build()
+        // 过滤器走硬件层时部分机型报错 5；改成软件过滤（扫广播原始字节里有没有 fff0），
+        // 不吃硬件过滤器配额。自研 APP 用 setServiceUuid 能跑是因为它是系统级注册时机
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH)
             .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
             .build()
-        scanner.startScan(listOf(filter), settings, scanCb)
-        log("scan started (fff0)")
+        scanner.startScan(null, settings, scanCb)
+        log("scan started (soft-filter fff0)")
         return true
     }
 
@@ -83,6 +85,10 @@ class BleBytePipe(private val context: Context) : ModemBytePipe {
 
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            // 软件过滤：广播 service uuid 列表里含 fff0 才认（16 位短形式 0xFFF0 优先出现）
+            val uuids = result.scanRecord?.serviceUuids ?: return
+            val hit = uuids.any { it.uuid == SERVICE }
+            if (!hit) return
             val scanner = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
                 .adapter?.bluetoothLeScanner
             scanner?.stopScan(this)
