@@ -23,6 +23,7 @@ import com.carpet.satdemo.core.ephemeris.EphemerisSource
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
 import com.carpet.satdemo.core.link.CellStatus
+import com.carpet.satdemo.core.modem.RawLine
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.CommandType
@@ -68,9 +69,36 @@ class AppRuntime(private val host: Application) {
 
     /**
      * 演示默认跑假卫星模块：GT1005 到货前手机就能整套演。
-     * 换真机是换 [VendorSdkModem]，下面那些开关一个都不用改。
+     * BLE 连上 GT1005 后工程页开关切到真模组（见 [SwitchableModem]）。
      */
-    val modem = SimulatedModem(passWindowMs = ALWAYS_VISIBLE)
+    val simModem = SimulatedModem(passWindowMs = ALWAYS_VISIBLE)
+    val modem = SwitchableModem(simModem) { msg -> runtimeRef?.log(msg) }
+
+    /** GT1005 的 BLE 管道与连接状态（工程页展示） */
+    val blePipe by lazy { BleBytePipe(host) }
+    private val _bleState = MutableStateFlow("idle")
+    val bleState: StateFlow<String> = _bleState
+
+    fun bleConnect() {
+        if (_bleState.value == "linked") {
+            blePipe.disconnect()
+            _bleState.value = "closed"
+            return
+        }
+        _bleState.value = "connecting"
+        blePipe.onRawLine { line ->
+            if (line.direction != RawLine.Direction.FROM_MODULE) return@onRawLine
+        }
+        val ok = blePipe.connect()
+        if (!ok) _bleState.value = "failed"
+        // 连接结果靠回调推进：轮询 BleBytePipe.state 同步给 UI
+        scope.launch {
+            while (_bleState.value == "connecting" || _bleState.value == "connecting-scan") {
+                _bleState.value = blePipe.state
+                kotlinx.coroutines.delay(500)
+            }
+        }
+    }
 
     private val prefs = host.getSharedPreferences("demo", 0)
 
@@ -106,6 +134,8 @@ class AppRuntime(private val host: Application) {
         val engineering: Boolean = false,
         /** 线路原文窗。和上面那个不是一回事：工程页是"我们对发生之事的说法"，这一窗是"线路上真正来过什么" */
         val passthrough: Boolean = false,
+        /** GT1005 BLE 已连接后，把卫星模组从模拟切到真模组（VendorSdkModem on BleBytePipe） */
+        val bleModem: Boolean = false,
     )
 
     private val _flags = MutableStateFlow(Flags(acceptScreens = prefs.getBoolean(KEY_ACCEPT_SCREENS, false)))
@@ -260,6 +290,25 @@ class AppRuntime(private val host: Application) {
             prefs.edit().putBoolean(KEY_ACCEPT_SCREENS, next.acceptScreens).apply()
         }
         if (prev.demoMode != next.demoMode) runtime.setDemoMode(next.demoMode)
+        if (prev.bleModem != next.bleModem) switchBleModem(next.bleModem)
+    }
+
+    /** BLE 已连上且开关打开 → 换成真模组；关掉 → 回模拟模组 */
+    private fun switchBleModem(on: Boolean) {
+        if (on) {
+            if (_bleState.value != "linked") {
+                runtime.log("BLE 未连接，无法切真模组")
+                return
+            }
+            val vendor = VendorSdkModem(blePipe)
+            vendor.start()
+            runCatching {
+                scope.launch { vendor.bringUp() }
+            }
+            modem.switchTo(vendor, "已切到 GT1005 真模组（BLE）")
+        } else {
+            modem.switchTo(simModem, "已切回模拟模组")
+        }
     }
 
     fun setVendorEph(on: Boolean) {
