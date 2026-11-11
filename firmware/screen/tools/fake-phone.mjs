@@ -12,6 +12,21 @@
  *   node fake-phone.mjs --reject             故意不开白名单，验固件收到 "demo lock" 会不会退避
  *   node fake-phone.mjs --drop 20            启动 20 秒后停推 state，验"3 秒变灰 / 10 秒重连"
  *   node fake-phone.mjs --state ./my.json    用一份自定义 state 当模板
+ *   node fake-phone.mjs --v4-ready           演"App 已经把 mic_chunk 做完了"那一版：整帧 v=4、真拼段落 WAV
+ *   node fake-phone.mjs --mic-close          即使 --v4-ready 也收到 mic_chunk 就关链（专称屏侧熔断）
+ *   node fake-phone.mjs --no-v4              ack 只申报 [3]，验屏那边 armed=0、一条上行都不发
+ *   node fake-phone.mjs --micdir ./out       上行 WAV 落哪儿（默认脚本旁边的 mic-capture/）
+ *
+ * 【2026-11-11 晚：默认这一台 = 今天装机那版 App，上行是**关链**的，不是拼段的。】
+ * 读 App 那棵树称到的事实（`core/.../runtime/DemoRuntime.kt:513` + `ScreenLink.kt:112`）：
+ * 它已经在 ack.protocols 里报了 4，但 CommandType 里没有 mic_chunk，严格枚举收到这一帧
+ * 的处理是当场 `close(1000,"bad contract")`。所以默认档就是 v=3 + protocols [3,4] + 收到上行就关。
+ * 要称"App 补完之后"那条路得明说 `--v4-ready`（整帧 v 抬到 4 —— 屏那边现在认的就是这个数，
+ * 光有 protocols 里那个 4 不算许可）。
+ *
+ * 上行音频（契约 v4）这一台是真会处理的：屏松手后把整段按 2560 B/块推过来，
+ * 这里按 turn_id 拼块、查缺号、封 RIFF 落成 .wav，再回 dialog{dir:up}+{dir:down}。
+ * 屏侧那一趟用 `>mictest 3` 就能自己走完，不用真麦克风、也不用真手机。
  *
  * 屏那边 Kconfig 填 ws://<这台电脑的局域网IP>:8443。
  * Windows 记得放行入站（换了端口就把 localport 一起改掉）：
@@ -20,6 +35,8 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -33,6 +50,24 @@ const IDS = new Set(argList('id').length ? argList('id') : ['WS175B-A3F7']);
 const REJECT = process.argv.includes('--reject');
 const DROP_AT = (() => { const v = argList('drop')[0]; return v ? Number(v) : null; })();
 const STATE_FILE = argList('state')[0];
+/* v4 上行的三条人。为什么要做成开关而不是直接写死：现在装在手机上的那版 App
+ * 在 ack 里申报了 4，可 CommandType 里没有 mic_chunk —— 它的入站解码是严格枚举 +
+ * runCatching，收到这一帧的处理是**当场关连接**（protocol/screen-link.md「第一条要求
+ * 不是音频，是让屏先知道对面是几版」）。所以这一台假手机要能同时演这三种人：
+ *   默认            整帧 v=3、protocols:[3,4]、收到 mic_chunk 就 close —— **今天装机那版 App**
+ *   --v4-ready      整帧 v=4、真拼段落 WAV 回 dialog —— App 补完 mic_chunk 之后（CONTRACT_VERSION 抬到 4）
+ *   --no-v4         protocols 只给 [3] —— 更早那版，屏那边 armed 该是 0
+ * --mic-close 再叠在 --v4-ready 上强行关链，专门称屏侧那三道闸里的**熔断**：
+ * `>mic` 里 rejected 该从 0 变 1，而且第二次按不该再把链路搞断。 */
+const NO_V4 = process.argv.includes('--no-v4');
+const READY = process.argv.includes('--v4-ready');
+const MIC_CLOSE = process.argv.includes('--mic-close');
+/* 每一帧 envelope 的 `v`：装机这版的 ScreenCodec.CONTRACT_VERSION 还是 3，补完上行才是 4
+ * —— 而屏那道闸现在认的就是这个数（光 protocols 里那个 4 不算许可）。 */
+const ENV_V = READY ? 4 : 3;
+/* 收到 mic_chunk 拼段还是关链：没准备好就等于关链，和真 App 一致。 */
+const micKills = () => MIC_CLOSE || !READY;
+const MIC_OUT = (() => { const v = argList('micdir')[0]; return v && path.isAbsolute(v) ? v : path.join(path.dirname(fileURLToPath(import.meta.url)), v || 'mic-capture'); })();
 
 const t0 = Date.now();
 const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a);
@@ -116,6 +151,66 @@ function baseState() {
   };
 }
 
+/* ---------------- v4 上行：拼段 → WAV ---------------- */
+
+/** PCM16/单声道 → 一个能直接双击听的 WAV。转写要的是这个容器不是裸流：
+ *  之前称过裸 PCM 喂硅基流动会 500，封了 RIFF 才认（project-uplink-audio-v4）。 */
+function wavBuffer(pcm, rate) {
+  const n = pcm.length;
+  const out = Buffer.alloc(44 + n);
+  out.write('RIFF', 0); out.writeUInt32LE(36 + n, 4); out.write('WAVE', 8);
+  out.write('fmt ', 12); out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20); out.writeUInt16LE(1, 22);          // PCM, 单声道
+  out.writeUInt32LE(rate, 24); out.writeUInt32LE(rate * 2, 28); // 字节率
+  out.writeUInt16LE(2, 32); out.writeUInt16LE(16, 34);          // 块对齐, 位深
+  out.write('data', 36); out.writeUInt32LE(n, 40);
+  pcm.copy(out, 44);
+  return out;
+}
+
+/** 一条连接一段一段地攒；key = turn_id（屏在按下那一刻生成，手机不许换号） */
+function makeMicAssembler() {
+  const segs = new Map();
+  return function micChunk(args) {
+    const turn = String(args.turn_id ?? '');
+    const sq = Number(args.seq);
+    const total = Number(args.total);
+    const rate = Number(args.rate) || 16000;
+    if (!turn || !Number.isFinite(sq) || !Number.isFinite(total)) {
+      log('mic_chunk 少了 turn_id/seq/total，这一帧没法拼：', JSON.stringify(args).slice(0, 160));
+      return null;
+    }
+    let seg = segs.get(turn);
+    if (!seg) {
+      seg = { blocks: new Map(), total, rate, t0: Date.now(), bytes: 0 };
+      segs.set(turn, seg);
+      log(`上行段开：${turn} · total=${total} B (${(total / rate / 2).toFixed(2)} s @${rate})`);
+    }
+    let pcm;
+    try { pcm = Buffer.from(String(args.b64 ?? ''), 'base64'); }
+    catch (e) { log('b64 解不开：', e.message); return null; }
+    if (seg.blocks.has(sq)) log(`重复 seq=${sq}，丢掉`);
+    else { seg.blocks.set(sq, pcm); seg.bytes += pcm.length; }
+    if (seg.bytes < seg.total) return null;                    // 还没齐，等下一块
+    const ids = [...seg.blocks.keys()].sort((a, b) => a - b);
+    const gaps = [];
+    for (let i = 0; i < ids.length; i++) if (ids[i] !== i) gaps.push(i);
+    const ordered = Buffer.concat(ids.map(i => seg.blocks.get(i)));
+    const ms = Date.now() - seg.t0;
+    let file = null;
+    try {
+      fs.mkdirSync(MIC_OUT, { recursive: true });
+      file = path.join(MIC_OUT, `${turn.replace(/[^\w.-]/g, '_')}.wav`);
+      fs.writeFileSync(file, wavBuffer(ordered, seg.rate));
+    } catch (e) { log('WAV 落不下去：', e.message); }
+    segs.delete(turn);
+    log(`上行段齐：${turn} · ${ids.length} 块 ${ordered.length}/${seg.total} B ` +
+        `${(ordered.length / seg.rate / 2).toFixed(2)} s · 收完用了 ${ms} ms · ` +
+        `乱序缺号=${gaps.length ? gaps.join(',') : '无'} · ${file ?? '(没落成文件)'}`);
+    return { turn, seconds: ordered.length / seg.rate / 2, bytes: ordered.length, ms };
+  };
+}
+
 /* ---------------- 一条连接 ---------------- */
 
 let seq = 0;
@@ -128,6 +223,7 @@ const server = net.createServer(sock => {
   let frag = null;
 
   const send = obj => { if (ws && !ws.destroyed) ws.write(encodeText(JSON.stringify(obj))); };
+  const mic = makeMicAssembler();
 
   sock.on('data', chunk => {
     acc = Buffer.concat([acc, chunk]);
@@ -188,7 +284,53 @@ const server = net.createServer(sock => {
       const s = { id, protocols: m.hello?.protocols ?? [1], state: baseState(), dialogUp: 0 };
       sessions.add({ sock: ws, send, s });
       log(`hello 通过：${id} · 固件 ${m.hello?.fw ?? '?'} · 申报契约 ${s.protocols.join('/')}`);
-      send({ v: 2, t: 'ack', seq: ++seq, ack: { for_seq: m.seq } });
+      /* ack.protocols 这一格 + 整帧的 `v` 一起才是屏侧那道自动闸的读数：
+       * 装机那版是 `v=3` 但 protocols 里已经有 4（申报发早了、解码还没写）——
+       * 屏现在**两个都点头才开上行**，所以默认这一档 armed 该是 0；
+       * 要演"补完了"就 --v4-ready（整帧抬到 v=4）。--no-v4 是更早那版，protocols 只给 [3]。 */
+      const ack = { for_seq: m.seq };
+      if (!NO_V4) ack.protocols = READY ? [4] : [3, 4];
+      else ack.protocols = [3];
+      log(NO_V4 ? 'ack：--no-v4，只申报 [3] —— 屏那边 armed 该是 0'
+                : (READY ? `ack：--v4-ready，整帧 v=${ENV_V}、mic_chunk 落 WAV 到 ${MIC_OUT}`
+                         : `ack：整帧 v=${ENV_V}、protocols [3,4] —— 今天装机那版 App 的样子：` +
+                           `屏那边 armed 该是 0（那条 W 就是它给的理由），发上来了就 close`));
+      send({ v: ENV_V, t: 'ack', seq: ++seq, ack });
+      return;
+    }
+    if (m.t === 'command') {
+      const c = m.command || {};
+      if (c.cmd !== 'mic_chunk') {
+        /* 其余 cmd 这台假手机本来就没实现，认下来回一条 ack 就够，别装死。
+         * 唯独 mic_chunk 不能走这条路 —— 今天真 App 的严格枚举不认它是**关链**，
+         * 所以那一种由 micKills() 演（默认档就是它）。 */
+        log(`command↑ ${c.cmd} args=${JSON.stringify(c.args ?? {}).slice(0, 120)}`);
+        send({ v: ENV_V, t: 'ack', seq: ++seq, ack: { for_seq: m.seq } });
+        return;
+      }
+      if (micKills()) {
+        log(`mic_chunk↑ —— ${MIC_CLOSE ? '--mic-close' : '这台没 --v4-ready'}：按今天装机 App 的样子 close("bad contract")，看屏侧熔断`);
+        ws.write(encodeClose('bad contract'));
+        ws.end();
+        return;
+      }
+      const done = mic(c.args ?? {});
+      if (!done) return;                                    // 段还没齐
+      /* 齐了先按契约回写转写（dir:up 是**记录**，不许再触发手机答题），再答一句。
+       * 真 App 这里换成 ASR 出来的那句 + LLM 答句；假手机没转写，只证明"号对得上、
+       * 字节数对得上、屏那侧显示链路走通了"。 */
+      send({
+        v: ENV_V, t: 'dialog', seq: ++seq, ts: Math.floor(Date.now() / 1000),
+        dialog: { turn_id: done.turn, dir: 'up',
+                  text: `（假手机）收到 ${done.bytes} B / ${done.seconds.toFixed(2)} 秒`,
+                  source: 'asr', origin: 'screen' },
+      });
+      send({
+        v: ENV_V, t: 'dialog', seq: ++seq, ts: Math.floor(Date.now() / 1000),
+        dialog: { turn_id: done.turn, dir: 'down',
+                  text: '这句是上行走通了的证据。真 App 会先转写再答题。',
+                  source: 'local_rule', origin: 'screen' },
+      });
       return;
     }
     if (m.t === 'bye') { log('客户端道别（bye），台账当场标离线 —— 这条是对的'); cleanup(); return; }
@@ -198,7 +340,7 @@ const server = net.createServer(sock => {
       log(`dialog↑ [${d.source}/${d.origin}] ${d.text}`);
       // 答一句同 turn_id 的 down。契约：dir:down 只补记录，不再触发答题
       send({
-        v: 2, t: 'dialog', seq: ++seq, ts: Math.floor(Date.now() / 1000),
+        v: ENV_V, t: 'dialog', seq: ++seq, ts: Math.floor(Date.now() / 1000),
         dialog: {
           turn_id: d.turn_id, dir: 'down',
           text: '（假手机）这句我收到了。真 App 会答"车在哪 / 下次过境 / 还剩几条"这些状态题。',
@@ -209,7 +351,7 @@ const server = net.createServer(sock => {
     }
     if (m.t === 'event') {
       log(`event↑ ${m.event?.kind} id=${m.event?.event_id}`);
-      send({ v: 2, t: 'ack', seq: ++seq, ack: { for_seq: m.seq, for_event_id: m.event?.event_id } });
+      send({ v: ENV_V, t: 'ack', seq: ++seq, ack: { for_seq: m.seq, for_event_id: m.event?.event_id } });
       return;
     }
     log('不认识的帧类型：', m.t);

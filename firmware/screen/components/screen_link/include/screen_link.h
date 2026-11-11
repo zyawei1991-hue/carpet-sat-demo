@@ -36,6 +36,21 @@ extern "C" {
  *  省的是"升级顺序必须两端同步"这条隐性约束，代价是音频帧要走一遍 cmd 白名单。 */
 #define SCREEN_LINK_CONTRACT_MAX 3
 
+/** v4 只做一件事：屏可以往手机推 `command{cmd:"mic_chunk"}`（「对着屏说话」）。
+ *  它**不是** SCREEN_LINK_CONTRACT_MAX 的下一档，而是单独申报的一个能力位：
+ *  - 帧上的 `v` 不变（还是 3），下行一个字节没动；
+ *  - hello.protocols 里多这一个数，让会读的手机知道"这块屏有耳朵"；
+ *  - 反过来手机在 `ack.protocols` 里带 4，屏**才有一半**许可：光这一格不够。
+ *  为什么 2026-11-11 夜里把这一句改硬：装机那版 App 已经在 `protocols` 里报了 4
+ *  （`core/.../DemoRuntime.kt:513`，提交 `5247681`），可它的 `CommandType` 里没有 mic_chunk，
+ *  入站解不开的处理是 `conn.close(1000,"bad contract")` —— 也就是说"报了 4"和"收得下"
+ *  在那一版上是两回事，而拿它当许可的固件会把一台本来好使的手机当场踢下线。
+ *  现在屏侧要两个都点头：**这一帧 envelope 的 `v` >= 4**（= App 真把 `CONTRACT_VERSION` 抬上来了，
+ *  按发布顺序那一步只会在补完解码之后发生）**且** `protocols ∋ 4`。
+ *  闸在 carpet_mic（三道：本地开关 + 对面这一轮的申报 + 本会话的熔断），
+ *  组件只负责把 `v` 和 `ack` 一起交给它（`on_ack(ack, v)`），自己不做这套判断。 */
+#define SCREEN_LINK_MIC_UP 4
+
 /** 一条 state 帧在 1Hz 下最大约 1.2KB；v3 的音频帧是这里最紧的一条：
  *  2560 字节 PCM → base64 3416 字符 → 整帧约 3.5KB，所以这个数不能往下调。
  *  发送侧 core 有 `AudioChunks.JSON_LIMIT=3800` 逐帧断言，两边对着这一个数。 */
@@ -86,7 +101,13 @@ typedef struct {
      * 所以 left_ms 是**还剩多少毫秒**，不是帧里的 ttl_ms；0 = 帧里没给 ttl，显示多久由展示端定。 */
     void (*on_event)(const cJSON *event, const char *event_id, uint32_t left_ms);
     void (*on_command)(const char *cmd, const cJSON *args);
-    void (*on_ack)(const cJSON *ack);
+    /** ack 那一格原样交出来，另外带上**这一帧自己申报的契约档**（整帧的 `v`，缺 `v` 按 1 算）。
+     *  为什么要把 `v` 一起给：上行那道闸要判的是"对面整份契约到 v4 了没有"，
+     *  不是"protocols 里有没有 4"这个数 —— 2026-11-11 读 App 那棵树称到，装机那一版
+     *  已经在 protocols 里先报了 4，但它的 CommandType 还解不了 mic_chunk
+     *  （`core/.../runtime/DemoRuntime.kt:513` + `ScreenLink.kt:112`），而它解不了的 cmd 是直接关线。
+     *  所以"报了 4"不能单独当许可；组件自己不懂这套判断，只负责把两个数一起交出去。 */
+    void (*on_ack)(const cJSON *ack, int v);
     /** negotiated 是本会话谈下来的契约档；只有它 ≥2 才能走对话 */
     void (*on_connected)(int negotiated);
     void (*on_disconnected)(void);

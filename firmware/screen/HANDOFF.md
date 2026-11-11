@@ -2296,3 +2296,257 @@ E (472819) carpet: url restart task out of memory
 `apps/android` 和 `core/` 这轮**一行没动**（没有协议改动，所以 `SchemaDriftTest` 那 13 条
 用不上，`:core:test` 也就没重跑）；App 侧要的东西仍在 `docs/APP-SCREEN-CONNECT.md` 第十节，
 本轮新加的排障判据在第十一节。
+
+## 16. 11-11 下午/晚上：下键按出来是「SET UP MUSE FIRST」这件事的根因、屏侧 v4 上行整条落地、以及这一趟真正卡住的地方（链路起不来，而且现在会重启）
+
+owner 那一问是两条，一条是症状一条是功能，分开答：
+
+> 手机上和 AI 助手对话、圆屏语音答复已经跑通了，但怎么直接通过语音和圆屏交互？现在下键按了屏上让我安装 muse。
+
+### 16.1 症状那半：那句英文是谁印的，为什么和本产品无关
+
+下键 = BOOT = TALK（`muse_board` 里这块板写的是 `.talk_button="boot"`）。按下之后走的是
+`voice_task` 的通话分支 → `can_record()` → 它先看 `MUSE_HATCH` 那套**云端配对**的前提，
+不满足就 `go_idle("SET UP MUSE FIRST")`。那句话是官方固件给"用 Muse App 配云端账号"用的，
+**我们这台演示机永远不需要它** —— 服务端是手机，不是 Muse 云。所以现场观感是
+"按了屏一下，叫我装一个我不打算装的东西"，功能上一次都没走错，只是**提示说的是另一件事**。
+
+这一轮落了两处：
+
+1. `can_record()` 的 `MUSE_HATCH_NOT_SET` 那条路上，**链路已经通**的时候先给一句中文
+   `对着屏说话还没开`（`CONFIG_MUSE_CARPET_CARDS` 里），不再拿一句英文指令去回答一个"为什么不说话"的问题；
+   链路没通时维持原样（那时确实什么都还没开始）。
+2. 那句"还没开"是真话，但这一轮把"开了会是什么"也装上了 —— 见 16.2。
+
+### 16.2 功能那半：屏起头的语音（契约 v4 上行）屏侧写完了，三道闸 + 熔断，默认对装机 App 完全无反应
+
+新增 `carpet/carpet_mic.c/.h`（463 行 + 头），改动落在 `muse_voice.c`（`talk_to_phone()` +
+按下分支里插在 Hatch 那道门**之前**）、`carpet_link.c`（`on_ack()` 读对面的 `protocols`、
+连上先清、断了判熔断、`>carpet` 多一行）、`carpet_audio.c`（`carpet_audio_live()`，
+为了"放音期间停上行"那条规矩：按下时上一句还在念就先 `carpet_audio_abort()`）、
+`muse_input.c`（三条开发口 `>micup` / `>mic` / `>mictest`，另加一条台架用的 `>wifi set`，见 16.4）、
+`components/screen_link/`（`hello.protocols` 多报 `SCREEN_LINK_MIC_UP=4`、出站白名单加 `mic_chunk`，
+**两份树都改了**）。契约文档那一节同步改了形状：**整段采完、松手一口气发**，不再"每 80 ms 一帧"，
+理由三条写在 `protocol/screen-link.md` 的 v4 那一节，给 App 的那份 `docs/APP-CHANGES-2026-11-11.md` §5
+也照同一形状重写了。
+
+**称到的（COM8，`reset_capture.py`/`sercmd_norst.py`，全部原文）：**
+
+```
+I (1051) carpet_mic: 上行地基就绪：2 只 256000 字节段缓冲（PSRAM）、一帧 2560 字节 PCM、一段最多 100 帧
+@mic mode=off armed=0 phone_v4=0 rejected=0 dead=0 linked=0
+@mic free_segs=2/2 turns=0 frames=0 bytes=0 busy_drop=0 cur=0B cap8=8s
+@mic last_turn= send_ms=0 err=-
+@carpet mic=off armed=0（细则 >mic）
+```
+
+`dead=0` + `free_segs=2/2` 就是这一轮要的证：那两只 256 KB PSRAM 段缓冲和那条 8 KB PSRAM 栈的发送任务
+**当场起起来了**（§14 那一轮的教训正是"编过了 ≠ 起得来"：播放任务要的 16 KB 连续内部 RAM 在这块板上
+从来没给出来过）。地基放在 `carpet_link_start()` 最末尾、开机那一刻申请 —— PSRAM 那时候最完整。
+`mode=off armed=0` 是要的第二条证：**对现在装机的这版 App，这一版固件一条 `mic_chunk` 都不会发**
+（默认关 + 还要看对面 `ack.protocols` 里有没有 4 + 熔断），所以刷上去不会把链路搞抖。
+
+### 16.3 没称到的：这一句上行一次都没上线过，卡在校链路起不来 —— 而且它现在让屏重启
+
+链路这一段今天在这台台架上**拨不起来**，原始回读（同一次开机，屏已连上 Wi-Fi 拿到 192.168.43.243 之后 1 秒）：
+
+```
+I (7054) carpet: dialing ws://192.168.43.161:8443 (from settings)
+E (7056) screen_link: start 没起来（第 1 次连续失败，ws 栈 4096 字）：内部 RAM 5K 空闲/最大连续 2K，PSRAM 3031K；换掉整个 ws 句柄重来
+E (7077) screen_link: 探针：同样 4096 字的 xTaskCreate 要不到；16K(任意RAM)=0x3c50ade4 16K(内部)=0 16K(PSRAM)=0x3c50ede8
+W (8088) screen_link: ws 任务的栈降到 3072 字（3 KB）再要一次
+E (8101) screen_link: start 没起来（第 2 次连续失败，ws 栈 3072 字）：内部 RAM 5K 空闲/最大连续 2K，PSRAM 3035K；换掉整个 ws 句柄重来
+W (10115) screen_link: ws 任务的栈降到 2048 字（2 KB）再要一次
+***ERROR*** A stack overflow in task websocket_task has been detected.
+Backtrace: 0x4038b8fd:0x3fcca100 0x4038b8c9:0x3fcca120 0x421855ba:0x3fcca140 0x4038ca8a:0x3fcca1c0 0x4038c144:0x3fcca1e0 0x4038c13a:0xa5a5a5a5 |<-CORRUPTED
+ELF file SHA256: ee85e60e6      ← 就是今天这一版：sha256(muse-gadget.elf) 前缀 ee85e60e66a4
+Rebooting...  rst:0xc (RTC_SW_CPU_RST)
+```
+
+`addr2line` 对现 elf 解出来：`panic_abort ← esp_system_abort ← vApplicationStackOverflowHook ← vTaskSwitchContext`，
+即**真的是任务栈溢出**，不是别的地方写坏。两件事要分开看：
+
+1. **底层那条一直是旧的**：拨号那一刻内部 RAM 只剩 5 KB 空闲 / 最大连续 2 KB，`esp_websocket_client`
+   的 4 KB 任务栈要不到。这和 §15.16 在 11-10 称到的是同一处（那时候上行代码还不存在，
+   `t=29s screen_link_start: ESP_ERR_NO_MEM`），所以**不是这一轮把内存吃没的**；
+   `carpet_mic` 的 512 KB 全在 PSRAM，开机 t=5s 心跳那条 `int=16K/7K … psram=3039K` 已经是把地基算进去之后的数。
+2. **新落下的是那一档阶梯本身**：`components/screen_link/` 工作树里那版（**未同步回本仓库、也不进 patch**）
+   把栈一档一档往下试 4096→3072→2048 字。前两档要不到是诚实的失败；第三档 2048 **给得出来但不够 ws 任务用**，
+   于是把"拨不上"变成了"**连上 Wi-Fi 就重启**"，开机后约 10 秒一次，循环。
+   ⇒ 在台架上调任何别的东西之前得先把这一档关掉，否则每一趟的量都在跟重启抢窗口。
+   这条不属于本轮改动，归它自己那一轮，但**现场优先级现在最高**（演示日它会让屏永远连不上手机）。
+
+所以：**上行整条 = 没称到**，卡在第 2 条；屏侧能称的都称了（16.2）。
+今天这台台架还多一条限制：能连的 Wi-Fi 只有隔壁那台 Mate 30 的热点（`吨吨吨的Mate 30 5G`，ch2），
+演示那台 Mate 60 的热点没开，而假手机服务端在这台电脑上 —— 于是 16.4 那条 `>wifi set` 是必须的。
+
+### 16.4 台架新添的两件东西
+
+- 固件侧 `>wifi set <ssid-hex> <pass-hex>`（`muse_input.c`，和已有的 `>wifi clear` 同一个口）。
+  为什么是十六进制参数：要往屏里塞的是**带空格的非 ASCII** SSID，`>wifi set ssid=吨吨吨的Mate 30 5G pass=…`
+  在第一空格处就断了。走的是屏上那套 Wi-Fi 键盘同一个 API（`muse_settings_set_wifi`），不新造通路，
+  存完不用重启（它自己 notify）。密码不回显、不打印，只报字节数：
+  ```
+  @wifi set ssid=吨吨吨的Mate 30 5G（22 字节）pass=9 字节（不印）wifi_on=1
+  ```
+  称过的副作用：`joining saved network 吨吨吨的Mate 30 5G` → `connected with …, aid = 4, channel 2` →
+  `got IP 192.168.43.243`（第一次 auth 被拒 reason=2、第二次 reason=205，第三次成 —— 华为热点就是这样）。
+- 假手机 `fake-phone.mjs` 现在会真处理上行：ack 申报 `protocols:[3,4]`、按 `turn_id` 拼块、查缺号、
+  封 RIFF 落 `.wav` 到 `mic-capture/`、回 `dialog{dir:"up"}` + `{dir:"down"}`。
+  两个开关演"对面不是想象中那台"：`--no-v4`（只报 [3]，屏该 `armed=0`）、
+  `--mic-close`（报 [3,4] 但收到第一帧就 `close("bad contract")` = **今天装机那版的真实行为**，
+  用来称屏侧熔断该不该落下）。这台服务端今天还没被连上过（卡在 16.3）。
+
+### 16.5 同步状态
+
+`muse-carpet.patch` 这一轮重打过：**30 个文件、8390 行 / 437,548 字节**（相对上一版 27 个文件 /
+7418 行 / 387,845 字节 —— 新增 `carpet/carpet_mic.c`(463 行) 和 `carpet/carpet_mic.h`，
+`CMakeLists.txt` 多一行源文件，`muse_voice.c` / `muse_input.c` / `carpet_link.c` / `carpet_audio.c` 改了）。
+**干净 worktree 这轮做到"解得干净 + 解出来就是工作树"这一层**：`git worktree add --detach
+D:/dev/tmp/muse-clean-mic cdc169d` → `git apply --check --binary` 过 → 真 `git apply` 过 →
+`git status` 18 条、`carpet/` 13 个文件，`diff --strip-trailing-cr` 比过
+`carpet_mic.c` / `carpet_mic.h` / `muse_voice.c` / `muse_input.c` / `carpet_link.c` / `CMakeLists.txt`
+—— **六个全 SAME**；用完 `git worktree remove` 收掉了。**这轮没在干净 worktree 里从头重编**
+（源码是在带 patch 的工作树里编 + 刷 + 上板称的：`Project build complete`、
+`muse-gadget.bin 0x331000` 字节、esptool `Hash of data verified`，板上跑的就是这一份）。
+
+`components/screen_link/` 还是不进 patch。**这一轮它两份树不一样，而且是有意的**：
+我往两份都加了 `SCREEN_LINK_MIC_UP` + 出站白名单那一条，但工作树那份还带着上一轮未同步的
+ws 栈阶梯和 `ws_probe()`（就是 16.3 里那条重启的当事代码）。
+⇒ **照 §3 那条 `cp -r` 重新铺一遍会把它们冲掉**，谁要铺先看清工作树那份的 diff。
+仓库这份（`firmware/screen/components/screen_link/screen_link.c`）**没有**阶梯。
+**【上面这段到 11-11 夜里作废，看 §17.5：阶梯已经反向同步进仓库这份，两份比过 SAME，
+`cp -r` 重新变得安全；同时 2048 那一档删掉了，重启那条不再成立。】**
+
+`apps/android/` 和 `core/` 这轮一行没动（owner 2026-11-11 那条分工还在：屏侧我改，App 侧写清单交给
+App agent）；要的东西在 `docs/APP-CHANGES-2026-11-11.md` §5，那一节这轮按实现形状重写过。
+
+---
+
+## 17. 11-11 夜里：屏终于拨得上号、上行整条走通了，顺带称出「那道闸看错了数」
+
+owner 那一问的两半（症状 + 功能）在 §16 落完之后，台架上还剩两件挡路的事。这一轮把它们做完了，
+而且**第一次把「屏按下说话 → 手机收到整段 → 屏把回话念出来」这一趟真跑通**（服务端是假手机）。
+
+### 17.1 两处修复，各自治一条本来会砸场子的东西
+
+**(a) 屏拨不上号 = 拨号那一刻内部 RAM 不够一块 4 KB 连续。** 组件里 rx/tx 两份缓冲是
+`malloc(buffer_size)`（`managed_components/espressif__esp_websocket_client/esp_websocket_client.c:684,688`），
+走 `heap_caps_malloc_default()`：`size <= CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` 就**只从内部 RAM 要**，
+大于它才先要 PSRAM、要不到再退任意堆（`components/heap/heap_caps.c:117-125`，源码里读到的）。
+这一版 `devices/sdkconfig.muse:37` 把那条界写在 **4096**，而我们 `buffer_size` 正好 = 4096
+（`SCREEN_LINK_MAX_FRAME`）—— 卡在界内，链路一开就固定从内部 RAM 拿走 8 KB。
+改法：`buffer_size = SCREEN_LINK_MAX_FRAME + 512`（4608）。**帧上限那个语义没动**，只是多给一点缓冲，
+但跨过界之后这两份落到 PSRAM，把 8 KB 内部还给堆。
+同一轮把 `WS_STACKS[]` 里 **2048 那一档删了**（`{4096,3072}`）：16.3 称到那一档 `xTaskCreate` 给得出来
+（那一刻最大连续正好 2 KB）但不够 ws 任务用 ⇒ `A stack overflow in task websocket_task` ⇒
+连上 Wi-Fi 约 10 秒一次重启循环。**宁可诚实拨不上，也不给一条注定溢出的栈** —— 一台反复重启的屏
+比一台连不上的屏更糟。顺带把两处单位注释改对：这一版 IDF 里 `xTaskCreate` 的栈深度收的是**字节**
+（`StackType_t` 1 字节；旧日志那句「3072 字（3 KB）」括号里才是真大小）。
+
+**(b) 上行那道闸看的数错了，而且错的方向正好会踢掉真手机。** 原写法是「ack 的 `protocols` 里有 ≥4 就许可上行」。
+读 App 那棵树称到的事实：`core/src/main/kotlin/com/carpet/satdemo/core/runtime/DemoRuntime.kt:513`
+（提交 `5247681`）已经写了 `protocols = listOf(ScreenCodec.CONTRACT_VERSION, 4)`，
+可 `ScreenLink.kt:112` 那个 `CommandType` 里**没有** `mic_chunk` —— 也就是**装机这版申报了 4 但解不了 4**，
+而它解不了的 cmd 是直接 `close(1000,"bad contract")`。那一行注释说的是"App 先发版，屏看到 4 才开上行"，
+但发版只发了半个，于是这道闸恰好把最危险的那版放行。
+改成两个都点头：**这一帧 envelope 的 `v` ≥ 4 且 `protocols ∋ 4`**。为什么 `v` 才是那个真信号：
+按 `protocol/screen-link.md` 那条发布顺序，App 补完 `mic_chunk` 的解码才把 `CONTRACT_VERSION` 从 3 抬到 4，
+而 `CONTRACT_VERSION` 就是每一帧的 `v`；`protocols` 里那个 4 单独看只能是"意向"。
+组件因此多交一个数：`on_ack(const cJSON *ack, int v)`（`screen_link.h` + `handle_frame` 里 `num_or(root,"v",1)`），
+判断本身还在 `carpet_link.c`，组件不认识上行。只报 4 而 `v` 还是 3 的那种，当场打一行 W ——
+现场对着真手机按下那个键、屏没反应时，**那行就是答案**，不用猜。
+
+### 17.2 称到的（COM8，`reset_capture.py` / `sercmd_norst.py` / 新加的 `hold_talk.py`，全部原文）
+
+链路，两次开机都是**第一拨就上**（这是这块板第一次做到，之前每一版都停在 `start 没起来`）：
+
+```
+I (7053) carpet: dialing ws://192.168.43.161:9100 (from settings)
+I (7081) screen_link: ws 接入 ws://192.168.43.161:9100
+I (7084) carpet: linked, contract v3
+I (7157) carpet: sent page_report
+I (11958) link.heartbeat: hb t=10s … int=9K/4K min=2K dma=6K/4K psram=3023K …
+```
+（改之前同一处是 `int=5K 空闲/最大连续 2K` ⇒ `start 没起来`；现在稳态多回 4 KB 空闲、
+最大连续从 2K 回到 4K。阶梯一档都没降过，探针一次都没跑 —— 因为第一档就给了。）
+
+上行整条，屏侧 + 手机侧同一轮：
+
+```
+I (44347) muse_voice: carpet: 这一句交给手机 3.12 秒（按住 49920 帧）
+I (45061) carpet_mic: 上行 m-d4952e-2：43/43 帧、110080 字节（3.44 秒语音）0.71 秒发完
+@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1
+@mic free_segs=2/2 turns=2 frames=81 bytes=206080 busy_drop=0 cur=0B cap8=8s
+@mic last_turn=m-d4952e-2 send_ms=713 err=-
+```
+```
+[+57.4s] 上行段开：m-d4952e-2 · total=110080 B (3.44 s @16000)
+[+58.0s] 上行段齐：m-d4952e-2 · 43 块 110080/110080 B 3.44 s · 收完用了 624 ms · 乱序缺号=无 · …\m-d4952e-2.wav
+```
+落出来的 WAV `wave.open` 读回 `(1 声道, 2 字节, 16000, 55040 帧, NONE)`，头 44 字节合法。
+`send_ms` 两个数都在 0.5–0.7 秒（96 KB / 110 KB）⇒ **一口气发完这一段 ≈ 170–190 KB/s 的入站 JSON**，
+这是给 App 那条"手机从没被这块屏压过持续入站"的第一个实测。
+
+两道闸各自称到位：
+
+```
+（假手机 = 装机那版的样子：整帧 v=3、protocols [3,4]）
+W (7322) carpet: 对面在 protocols 里报了 v4（上行），但它整份契约还是 v3 —— 那一版解不了 mic_chunk，发上去就是关线，上行不开
+@mic mode=auto armed=0 phone_v4=0 rejected=0 dead=0 linked=1
+（假手机 --v4-ready：整帧 v=4）
+I (7263) carpet_mic: 对面在 ack 里申报 v4（上行）= 是
+@mic mode=auto armed=1 phone_v4=1 …
+```
+
+### 17.3 没称到的（三条，都写清卡在哪）
+
+1. **真手机那一头**：装机 App 没有 `mic_chunk` 解码，所以"对着屏说话"目前只能对假手机走通。
+   App 补完之后要它自己把 `CONTRACT_VERSION` 抬到 4，屏这道闸才开 —— 这条现在是硬约束（§17.1b）。
+2. **真人出声**：台架上 `'d'/'u'` 模拟的是按键，麦克风采的是房间底噪 —— 那 110,080 字节里
+   `peak=9 rms=1`（≈ -71 dBFS）。通路有信号、形状对得上，但**没有一段真语音的证据**。
+   要一只手真按那个键 + 一个人真说话（ASR 那条只有接上真 App 才称得到）。
+3. **电池 + 熄屏那一趟**（§15.2、§16.3 遗留）本轮没碰：这次称的全是 USB 供电、屏亮着。
+
+### 17.4 这套台架怎么复现（一分钟版）
+
+```bash
+# 电脑连上屏能连的那个热点（今晚是隔壁那台 Mate 30，ch2，电脑 .161 / 屏 .243）
+cd firmware/screen/tools
+node fake-phone.mjs --port 9100 --v4-ready       # 三档人：默认=装机那版 / --v4-ready / --no-v4
+# 屏上 `>url ws://<电脑IP>:9100`，等它自己重拨；`>mic` 看 armed
+D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.py COM8 3 12 out.txt
+```
+屏侧开发口：`>micup [off|auto|force]`、`>mic`、`>mictest [秒]`（造 PCM 走同一条发送路，不碰麦克风）。
+`hold_talk.py` 是新加的：开 COM8 前先压住 DTR/RTS（不重启），发裸字符 `'d'` 按住 N 秒再 `'u'` 松手，
+—— `muse_input.c` 的 `serial_task` 里那两个字符就是 TALK 键的台架替身，所以它走的是**真按下那一条**
+（`carpet_mic_armed()` → `talk_to_phone()` → `voice_task` 喂真麦克风样本 → 松手整段发），
+这是 `>mictest` 故意不覆盖的那一段。
+
+### 17.5 同步状态
+
+- `muse-carpet.patch` 重打过：**30 个文件（29 文本 + 字库）、5,274 行新增 / 86 行删，8,410 行 / 438,957 字节**
+  （相对 §16.5 那版：`carpet_link.c` 1208 → 1228 行，就是 §17.1b 那一处；没有新增文件）。
+  干净 worktree `D:/dev/tmp/muse-clean-gate`（`git worktree add --detach … cdc169d`）
+  `git apply --check --binary` 过、真 `git apply` 过、30 个文件全落对、字库 154,528 字节
+  （sha256 前缀 `a77558a4`，与工作树同一份），`diff --strip-trailing-cr` 比
+  `carpet_link.c` / `carpet_mic.c` / `muse_voice.c` / `muse_input.c` / `CMakeLists.txt` 五个全 SAME，
+  worktree 已删。**没在干净 worktree 里从头重编**（上一版编过，§15.15）；
+  这两轮的源码都是在带 patch 的工作树里编 + 刷 + 上板称的：`Project build complete`、
+  esptool `Hash of data verified`（夜里这一版刷了两次，第二次带 §17.1b）。
+- **`components/screen_link/` 这次是反向同步**：工作树那份（阶梯 + `ws_probe()` + 新加的 4608 那处 +
+  `on_ack` 多交一个 `v`）整文件 `cp` 回仓库这份，两份 `screen_link.c` / `include/screen_link.h`
+  比过 **SAME**（`CMakeLists.txt` 两份本来就故意不一样，见 §4，没动）。
+  ⇒ §16.5 那句"照 §3 的 `cp -r` 会把阶梯冲掉"到此作废。
+- `apps/android/` 没动；`core/` 没动（本轮没有协议改动，`SchemaDriftTest` 那 13 条用不上，
+  `:core:test` 也就没重跑）。
+- **给 App 的那份清单已经改完**（`docs/APP-CHANGES-2026-11-11.md`，本轮就地更新，不是另起一份）：
+  §5 的标题和那条"屏的开门条件"改成新的两条件规则，`fake-phone.mjs` 三档人设重写成和代码一致
+  （默认档 = 装机那版），补了实测的上行突发（~170–190 KB/s、0.5–0.7 s、43/43 号齐），
+  并把"要做的"从 5 条改成 6 条 —— **新第 5 条就是 `CONTRACT_VERSION 3 → 4`**，
+  写明了漏掉它的现场表现（屏一直 `armed=0`、怎么按都不出声，看起来像"这功能没做"）。
+  §7 那两条旧称量跟着改判：43 KB/s 那条已经称到（上行方向，假手机），下行仍是空白。
+- **本轮唯一一处只有代码证据、没有串口证据的**：`can_record()` 里那句把「SET UP MUSE FIRST」换成
+  「对着屏说话还没开」（§16.1 落的第 1 条）。屏上显示的字从 COM8 读不到，那条分支里也没有日志。
+  ⇒ 现场五秒钟可以自己证：装机的 App 开着、屏连上之后按下那个键，屏上该是中文那句。
+  （真要台架证据就得在那一格加一行 `ESP_LOGI` 再刷一次 —— 本轮没做，不值得为它重打一次 patch。）

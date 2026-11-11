@@ -1,5 +1,5 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..e884d6c 100644
+index b478d5e..fbb14d3 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -46,6 +46,23 @@ if(CONFIG_MUSE_ENABLED)
@@ -9,7 +9,7 @@ index b478d5e..e884d6c 100644
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
 +        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c"
-+                         "carpet/carpet_diag.c")
++                         "carpet/carpet_mic.c" "carpet/carpet_diag.c")
 +        # Chinese for the settings pages and the menu, when CONFIG_MUSE_UI_LANG_ZH
 +        # picks it. The table itself is only read then; the file costs nothing
 +        # otherwise, and keeping it out of muse_lang.c keeps the host test
@@ -97,10 +97,10 @@ index 588d7c6..9c454d0 100644
      choice MUSE_JC3248W535_MIC
 diff --git a/esp32/components/muse/carpet/carpet_audio.c b/esp32/components/muse/carpet/carpet_audio.c
 new file mode 100644
-index 0000000..f86e50b
+index 0000000..963d5b9
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_audio.c
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,493 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -437,6 +437,20 @@ index 0000000..f86e50b
 +    }
 +}
 +
++/* 现在到底还有没有声音在放。上行那条路要知道这一件事（按下说话之前得先把上一轮的
++ * 尾音停掉，否则录进去的是自己的答句），但 `carpet_audio_state()` 要 turn_id 才答话，
++ * 而上行这边**没有**、也不该再去拿那个 turn_id —— 它是从 dialog 帧里来的。
++ * 所以给一个不看轮号的问法。 */
++bool carpet_audio_live(void)
++{
++    if (!s_lock) return false;
++    bool live;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    live = s_live;
++    xSemaphoreGive(s_lock);
++    return live;
++}
++
 +bool carpet_audio_state(const char *turn_id, size_t *played, size_t *total, bool *live, float *level)
 +{
 +    if (!turn_id || !*turn_id || !s_lock) return false;
@@ -582,10 +596,10 @@ index 0000000..f86e50b
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_audio.h b/esp32/components/muse/carpet/carpet_audio.h
 new file mode 100644
-index 0000000..f1ee8d7
+index 0000000..813c6c9
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_audio.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,61 @@
 +/*
 + * 契约 v3 的语音通道：`command{cmd:"audio_chunk"}` 进来的 PCM 字节 → 喇叭。
 + *
@@ -632,6 +646,13 @@ index 0000000..f1ee8d7
 + * 调用方按原来的"按秒推"那套走。level 是这一帧窗口的真实 RMS 电平 0..1。
 + */
 +bool carpet_audio_state(const char *turn_id, size_t *played, size_t *total, bool *live, float *level);
++
++/*
++ * 现在到底还有没有声音在放 —— **不看轮号**的问法。
++ * 上行那条路要它：按下说话之前得先把上一轮的尾音停掉，否则录进去的是屏自己念的答句；
++ * 而它手里没有 turn_id（那个从 dialog 帧来），`carpet_audio_state()` 没它答不了话。
++ */
++bool carpet_audio_live(void);
 +
 +/* 开发口 `>audtest [秒]`：本机造一段语音（正弦包络的"词"）灌进同一条缓冲和同一个
 + * 播放任务 —— 网络、模型、TTS 全不接，也能证明环、节拍、口型、翻页这四件事。
@@ -3462,10 +3483,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..c14f405
+index 0000000..ff4f8bf
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1169 @@
+@@ -0,0 +1,1228 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3494,6 +3515,7 @@ index 0000000..c14f405
 +#include "cJSON.h"
 +#include "carpet/carpet_audio.h"
 +#include "carpet/carpet_diag.h"
++#include "carpet/carpet_mic.h"
 +#include "carpet/carpet_page.h"
 +#include "driver/gpio.h"
 +#include "esp_log.h"
@@ -4125,10 +4147,55 @@ index 0000000..c14f405
 +    s_negotiated = negotiated;
 +    s_linked = true;
 +    ESP_LOGI(TAG, "linked, contract v%d", negotiated);
++    /* 每一轮会话重新问过一遍"你收不收上行"：上一轮那次 ack 说的不算这一轮 ——
++     * 中间手机可能升过版，也可能换了一部。没听到 ack 之前就当不收。 */
++    carpet_mic_phone_declared(false);
 +    /* 补报一次当前页：page_report 只在页真的变了的时候发，重连那一刻页没变，
 +     * 但手机上那一格已经被清成空了（屏不在了还写着"屏在亲子"是那句镜像能编的
 +     * 最贵的假话）。少了这一条，它要等下一次真的翻页才复明。 */
 +    carpet_page_reshare();
++}
++
++/*
++ * v4 上行那道闸的读数处：手机端 `ackNow()` 在 hello 的回执里带 `protocols`
++ * （`core/.../runtime/DemoRuntime.kt:513`）。这是加性字段，老固件用 cJSON 读 ack，
++ * 多出来的键直接看不见，不掉线 —— 所以这一条不碰 `s_negotiated`，只喂上行那道闸。
++ *
++ * 为什么只喂上行：风险不对称。**下行解错了屏只是丢帧，上行发错了手机关链**
++ * （`ScreenLinkServer.kt:128-131`，`conn.close(1000,"bad contract")`）。
++ * 拿它去覆盖 s_negotiated 换来的是一台好使的屏突然连答句都不画了。
++ *
++ * 【2026-11-11 晚：光看 `protocols` 里那个 4 不够，必须再看这一帧自己的 `v`。】
++ * 读 App 那棵树称到的事实：`protocols = listOf(CONTRACT_VERSION, 4)` 这一行
++ * （`5247681` 那一笔）已经把 4 报出去了，可 `CommandType`（`ScreenLink.kt:112`）里**没有**
++ * mic_chunk —— 也就是现在装机的这版手机**申报了 4 但解不了 4**，而它解不了的 cmd 是直接关线。
++ * 那一行写的是"App 先发版，屏看到 4 才开上行"，但发版只发了一半，
++ * 于是"看到 4"这一条恰好把最危险的那版手机放进了许可里。
++ * 真正的许可是整份契约走到 v4：按 `protocol/screen-link.md` 那条发布顺序，
++ * App 补完 mic_chunk 的解码才把 `CONTRACT_VERSION` 从 3 抬到 4，而 `CONTRACT_VERSION`
++ * 就是每一帧 envelope 的 `v`。所以这里要两个都点头：`v >= 4` **且** `protocols ∋ 4`。
++ * 只报 4 而 `v` 还是 3 的那些，当场留一行 W —— 现场对着真手机按那个键时，
++ * 这行就是"为什么屏没反应"的答案，不用猜。
++ */
++static void on_ack(const cJSON *ack, int v)
++{
++    const cJSON *p = cJSON_GetObjectItemCaseSensitive(ack, "protocols");
++    if (!cJSON_IsArray(p)) return;
++    const cJSON *it = NULL;
++    int says4 = 0;
++    cJSON_ArrayForEach(it, p) {
++        if (cJSON_IsNumber(it) && it->valueint >= 4) {
++            says4 = 1;
++            break;
++        }
++    }
++    if (!says4) return;
++    if (v >= 4) {
++        carpet_mic_phone_declared(true);
++        return;
++    }
++    ESP_LOGW(TAG, "对面在 protocols 里报了 v4（上行），但它整份契约还是 v%d —— 那一版解不了 mic_chunk，"
++                  "发上去就是关线，上行不开", v);
 +}
 +
 +static void on_disconnected(void)
@@ -4138,6 +4205,9 @@ index 0000000..c14f405
 +    /* 半截语音留着，重连之后新答句一开口就会撞上旧缓冲（seq 从 0 起，旧那段还没放完）。
 +     * 文字那句不清：断线时念到一半的那句本来就该继续念完。 */
 +    carpet_audio_abort("链路断了");
++    /* 上行发出去之后紧接着就断 = 这台手机解不了 mic_chunk（它那边的处理是关线、
++     * 一句话不说）。由 carpet_mic 判时间窗，本会话不再试，免得每按一次踢一次手机。 */
++    carpet_mic_link_lost();
 +}
 +
 +static void cmd_task(void *arg)
@@ -4434,6 +4504,7 @@ index 0000000..c14f405
 +    s_cb.on_state = on_state;
 +    s_cb.on_dialog = on_dialog;
 +    s_cb.on_command = on_command;
++    s_cb.on_ack = on_ack;      /* v4 上行那道闸读的就是这一句 */
 +
 +    /* 开不出去就阶梯再来一次，而不是印一条 E 然后把这条任务删掉。
 +     * 删掉那一种的代价是 2026-11-10 真机称出来的：t=27s 关联上热点、t=29s
@@ -4502,6 +4573,11 @@ index 0000000..c14f405
 +        s_gate = NULL;
 +        ESP_LOGE(TAG, "gate task out of memory");
 +    }
++    /* 上行那两只 256 KB 段缓冲 + 那条发送任务在这儿要，不在按下那一刻要：
++     * 开机这几十秒是 PSRAM 最整的一段时间，等手机把链路和语音缓冲都铺开之后再要
++     * 256 KB **连续** PSRAM，就是"按下没反应"那种现场最难查的死法。
++     * 这里不碰 NVS（那一步还没跑 muse_settings_init()），开关第一次读发生在按下那一刻。 */
++    carpet_mic_init();
 +}
 +
 +void carpet_link_view(carpet_link_view_t *out)
@@ -4630,6 +4706,10 @@ index 0000000..c14f405
 +    bool url_nvs = false;
 +    url_effective(url_now, &url_nvs);
 +    printf("@carpet url=%s src=%s\n", url_now, url_nvs ? "nvs" : "factory");
++    /* 上行那一道闸现在开到哪一格。armed 先算出来再打印：printf 的参数求值顺序没有规定，
++     * 把"会去读 NVS 的那一句"和"读回来的那一格"写在同一个调用里，顺序反过来就是假话。 */
++    int mic_armed = carpet_mic_armed() ? 1 : 0;
++    printf("@carpet mic=%s armed=%d（细则 >mic）\n", carpet_mic_mode_name(), mic_armed);
 +    carpet_audio_dump();
 +    fflush(stdout);
 +}
@@ -4797,6 +4877,579 @@ index 0000000..969c865
 + * worried=true 之后一定要再来一条 `off`，否则脸一直停在"想"上。
 + */
 +void carpet_link_bench_maint(bool worried);
+diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
+new file mode 100644
+index 0000000..82e5c65
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_mic.c
+@@ -0,0 +1,463 @@
++/*
++ * 契约 v4 上行「对着屏说话」的屏侧那半：攒段 → 组帧 → 发。
++ *
++ * 为什么住在 carpet 而不是 muse_voice.c：那边只管"什么时候开始采、什么时候松手"，
++ * 这一份管的是网络那一头的事。两边只靠三个函数对上（begin / feed / end）。
++ * 三件设计根据（不开第二个读者、发帧不占采集节拍、三道闸）写在 carpet_mic.h 顶上。
++ */
++
++#include "carpet_mic.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cJSON.h"
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_random.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/idf_additions.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++#include "mbedtls/base64.h"
++#include "nvs.h"
++
++#include "carpet/carpet_audio.h"
++#include "muse_audio.h"
++#include "screen_link.h"
++
++static const char *TAG = "carpet_mic";
++
++/* ---------------- 帧的形状（和 v3 下行刻意做成同一套） ---------------- */
++
++#define MIC_RATE       16000          /* 采到的就是这个数，不是"选一个"：屏的通路只产 16k/单声道/s16le */
++#define MIC_SECONDS    8              /* 「按住说」上限。和下行那个 64 秒 / 2 MB 段上限是两个数，别混 */
++#define MIC_MAX_BYTES  (MIC_RATE * 2 * MIC_SECONDS)   /* 256,000 */
++#define MIC_BLOCK      2560           /* 80 毫秒 = 4 个 20 毫秒采集块。下行同一个块大小 */
++#define MIC_MAX_BLOCKS (MIC_MAX_BYTES / MIC_BLOCK)    /* 100 */
++/* 一块编成 b64 的最坏长度 + 结尾 NUL + 余量：2,560 → 3,416 → 3,424。
++ * 和 carpet_audio.c 那个下行预算同一个算法，只是方向反过来；整帧约 3.5 KB，
++ * 压在 SCREEN_LINK_MAX_FRAME 4096（同时是 ws_cfg.buffer_size）里。 */
++#define MIC_B64_BYTES  (4 * ((MIC_BLOCK + 2) / 3) + 8)
++
++#define MIC_TURN_MAX   32             /* `m-<6 位开机随机>-<自增>`，契约要求跨重启唯一 */
++
++/* 断线发生在"我们发过上行之后"的这么久以内，就把这一台手机判成不收上行。
++ * 老 App 的关线在第一帧之后才到屏上，所以看的是"发过之后的断线"而不是超时。 */
++#define MIC_REJECT_US  (5LL * 1000000)
++
++#define MIC_SEGS       2              /* 两只段缓冲：一只在采，另一只可以同时在发上一句 */
++
++/* 那一格开关存的地方。命名空间用 carpet 而不是 muse：carpet_diag 已经占了一个自己
++ * 的（cdiag），走的是同一条理由 —— 我们加的键不该混进 Muse 官方那张设置表，
++ * 那张表有它自己的主机侧测试。 */
++#define MIC_NS         "carpet"
++#define MIC_KEY        "mic_mode"
++
++/* 发送任务的栈。8 KB 放 PSRAM —— 原因和 carpet_audio 播放任务一模一样，
++ * 那块板上 16 KB 连续内部 RAM 从来没给出来过（实测最大连续 7,424 字节），
++ * 而任务建不起来只表现为"按了没反应"。WithCaps 这一族的栈深度单位是**字节**。 */
++#define MIC_SEND_STACK (8 * 1024)
++
++typedef struct {
++    uint8_t *buf;                     /* MIC_MAX_BYTES，PSRAM */
++    size_t len;                       /* 已填字节 */
++    bool busy;                        /* 采或发占着 */
++    bool capped;                      /* 撞到 8 秒上限，后面交进来的没进这一段 */
++} seg_t;
++
++typedef struct {
++    int idx;                          /* s_seg[] 下标 */
++    size_t bytes;
++    char turn[MIC_TURN_MAX];
++    uint32_t blocks;
++} send_job_t;
++
++/* ---------------- 状态 ---------------- */
++
++static seg_t s_seg[MIC_SEGS];
++static QueueHandle_t s_jobs;
++static bool s_dead;                   /* 缓冲或任务要不到：这一路整个不可用，别再每次按下试一次 */
++
++static carpet_mic_mode_t s_mode = CARPET_MIC_OFF;
++static bool s_mode_loaded;
++
++static volatile bool s_phone_v4;      /* 这一轮会话里，对面的 ack 申报过 4 */
++static volatile bool s_rejected;      /* 发过上行之后链路就断：这台手机不收，本会话不再试 */
++
++static int s_cur = -1;                /* 正在采的那只 */
++static char s_turn[MIC_TURN_MAX];
++static uint32_t s_boot_tag;
++static uint32_t s_turn_n;
++
++/* 只给串口回读用，所以不配锁：全是"最后一次是多少"那种数，读错了不改行为。 */
++static uint32_t s_turns;              /* 交进发送队列的段数 */
++static uint32_t s_frames_ok;          /* 真的发出去的帧数 */
++static uint32_t s_segs_busy;          /* 因为两只缓冲都在忙而没采成的按下 */
++static uint32_t s_bytes_out;
++static int64_t s_last_send_us;
++static int64_t s_last_turn_ms;        /* 上一句发完用了多久（毫秒） */
++static char s_last_err[48];
++
++/* ---------------- 那一格开关（NVS 命名空间 carpet / mic_mode） ---------------- */
++
++static void mic_mode_load(void)
++{
++    if (s_mode_loaded) return;
++    nvs_handle_t h;
++    /* 分家对待："这一格从来没存过"和"现在读不了"不是一件事。
++     * 开机第一次按下可能早于 NVS 起来，那时把读失败当成没存过并缓存下来，
++     * 结果是一台 `>micup force` 存过的屏重启后回不来，串口里还显示 armed=0 —— 现场查不出为什么。 */
++    esp_err_t err = nvs_open(MIC_NS, NVS_READONLY, &h);
++    if (err == ESP_ERR_NVS_NOT_FOUND) {     /* 没存过 = 出厂默认关，这一格可以缓存 */
++        s_mode_loaded = true;
++        return;
++    }
++    if (err != ESP_OK) return;              /* 别的失败：下次再读，别缓存 */
++    uint8_t v = 0;
++    if (nvs_get_u8(h, MIC_KEY, &v) == ESP_OK && v <= CARPET_MIC_FORCE) s_mode = (carpet_mic_mode_t)v;
++    nvs_close(h);
++    s_mode_loaded = true;
++}
++
++carpet_mic_mode_t carpet_mic_mode(void)
++{
++    mic_mode_load();
++    return s_mode;
++}
++
++const char *carpet_mic_mode_name(void)
++{
++    (void)carpet_mic_mode();     /* 先读再打印：printf 的参数求值顺序没有规定，别和 armed= 抢跑 */
++    switch (s_mode) {
++    case CARPET_MIC_AUTO:  return "auto";
++    case CARPET_MIC_FORCE: return "force";
++    default:               return "off";
++    }
++}
++
++void carpet_mic_set_mode(carpet_mic_mode_t mode)
++{
++    mic_mode_load();
++    s_mode = mode;
++    /* 手改开关就是人在下命令：把"这台手机不收"那一格一起抹掉。否则 force 明明开着、
++     * 上行却被一次旧断线永久挡着，现场只会看到"按了没反应"。 */
++    s_rejected = false;
++    nvs_handle_t h;
++    if (nvs_open(MIC_NS, NVS_READWRITE, &h) == ESP_OK) {
++        if (nvs_set_u8(h, MIC_KEY, (uint8_t)mode) == ESP_OK) nvs_commit(h);
++        nvs_close(h);
++    } else {
++        strlcpy(s_last_err, "NVS 打不开，开关没存住", sizeof(s_last_err));
++    }
++    ESP_LOGI(TAG, "上行开关 = %s%s", carpet_mic_mode_name(),
++             s_last_err[0] ? "（没存进 NVS，重启回到上一格）" : "");
++}
++
++/* ---------------- 地基 ---------------- */
++
++static void sender_task(void *arg);
++
++/* 要不到内存那一刻把四个数打出来（内部 / PSRAM × 空闲 / 最大连续）。
++ * 这块板的教训是"只打空闲"看不出问题：空闲 20 KB、最大连续 7 KB，
++ * 任何 8 KB 以上的**连续**申请都必输，而日志里只有一句失败。 */
++static void mem_line(char *out, size_t n)
++{
++    snprintf(out, n, "内部 %u/%u  PSRAM %u/%u",
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
++             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
++             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
++             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
++}
++
++void carpet_mic_init(void)
++{
++    char mem[64];
++    s_boot_tag = esp_random();
++
++    for (int i = 0; i < MIC_SEGS; i++) {
++        s_seg[i].buf = heap_caps_malloc(MIC_MAX_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++        if (!s_seg[i].buf) {
++            mem_line(mem, sizeof(mem));
++            ESP_LOGE(TAG, "第 %d 只 %u 字节段缓冲要不到（%s）—— 上行整个不可用",
++                     i, (unsigned)MIC_MAX_BYTES, mem);
++            for (int j = 0; j < MIC_SEGS; j++) {
++                if (s_seg[j].buf) heap_caps_free(s_seg[j].buf);
++                s_seg[j].buf = NULL;
++            }
++            strlcpy(s_last_err, "段缓冲要不到", sizeof(s_last_err));
++            s_dead = true;
++            return;
++        }
++    }
++
++    s_jobs = xQueueCreate(MIC_SEGS, sizeof(send_job_t));
++    if (!s_jobs) {
++        ESP_LOGE(TAG, "发送队列要不到 —— 上行整个不可用");
++        s_dead = true;
++        return;
++    }
++
++    TaskHandle_t sender = NULL;
++    if (xTaskCreateWithCaps(sender_task, "carpet_mic", MIC_SEND_STACK, NULL, 5, &sender,
++                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
++        mem_line(mem, sizeof(mem));
++        ESP_LOGE(TAG, "上行发送任务起不来，%d 字节 PSRAM 栈（%s）—— 整个不可用",
++                 MIC_SEND_STACK, mem);
++        strlcpy(s_last_err, "发送任务起不来", sizeof(s_last_err));
++        s_dead = true;
++        return;
++    }
++    ESP_LOGI(TAG, "上行地基就绪：%d 只 %u 字节段缓冲（PSRAM）、一帧 %d 字节 PCM、一段最多 %d 帧",
++             MIC_SEGS, (unsigned)MIC_MAX_BYTES, MIC_BLOCK, MIC_MAX_BLOCKS);
++}
++
++/* ---------------- 三道闸 ---------------- */
++
++bool carpet_mic_armed(void)
++{
++    if (s_dead) return false;
++    carpet_mic_mode_t mode = carpet_mic_mode();       /* 里面顺手把 NVS 那一格读一次 */
++    if (mode == CARPET_MIC_OFF) return false;
++    if (s_rejected) return false;
++    if (mode == CARPET_MIC_AUTO && !s_phone_v4) return false;
++    return screen_link_connected();
++}
++
++bool carpet_mic_link_up(void)
++{
++    return screen_link_connected();
++}
++
++void carpet_mic_phone_declared(bool has_v4)
++{
++    if (has_v4 == s_phone_v4) return;
++    s_phone_v4 = has_v4;
++    ESP_LOGI(TAG, "对面在 ack 里申报 v4（上行）= %s", has_v4 ? "是" : "否");
++}
++
++void carpet_mic_link_lost(void)
++{
++    if (!s_last_send_us) return;                      /* 从没发过上行，这次断线和我们无关 */
++    int64_t since = esp_timer_get_time() - s_last_send_us;
++    if (since > MIC_REJECT_US) return;                /* 隔了 5 秒以上才断：不记在我们头上 */
++    s_rejected = true;
++    strlcpy(s_last_err, "发过上行之后链路就断了", sizeof(s_last_err));
++    ESP_LOGW(TAG, "这一台手机收了链路（上行发出后 %.1f 秒）—— 本会话不再试。"
++                  "装会收上行的 App 或重启屏才会再试；>micup force 当场清掉这一格",
++             (double)since / 1000000.0);
++}
++
++/* ---------------- 采集侧（voice_task 调，这里不许阻塞、不许发帧） ---------------- */
++
++bool carpet_mic_begin(void)
++{
++    if (s_dead) return false;
++    int idx = -1;
++    for (int i = 0; i < MIC_SEGS; i++) {
++        if (!s_seg[i].busy) { idx = i; break; }
++    }
++    if (idx < 0) {
++        s_segs_busy++;
++        strlcpy(s_last_err, "两只段缓冲都在发上一句", sizeof(s_last_err));
++        ESP_LOGW(TAG, "上一句还没发完，这一次按下不采");
++        return false;
++    }
++    s_cur = idx;
++    s_seg[idx].len = 0;
++    s_seg[idx].capped = false;
++    s_seg[idx].busy = true;
++    s_last_err[0] = '\0';
++    snprintf(s_turn, sizeof(s_turn), "m-%06lx-%lu", (unsigned long)(s_boot_tag & 0xffffffUL),
++             (unsigned long)(++s_turn_n));
++    /* 上一轮的尾音先停：这一段是**麦克风**在听，让喇叭继续念会把答句录进下一句里。
++     * 规矩是 owner 2026-11-11 拍的那一条的一半 —— 屏起头这一轮只由屏出声，
++     * 而"放音期间停上行"就在这一行落地。文字那句不动（carpet_audio_abort 只管声音）。 */
++    if (carpet_audio_live()) carpet_audio_abort("对着屏说话");
++    return true;
++}
++
++void carpet_mic_feed(const int16_t *pcm, size_t frames)
++{
++    if (s_cur < 0 || pcm == NULL || frames == 0) return;
++    seg_t *sg = &s_seg[s_cur];
++    size_t add = frames * sizeof(int16_t);
++    if (sg->len + add > MIC_MAX_BYTES) {
++        sg->capped = true;                            /* 到 8 秒上限：这一段封顶，后面丢掉 */
++        add = sg->len < MIC_MAX_BYTES ? MIC_MAX_BYTES - sg->len : 0;
++        if (add == 0) return;
++    }
++    memcpy(sg->buf + sg->len, pcm, add);
++    sg->len += add;
++}
++
++size_t carpet_mic_limit_frames(void)
++{
++    return MIC_MAX_BYTES / sizeof(int16_t);
++}
++
++bool carpet_mic_full(void)
++{
++    return s_cur >= 0 && s_seg[s_cur].len >= MIC_MAX_BYTES;
++}
++
++void carpet_mic_end(bool send)
++{
++    if (s_cur < 0) return;
++    seg_t *sg = &s_seg[s_cur];
++    size_t bytes = sg->len;
++    if (!send || bytes == 0) {
++        sg->busy = false;                             /* 太短或作废：立刻还回去 */
++        s_cur = -1;
++        return;
++    }
++    send_job_t job = { .idx = s_cur, .bytes = bytes, .turn = { 0 } };
++    job.blocks = (uint32_t)((bytes + MIC_BLOCK - 1) / MIC_BLOCK);
++    strlcpy(job.turn, s_turn, sizeof(job.turn));
++    s_cur = -1;                                       /* 这只归发送任务，busy 先留着 */
++    s_turns++;
++    if (xQueueSend(s_jobs, &job, 0) != pdTRUE) {      /* 满了 = 发送任务没在动，不排队等待 */
++        sg->busy = false;
++        strlcpy(s_last_err, "发送队列满，这一句没送出去", sizeof(s_last_err));
++        ESP_LOGW(TAG, "发送队列满，%u 字节这一句丢掉（这一轮白说）", (unsigned)bytes);
++    }
++}
++
++/* ---------------- 发送侧（本文件自己的任务） ---------------- */
++
++/* 一块 PCM → 一帧 mic_chunk。args 的所有权交给 screen_link_send_command()
++ * （它在非法 cmd、组帧失败、发不完这些路上都已经把 args 释放掉了）。
++ * 返回 false = 这一帧没上线。 */
++static bool send_block(const char *turn, uint32_t seq, size_t seg_bytes, size_t n,
++                       const uint8_t *pcm, char *b64, size_t b64_cap)
++{
++    size_t olen = 0;
++    if (mbedtls_base64_encode((unsigned char *)b64, b64_cap, &olen, pcm, n) != 0
++        || olen + 1 > b64_cap) {
++        strlcpy(s_last_err, "base64 编码失败", sizeof(s_last_err));
++        return false;
++    }
++    b64[olen] = '\0';
++
++    cJSON *args = cJSON_CreateObject();
++    if (!args) return false;
++    cJSON_AddStringToObject(args, "turn_id", turn);
++    cJSON_AddNumberToObject(args, "seq", (double)seq);
++    /* total = **这一整段的字节数**，和 v3 下行同一个语义。因为松手才发，它一开口就是已知的，
++     * 手机那边不必为上行另写一套"等结束标记"的逻辑 —— 拼到 total 就齐了。 */
++    cJSON_AddNumberToObject(args, "total", (double)seg_bytes);
++    cJSON_AddNumberToObject(args, "rate", MIC_RATE);
++    cJSON_AddStringToObject(args, "b64", b64);
++    if (screen_link_send_command("mic_chunk", args) != ESP_OK) {
++        if (!s_last_err[0]) strlcpy(s_last_err, "帧没发出去", sizeof(s_last_err));
++        return false;
++    }
++    return true;
++}
++
++static void sender_task(void *arg)
++{
++    (void)arg;
++    /* b64 缓冲放堆上（3.4 KB），不压栈：8 KB 的栈不该为一帧吃掉它一半。 */
++    char *b64 = heap_caps_malloc(MIC_B64_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!b64) ESP_LOGE(TAG, "b64 缓冲要不到，上行发不出去");
++
++    /* 高水位只称第一句：之后每句都印同一组数没意义，而这一行是"8 KB 到底够不够"的证据。 */
++    bool hw_printed = false;
++
++    send_job_t job;
++    while (xQueueReceive(s_jobs, &job, portMAX_DELAY) == pdTRUE) {
++        seg_t *sg = &s_seg[job.idx];
++        uint32_t sent = 0;
++        int64_t t0 = esp_timer_get_time();
++        bool ok = b64 != NULL;
++
++        for (uint32_t blk = 0; ok && blk < job.blocks; blk++) {
++            size_t off = (size_t)blk * MIC_BLOCK;
++            size_t n = job.bytes - off < (size_t)MIC_BLOCK ? job.bytes - off : (size_t)MIC_BLOCK;
++            ok = send_block(job.turn, blk, job.bytes, n, sg->buf + off, b64, MIC_B64_BYTES);
++            if (ok) {
++                sent++;
++                s_frames_ok++;
++                s_bytes_out += (uint32_t)n;
++                s_last_send_us = esp_timer_get_time();
++            }
++        }
++        int64_t us = esp_timer_get_time() - t0;
++        s_last_turn_ms = us / 1000;
++        sg->busy = false;                                 /* 交还这只缓冲 */
++        if (ok) {
++            ESP_LOGI(TAG, "上行 %s：%u/%u 帧、%u 字节（%.2f 秒语音）%.2f 秒发完",
++                     job.turn, (unsigned)sent, (unsigned)job.blocks, (unsigned)job.bytes,
++                     (double)job.bytes / (MIC_RATE * 2), (double)us / 1000000.0);
++        } else {
++            ESP_LOGW(TAG, "上行 %s：只发出 %u/%u 帧就停了（%s）—— 手机那一段拼不完整",
++                     job.turn, (unsigned)sent, (unsigned)job.blocks,
++                     s_last_err[0] ? s_last_err : "没发出去");
++        }
++        if (!hw_printed) {
++            hw_printed = true;
++            ESP_LOGI(TAG, "carpet_mic 还剩 %u 字节栈（8 KB PSRAM 那一档）",
++                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
++        }
++    }
++}
++
++/* ---------------- 串口回读与开发口 ---------------- */
++
++void carpet_mic_dump(void)
++{
++    uint32_t free_segs = 0;
++    size_t cur_len = 0;
++    for (int i = 0; i < MIC_SEGS; i++) {
++        if (s_seg[i].buf && !s_seg[i].busy) free_segs++;
++    }
++    if (s_cur >= 0) cur_len = s_seg[s_cur].len;
++    printf("@mic mode=%s armed=%d phone_v4=%d rejected=%d dead=%d linked=%d\n",
++           carpet_mic_mode_name(), carpet_mic_armed() ? 1 : 0, s_phone_v4 ? 1 : 0,
++           s_rejected ? 1 : 0, s_dead ? 1 : 0, screen_link_connected() ? 1 : 0);
++    printf("@mic free_segs=%u/%d turns=%u frames=%u bytes=%u busy_drop=%u cur=%uB cap8=%ds\n",
++           (unsigned)free_segs, MIC_SEGS, (unsigned)s_turns, (unsigned)s_frames_ok,
++           (unsigned)s_bytes_out, (unsigned)s_segs_busy, (unsigned)cur_len, MIC_SECONDS);
++    printf("@mic last_turn=%s send_ms=%lld err=%s\n",
++           s_turn, (long long)s_last_turn_ms, s_last_err[0] ? s_last_err : "-");
++}
++
++/*
++ * `>mictest [秒]`：本机造一段语音（和 `>audtest` 那同一套 440 Hz 音节包络），
++ * 走 `begin/feed/end` 这同一条路 —— **不碰麦克风**，把"帧的形状、组帧、发送任务"
++ * 和"采集通路"分开证。发送在 carpet_mic 那条任务里，所以这条不占串口。
++ */
++void carpet_mic_bench(int seconds)
++{
++    if (seconds < 1) seconds = 2;
++    if (seconds > MIC_SECONDS) seconds = MIC_SECONDS;
++    if (s_dead) {
++        printf("@mictest 上行地基没起来（>mic 看为什么）\n");
++        return;
++    }
++    if (!carpet_mic_begin()) {
++        printf("@mictest 没段缓冲可用（上一句还在发）\n");
++        return;
++    }
++    static int16_t chunk[MUSE_AUDIO_CHUNK];
++    size_t total = (size_t)seconds * MUSE_AUDIO_RATE;
++    size_t done = 0;
++    while (done < total) {
++        size_t n = total - done < (size_t)MUSE_AUDIO_CHUNK ? total - done : (size_t)MUSE_AUDIO_CHUNK;
++        /* 400 毫秒一个音节、200 毫秒一个停顿：让 b64 里既有声音又有静音，
++         * 转写那一步至少在屏侧这一头有东西可传。 */
++        int phase = (int)((done * 1000 / MUSE_AUDIO_RATE) % 600);
++        float amp = phase < 400 ? 0.3f : 0.0f;
++        for (size_t i = 0; i < n; i++) {
++            chunk[i] = (int16_t)(amp * 32767.0f
++                * sinf(2.0f * (float)M_PI * 440.0f * (float)(done + i) / MUSE_AUDIO_RATE));
++        }
++        carpet_mic_feed(chunk, n);
++        done += n;
++    }
++    carpet_mic_end(true);
++    printf("@mictest 造了 %d 秒并交进发送队列（>mic 看发了几帧）\n", seconds);
++}
+diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
+new file mode 100644
+index 0000000..83bbd4f
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_mic.h
+@@ -0,0 +1,98 @@
++/*
++ * 契约 v4 的上行：「对着屏说话」。
++ *
++ * 按下 BOOT（这块板上的下键）→ 屏自己采一段裸 PCM → 松手后按 v3 下行那一套形状
++ * （`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`，一块 2560 字节）
++ * 推给手机 → 手机转写、回 `dialog{dir:"up"}`、再照旧把答句走下行推回来。
++ *
++ * 三件事决定了这一份长什么样，都在 protocol/screen-link.md「上行音频通道」那一节里，
++ * 这里只把结论抄在离代码最近的地方：
++ *
++ * 1. **不开第二个读者**。`voice_task` 每 20 毫秒读一次麦克风，`muse_audio_read` 自己不
++ *    加锁（锁只在 `muse_audio_power` 里），第二个读者就是纯竞争 —— 表现为等满 1 秒令牌，
++ *    然后 `i2s_channel_read(1410): The channel is not enabled`。所以这一份**从不读硬件**：
++ *    样本由 `muse_voice.c` 那条采集循环交进来（`carpet_mic_feed()`），同一个任务、同一个读者。
++ * 2. **发帧不在采集任务里**。`esp_websocket_client_send_text` 最坏阻塞 2 秒，压在上面那
++ *    20 毫秒节拍上掉的是采到的声音。所以采集只管往 PSRAM 段里填，松手时把这一段交给
++ *    本文件自己的发送任务。
++ * 3. **闸是三道，不是一道**：本地开关（NVS，出厂默认关）＋ 对面手机在 `ack.protocols` 里
++ *    申报过 4 ＋ 这一轮没被判成"这台手机不收上行"。缺任何一道都不发。
++ *    为什么这么绕：现在装在手机上的那版 App **申报了 4 但解不了 `mic_chunk`**，
++ *    它的入站解码失败分支是 `conn.close(1000, "bad contract")` —— 一块乱发的固件会把一台
++ *    本来好使的手机当场踢下线，那比"屏不能说话"重得多。
++ *
++ * 为什么是"松手再发"而不是"边说边发"：转写那一步（硅基流动 SenseVoice，multipart 上传）
++ * 本来就要拿到整段才能开始，流式省不下端到端延迟；换来的是 `total` 在开口前就是已知的，
++ * 和 v3 下行**同一套拼装规则**，手机那边只留一套分块代码，也正好避开"服务端从没被这块屏
++ * 压过持续入站流量"那条未验证项。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* 本地开关。默认 CARPET_MIC_OFF —— 见上面第 3 条。
++ * AUTO  = 只在对面申报过 4 的时候才上行（真机那一档，App 补上 mic_chunk 之后用这个）。
++ * FORCE = 不看申报，只要链路连着就发（台架：fake-phone.mjs 和彩排台走这一档验形状）。
++ * OFF   = 永远不发，屏上这一路退回 Muse 原来那句话。 */
++typedef enum {
++    CARPET_MIC_OFF = 0,
++    CARPET_MIC_AUTO,
++    CARPET_MIC_FORCE,
++} carpet_mic_mode_t;
++
++/* 链路起起来时调一次（`carpet_link_start()`）。两只 256 KB 的段缓冲这时候要最便宜，
++ * 等手机把 PSRAM 切碎再来就要不到 —— 所以不在按下的那一刻现要。
++ * 要不到就把这一路判成永久不可用，日志打四个内存数。 */
++void carpet_mic_init(void);
++
++/* 这一次按下该不该由我们收。true = `muse_voice.c` 不许再走 Muse 云端那一路。
++ * 里面会顺手做一件事：NVS 里那一格**第一次走到这行代码时才读** —— `carpet_link_start()`
++ * 跑在 `muse_settings_init()` 之前，那时候 NVS 还没挂载（这条坑 carpet_diag.c 顶部记过：
++ * 第一版没绕，开机那两条诊断当场静默丢失）。按下永远晚于开机，所以读得到。 */
++bool carpet_mic_armed(void);
++/* 链路现在连着没有。给 `muse_voice.c` 那句"该说什么"用：连着手机的时候，
++ * Muse 原来那句 "SET UP MUSE FIRST"（要人装 Muse 官方 App）在这个产品里是一句假指令。 */
++bool carpet_mic_link_up(void);
++
++
++/* 按下（已经过了"太短就不算说话"那道判据）：开始攒这一段。
++ * 返回 false = 两只段缓冲都还在发上一句，这一轮别采。 */
++bool carpet_mic_begin(void);
++
++/* 采集循环里交一个块进来（`muse_audio_read` 刚拿到的那 320 帧）。满了就封顶在 8 秒。 */
++void carpet_mic_feed(const int16_t *pcm, size_t frames);
++
++/* 那 8 秒换算成帧数：采集循环用它自己收尾。这一对数只在本文件定义一次，
++ * 免得 `muse_voice.c` 那边写死一个秒数、这里改上限时两边对不上。 */
++size_t carpet_mic_limit_frames(void);
++
++/* 这一段撞没撞到 8 秒上限。采集循环每圈问一次，到点自己停 —— 而不是把多出来的
++ * 声音交进来再从这里丢掉（那样屏上念的"录了几秒"和真送出去的对不上）。 */
++bool carpet_mic_full(void);
++
++/* 松手。send=true 就把这一段交给发送任务；false（太短、被判不可用）直接扔。
++ * 段缓冲什么时候还回来由发送任务说了算，这里不等它。 */
++void carpet_mic_end(bool send);
++
++/* 对面在 ack 里申报过 4 没有（carpet_link.c 的 on_ack 喂进来）。每次连上重算。 */
++void carpet_mic_phone_declared(bool has_v4);
++
++/* 链路断了（carpet_link.c 的 on_disconnected）。如果断就发生在我们发过上行之后，
++ * 就把这一台手机判成"不收上行"，本会话不再试 —— 这一条是给"装了老 App 的现场"兜底的。 */
++void carpet_mic_link_lost(void);
++
++/* 串口回读：`>mic`。也供 `>carpet` 那一行引用。 */
++void carpet_mic_dump(void);
++
++/* `>micup off|auto|force`：读和改本地开关，改完落 NVS。 */
++carpet_mic_mode_t carpet_mic_mode(void);
++void carpet_mic_set_mode(carpet_mic_mode_t mode);
++const char *carpet_mic_mode_name(void);
++
++/* 开发口 `>mictest [秒]`：本机自己造一段语音（和 `>audtest` 同一套正弦包络），
++ * 走 `begin/feed/end` 这同一条路，**不碰麦克风**，把"帧的形状"和"麦克风通路"分开证。
++ * 只在串口任务里调；它只负责喂，发在发送任务里，所以不占串口。 */
++void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
 index 0000000..18e2537
@@ -5750,15 +6403,16 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..83d53a4 100644
+index 7c579bb..c87bd72 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -48,6 +48,24 @@
+@@ -48,6 +48,25 @@
  #include "muse_ui.h"
  #include "muse_voice.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"
++#include "carpet/carpet_mic.h"
 +#include "carpet/carpet_page.h"
 +#include "carpet/carpet_diag.h"
 +#if CONFIG_MUSE_UI_LANG_ZH
@@ -5778,7 +6432,7 @@ index 7c579bb..83d53a4 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -140,6 +158,9 @@ static bool update_power(void);
+@@ -140,6 +159,9 @@ static bool update_power(void);
  
  static void power_off(void)
  {
@@ -5788,7 +6442,7 @@ index 7c579bb..83d53a4 100644
      if (!muse_board->power_off) {
          return;   /* a physical switch powers it off */
      }
-@@ -170,6 +191,9 @@ static void set_asleep(bool asleep, const char *why)
+@@ -170,6 +192,9 @@ static void set_asleep(bool asleep, const char *why)
  {
      if (asleep != muse_state_asleep()) {
          ESP_LOGI(TAG, "%s (%s)", asleep ? "sleeping" : "waking", why);
@@ -5798,7 +6452,7 @@ index 7c579bb..83d53a4 100644
          muse_state_set_asleep(asleep);
  #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
          if (asleep) {
-@@ -551,6 +575,9 @@ static bool update_power(void)
+@@ -551,6 +576,9 @@ static bool update_power(void)
      ESP_LOGI(TAG, "%s", s_cpu_low ? "low power: display paused"
                          : paused  ? "display paused (USB host: CPU at full speed)"
                                    : "full power");
@@ -5808,7 +6462,7 @@ index 7c579bb..83d53a4 100644
      return paused;
  }
  
-@@ -560,11 +587,35 @@ static bool update_power(void)
+@@ -560,11 +588,35 @@ static bool update_power(void)
   * power arrives; meanwhile nothing reaches the device over the network.
   * Not while a voice note recorded offline waits to go (for a while). Returns
   * true while napping.
@@ -5845,7 +6499,7 @@ index 7c579bb..83d53a4 100644
      if (!s_cpu_low) {
          low_since = now;
      }
-@@ -572,14 +623,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -572,14 +624,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
          s_nap_now = false;
          muse_state_set_as_if_battery(false);
      }
@@ -5870,7 +6524,7 @@ index 7c579bb..83d53a4 100644
  }
  
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
-@@ -589,6 +645,7 @@ static bool s_power_down, s_power_swallow;
+@@ -589,6 +646,7 @@ static bool s_power_down, s_power_swallow;
  static void power_release(void)
  {
      if (!s_power_down) return;
@@ -5878,7 +6532,7 @@ index 7c579bb..83d53a4 100644
      s_power_down = false;
      if (!s_power_swallow) set_asleep(true, muse_board->power_button);
      s_power_swallow = false;
-@@ -603,12 +660,14 @@ static void dedicated_buttons(unsigned ev)
+@@ -603,12 +661,14 @@ static void dedicated_buttons(unsigned ev)
          release = false;
      }
      if (!s_power_down && (ev & MUSE_BTN_POWER_PRESS)) {
@@ -5893,7 +6547,7 @@ index 7c579bb..83d53a4 100644
          s_power_swallow = true;   /* no sleep on release after shutdown/failure */
          if (s_talk_down) talk_button(MUSE_BTN_TALK_RELEASE);
          power_off();
-@@ -721,12 +780,23 @@ static void input_task(void *arg)
+@@ -721,12 +781,23 @@ static void input_task(void *arg)
              if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
                  muse_state_set_power(&p);
                  muse_battery_note_power(&p, muse_state_on_battery());
@@ -5917,7 +6571,42 @@ index 7c579bb..83d53a4 100644
          /* Paused, anything but a button (a pairing prompt, an image) is
           * noticed within REST_WAIT_MS. Napping, nothing comes over the
           * network; USB power arriving is noticed within NAP_WAIT_MS. */
-@@ -892,6 +962,161 @@ static bool console_command(char *line, bool whole)
+@@ -839,6 +910,34 @@ static void set_face(const char *name)
+     fflush(stdout);
+ }
+ 
++/* 十六进制 → 字节。只服务 `>wifi set`：台架机上要往屏里塞的 SSID 是
++ * 「吨吨吨的Mate 30 5G」这种**带空格的非 ASCII** 名字 —— `>wifi set ssid=吨吨吨的Mate 30 5G pass=…`
++ * 这种写法在第一空格处就断了，而串口那一段到底是不是 UTF-8 也不归屏说了算。
++ * 十六进制把这两个问题一起消掉（回读时解出来的 SSID 原样印，它不是秘密；密码不印 ——
++ * 串口日志会被抄进交接文档，抄一次就是一份凭据，和 carpet_link 里那句同一个理由）。
++ * 返回解出的字节数；负数 = 这一串不是合法十六进制（-1）或太长（-2）。 */
++static int hexval(char c)
++{
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++}
++
++static int hex_bytes(const char *hex, char *out, size_t cap)
++{
++    size_t n = 0;
++    for (const char *p = hex; *p; p += 2) {
++        int hi = hexval(p[0]);
++        int lo = p[1] ? hexval(p[1]) : -1;          /* 落单的半个字节也算非法 */
++        if (hi < 0 || lo < 0) return -1;
++        if (n + 1 >= cap) return -2;
++        out[n++] = (char)((hi << 4) | lo);
++    }
++    out[n] = '\0';
++    return (int)n;
++}
++
+ /*
+  * Console-only commands; false for setup commands. Their buffers are taken
+  * per command: without PSRAM, static ones would hold internal RAM for good.
+@@ -892,6 +991,225 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -5970,6 +6659,43 @@ index 7c579bb..83d53a4 100644
 +        }
 +        while (*rest == ' ') rest++;
 +        carpet_link_bench_say_audio(*rest ? rest : "", sec);
++        return true;
++    }
++    /* 上行那一档开关：`>micup` 读，`>micup off|auto|force` 改（改完落 NVS，重启还在）。
++     * off = 按下走 Muse 原来那一路；auto = 只在对面那台手机在 ack 里申报过 v4 才发；
++     * force = 不看申报，只要链路连着就发（台架验帧形状用，对着真 App 用它会当场把手机踢下线——
++     * 现在装机那版解不了 mic_chunk，它的处理是关连接）。 */
++    if (!strncmp(line, "micup", 5) && (line[5] == '\0' || line[5] == ' ')) {
++        const char *want = line[5] == ' ' ? line + 6 : NULL;
++        while (want && *want == ' ') want++;
++        if (want && *want) {
++            if (!strcmp(want, "off"))        carpet_mic_set_mode(CARPET_MIC_OFF);
++            else if (!strcmp(want, "auto"))  carpet_mic_set_mode(CARPET_MIC_AUTO);
++            else if (!strcmp(want, "force")) carpet_mic_set_mode(CARPET_MIC_FORCE);
++            else {
++                printf("@micup 只认 off / auto / force（现在 %s）\n", carpet_mic_mode_name());
++                fflush(stdout);
++                return true;
++            }
++        }
++        printf("@micup now=%s\n", carpet_mic_mode_name());
++        carpet_mic_dump();
++        fflush(stdout);
++        return true;
++    }
++    /* 上行这一路现在到底开没开、开在哪一道闸上、发过几帧、最后一次的错。
++     * 站在屏前按住那个键是看不出来的：那三种"没反应"（开关关着 / 对面没申报 / 被熔断判死）
++     * 屏上画的是一模一样的字。 */
++    if (!strcmp(line, "mic")) {
++        carpet_mic_dump();
++        fflush(stdout);
++        return true;
++    }
++    /* 本机造一段语音走 begin/feed/end 那同一条上行路（不碰麦克风、不碰真按下），
++     * 为的是把"帧的形状和发送任务"和"采集通路"分开证。fake-phone.mjs 那边看得见几帧、
++     * 拼出来多少字节、能不能还原成一段能听的 WAV。 */
++    if (!strncmp(line, "mictest", 7) && (line[7] == '\0' || line[7] == ' ')) {
++        carpet_mic_bench(line[7] == ' ' ? atoi(line + 8) : 2);
 +        return true;
 +    }
 +    /* 本机造一帧"到点的养护"，称 #73 那三条让路和那枚琥珀点：`>maint` 是 worried，
@@ -6051,8 +6777,35 @@ index 7c579bb..83d53a4 100644
 +            printf("@wifi was ssid=%s\n", ssid[0] ? ssid : "(none)");
 +            muse_settings_set_wifi("", "");
 +            printf("@wifi cleared the saved networks; reboot to fall back to CONFIG_HOMEHUB_WIFI_SSID\n");
++        } else if (!strncmp(rest, "set", 3) && (rest[3] == ' ' || rest[3] == '\0')) {
++            /* 存一个网络进 NVS（走的就是屏上那套 Wi-Fi 键盘同一个 API，不新造通路）。
++             * 为什么现在需要这一条：上行音频要称"屏 → 服务端那一趟"，服务端在这台电脑上
++             * （假手机 fake-phone.mjs），可这台电脑此刻只连得到一个网络，屏的 NVS 里存的是
++             * 另一台手机的热点。屏上那个键盘点不动中文 SSID，所以剩下的口只有这一条。
++             * 第二段写 `-` = 开放网络。改完不必重启：muse_settings_set_wifi 自己 notify，
++             * wifi 那一头下一次扫描就会去连。 */
++            char ha[2 * MUSE_SSID_MAX + 1], hp[2 * MUSE_PASS_MAX + 1];
++            ha[0] = hp[0] = '\0';
++            if (sscanf(rest + 3, "%64s %129s", ha, hp) < 2 || !ha[0] || !hp[0]) {
++                printf("@wifi usage: >wifi set <ssid-hex> <pass-hex>   开放网络第二段写 -\n");
++                printf("@wifi   ssid-hex 最多 %d 字，pass-hex 最多 %d 字\n", MUSE_SSID_MAX, MUSE_PASS_MAX);
++            } else {
++                char sid[MUSE_SSID_MAX + 1], pw[MUSE_PASS_MAX + 1];
++                int ns = hex_bytes(ha, sid, sizeof(sid));
++                int np = !strcmp(hp, "-") ? (pw[0] = '\0', 0) : hex_bytes(hp, pw, sizeof(pw));
++                if (ns < 0 || np < 0) {
++                    printf("@wifi 不是合法十六进制（ssid=%d pass=%d；-1=有非 hex 字符 -2=太长）\n", ns, np);
++                } else if (!ns) {
++                    printf("@wifi ssid 是空的，不存（要抹掉存过的网络用 >wifi clear）\n");
++                } else {
++                    if (!muse_settings_wifi_on()) muse_settings_set_wifi_on(true);
++                    muse_settings_set_wifi(sid, pw);
++                    printf("@wifi set ssid=%s（%d 字节）pass=%d 字节（不印）wifi_on=1\n", sid, ns, np);
++                    printf("@wifi 下一次扫描就该连上：>url 看 wifi=1 ssid=…，>carpet 看 linked=1\n");
++                }
++            }
 +        } else {
-+            printf("@wifi usage: >wifi clear\n");
++            printf("@wifi usage: >wifi clear | >wifi set <ssid-hex> <pass-hex>（开放网络 pass 段写 -）\n");
 +        }
 +        fflush(stdout);
 +        return true;
@@ -6079,7 +6832,7 @@ index 7c579bb..83d53a4 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1151,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1244,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -6092,7 +6845,7 @@ index 7c579bb..83d53a4 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1259,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1352,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -7287,6 +8040,144 @@ index a671bbc..857c011 100644
  /* Display-only demo name for privacy-safe screenshots; no provisioning changes. */
  void muse_ui_bench_demo(bool enabled);
  #endif
+diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
+index 000104e..67ee352 100644
+--- a/esp32/components/muse/muse_voice.c
++++ b/esp32/components/muse/muse_voice.c
+@@ -38,6 +38,9 @@
+ #include "muse_settings.h"
+ #include "muse_state.h"
+ #include "muse_wifi.h"
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_mic.h"    /* 「对着屏说话」：这一轮的语音交给手机，不去 Muse 云 */
++#endif
+ #if CONFIG_MUSE_REALTIME_VOICE
+ #include "muse_voice_call.h"
+ #include "muse_voice_call_core.h"
+@@ -414,6 +417,87 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+ 
+ static void go_idle(const char *caption);
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++/*
++ * 「对着屏说话」那一轮：按住 → 采 → 松手把整段交给手机。
++ *
++ * 为什么不复用 record()：那一条从头到尾是围着 Muse 云写的（go_live 的 turn_begin、
++ * take() 里的 turn_audio、Hatch 的实时转写事件、finish_note 那个重发队列），
++ * 这一轮那些一个字都不该跑 —— 答句从 Screen-Link 那头发回来。
++ * 但**节拍和读者必须还是同一套**：还是这条任务、还是 `muse_audio_read` 那唯一的一个读者
++ * （第二个读者会等满 1 秒令牌，表现是"所有录音都失败在 The channel is not enabled"，
++ * 这条判据在 carpet_mic.h 顶上记着），预滚环照用，松手之后的补采照用 TAIL_FRAMES。
++ *
++ * 屏上这几句为什么是中文写的而不是 Muse 那句 "SET UP MUSE FIRST"：那一句要的是配对到
++ * Muse 官方云，而这台屏在这个产品里根本不装那个 App —— 它在观众面前是一句假指令。
++ * 这里不动 muse_lang 那张表（那是设置页的字），中文直接交给 caption：caption 那一条字路
++ * 本来就带 CJK fallback（muse_ui.c 的 set_caption_font），画得出来。
++ */
++static void talk_to_phone(bool barge_in)
++{
++    if (!carpet_mic_begin()) {
++        go_idle("上一句还在发，稍等一下");
++        return;
++    }
++    muse_state_set_mode(MUSE_MODE_LISTENING);
++    muse_state_set_progress(0);
++    muse_state_set_caption("在听");
++
++    size_t n = 0;
++    if (barge_in) {
++        /* 按下的时候还有声音在放：那 200 毫秒是它自己的尾音，不进这一段。
++         * （begin() 已经把排着的语音清了，这里清的是已经在 DMA 里的那一截。） */
++        for (int i = 0; i < SETTLE_CHUNKS; i++) {
++            muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK);
++        }
++    } else {
++        /* 人是在按下的同时开口的，而按键报上来晚一拍：把预滚那 320 毫秒也算进这一句。 */
++        for (size_t i = 0; i < s_pre_fill; i++) {
++            pre_get(i, s_chunk);
++            carpet_mic_feed(s_chunk, MUSE_AUDIO_CHUNK);
++            n += MUSE_AUDIO_CHUNK;
++        }
++    }
++    size_t pre = n;
++    size_t limit = carpet_mic_limit_frames();
++    size_t stop_at = limit;
++    bool released = false;
++    while (n + MUSE_AUDIO_CHUNK <= stop_at) {
++        if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
++            break;
++        }
++        muse_state_set_level(muse_audio_level(s_chunk, MUSE_AUDIO_CHUNK));
++        carpet_mic_feed(s_chunk, MUSE_AUDIO_CHUNK);
++        n += MUSE_AUDIO_CHUNK;
++        muse_state_set_progress((float)n / (float)limit);
++        if (n % (MUSE_AUDIO_CHUNK * 10) == 0) {
++            muse_state_set_caption("在听 %.1f 秒", (double)n / MUSE_AUDIO_RATE);
++        }
++        /* 采集比实时慢 60~80 毫秒，人在最后一个字上就松了手，所以松手之后再补一小截。
++         * 和 record() 同一个数，两边念出来的"录了多久"才对得上。 */
++        if (!released && got_event(MUSE_PTT_UP)) {
++            released = true;
++            stop_at = n + TAIL_FRAMES < limit ? n + TAIL_FRAMES : limit;
++        }
++    }
++    muse_state_set_level(0);
++    size_t held = n > pre ? n - pre : 0;
++
++    if (held < MIN_HELD_FRAMES) {
++        carpet_mic_end(false);
++        /* 点一下不算说话。这一句是给"按了不知道要干嘛"的人看的 —— 也就是今天那句
++         * "让我安装 muse" 要顶掉的那一格。 */
++        go_idle("按住说话，松开发出去");
++        return;
++    }
++    carpet_mic_end(true);
++    ESP_LOGI(TAG, "carpet: 这一句交给手机 %.2f 秒（按住 %zu 帧%s）",
++             (double)held / MUSE_AUDIO_RATE, held, released ? "" : "，撞到 8 秒上限");
++    muse_state_set_mode(MUSE_MODE_THINKING);
++    muse_state_set_caption("发给手机了");   /* 下一句是手机回来的转写，不是这里写的 */
++}
++#endif
++
+ /*
+  * Plays Hatch's reply as it arrives, with its text as the caption. Returns
+  * true if interrupted by a new press. *delivered: the VM has the note.
+@@ -897,6 +981,15 @@ static bool can_record(void)
+     muse_hatch_status_t st;
+     muse_hatch_status(&st);
+     if (st.state == MUSE_HATCH_NOT_SET) {
++#if CONFIG_MUSE_CARPET_CARDS
++        /* 手机那头的链路是通的，那"装一个 Muse 再回来"就是句假指令：这台屏在这个产品里
++         * 不装那个 App。上行还没开（或对面那版手机还解不了）才是真的原因，就说真的那句。
++         * 上行开着的时候走不到这里 —— 上面 voice_task 那一格先把它接走了。 */
++        if (carpet_mic_link_up()) {
++            go_idle("对着屏说话还没开");
++            return false;
++        }
++#endif
+         go_idle("SET UP MUSE FIRST");
+         return false;
+     }
+@@ -1255,6 +1348,19 @@ static void voice_task(void *arg)
+         }
+ #endif
+         muse_input_clear_call_pending(s_press_mark);
++#if CONFIG_MUSE_CARPET_CARDS
++        /* 这一轮该谁接，先看这道闸：开着（而且对面申报过 v4、这只手机没被熔断）就**不走
++         * Muse 云** —— 因为 can_record() 里那句 "SET UP MUSE FIRST" 拦的正是这台屏根本
++         * 用不到的东西，而它一旦放行，后面 Hatch 那条会把这段语音往官方云上推。
++         * 判据是运行期的，不在这里编译期分叉：现场装的是哪版 App，屏自己看得到。 */
++        if (carpet_mic_armed()) {
++            bool barge = pending_down;
++            pending_down = false;
++            talk_to_phone(barge);
++            pre_reset();
++            continue;
++        }
++#endif
+         if (!can_record()) {
+             pending_down = false;
+             continue;
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
 index 0000000..fd5ea98
@@ -7411,7 +8302,7 @@ index 1030652..e8fa4de 100644
              }
              if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..6b8aa31 100644
+index 0c74b08..74ebbb8 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -7471,7 +8362,7 @@ index 0c74b08..6b8aa31 100644
              ESP_LOGI(TAG, "wifi network changed; rejoining");
              wifi_mgr_disconnect();
              next_try = 0;
-@@ -571,7 +593,27 @@ static void keeper_task(void *arg) {
+@@ -571,7 +593,32 @@ static void keeper_task(void *arg) {
              backoff = RETRY_MIN_US;
              away_backoff = AWAY_MIN_US;
              s_away = false;
@@ -7485,12 +8376,17 @@ index 0c74b08..6b8aa31 100644
 +            if (fails < stalled_at) {
 +                stalled_at = fails;   // one got through since; the count restarted
 +            }
-+            if (fails >= DIAL_STALL_FAILS && fails - stalled_at >= DIAL_STALL_FAILS) {
++            char err[120] = "";
++            carpet_link_last_error(err, sizeof(err));
++            // Only a dial that actually reached the socket can blame the association.
++            // The same counter also ticks when the dial never started (2026-11-10:
++            // the websocket task wouldn't allocate, four ticks in eight seconds, and
++            // this tore down a working hotspot join for nothing). No recorded error
++            // means no socket was ever tried, so leave the route alone.
++            if (err[0] && fails >= DIAL_STALL_FAILS && fails - stalled_at >= DIAL_STALL_FAILS) {
 +                stalled_at = fails;
-+                char err[120] = "";
-+                carpet_link_last_error(err, sizeof(err));
 +                ESP_LOGW(TAG, "screen link dialed %lu times with none through (%s); rejoining wifi",
-+                         (unsigned long)fails, err[0] ? err : "no error recorded");
++                         (unsigned long)fails, err);
 +                wifi_mgr_disconnect();
 +                next_try = 0;
 +                backoff = RETRY_MIN_US;
@@ -7500,7 +8396,7 @@ index 0c74b08..6b8aa31 100644
              // NVS has Muse's changes (s_editing is clear), so Link joins from
              // the same list the settings show.
              uint32_t gen = s_creds_gen;
-@@ -663,6 +705,11 @@ void muse_glue_start(void) {
+@@ -663,6 +710,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }

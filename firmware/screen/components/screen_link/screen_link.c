@@ -176,6 +176,13 @@ static void send_hello(void)
     cJSON_AddItemToObject(h, "protocols", protos);
     cJSON_AddItemToArray(protos, cJSON_CreateNumber(1));
     cJSON_AddItemToArray(protos, cJSON_CreateNumber(SCREEN_LINK_CONTRACT_MAX));
+    /* v4 = 这一版固件**会发** `mic_chunk`。为什么要单独加一个数、而不是把
+     * SCREEN_LINK_CONTRACT_MAX 抬到 4：那个宏同时是每一帧上的 `v`，抬它等于把所有帧的
+     * 版本号一起改掉，而这一档只多一条**上行**的 cmd，下行一个字没动。
+     * 对面那台手机现在按 `SUPPORTED_VERSIONS = {1,2,3}` 取交集最大值，这个 4 被它滤掉，
+     * 谈下来仍是 v3 ⇒ 加了它不会让任何已有行为变样；等 App 把 4 收进那张表，
+     * 它才真的读得到"这块屏有耳朵"。 */
+    cJSON_AddItemToArray(protos, cJSON_CreateNumber(SCREEN_LINK_MIC_UP));
 
     /* v3：屏幕几何。填了 w/h 才发这一项 —— 老服务端解不了也不报错（它按 schema 的
        "可选"处理），而"没申报"和"报了一个编的尺寸"是两件完全不同的事：
@@ -284,6 +291,12 @@ esp_err_t screen_link_send_command(const char *cmd, cJSON *args)
     static const char *const ALLOWED[] = {
         "sos_press", "sos_cancel", "track_pull", "set_demo_mode", "set_fence", "reboot_ui",
         "card_next", "card_auto", "poke", "page_report",
+        /* 契约 v4 的上行：屏采的一段语音，和下行 `audio_chunk` 同一套 args 键。
+         * 挂进这一族而不是新造一种 `t` 的理由和 v3 那条一字不改：本组件（和手机那侧）
+         * 对"解不了的帧类型"的处理是**关连接**，而对认不出的 `cmd` 手机那侧现在也是
+         * 关连接（严格枚举 + runCatching 那一段）—— 所以这一条能不能发，靠的不是这张表，
+         * 靠的是 carpet_mic 那三道闸。这张表只保证"屏不许拼错名字"。 */
+        "mic_chunk",
     };
     bool ok = false;
     for (int i = 0; i < (int)(sizeof(ALLOWED) / sizeof(ALLOWED[0])); i++) {
@@ -420,7 +433,12 @@ static void handle_frame(char *raw)
         }
     } else if (strcmp(t, "ack") == 0) {
         const cJSON *a = cJSON_GetObjectItemCaseSensitive(root, "ack");
-        if (cJSON_IsObject(a) && s_cb.on_ack != NULL) s_cb.on_ack(a);
+        /* 把这一帧的契约档一起交出去（缺 `v` 按 1 算，老帧就是这么发的）。
+         * 为什么组件要替调用方读这一个数：对面 `protocols` 里报的 4 **单独不能当许可** ——
+         * 2026-11-11 读 App 那棵树称到装机那版已经先报了 4 而 CommandType 还解不了 mic_chunk，
+         * 发上去就是关线；真许可只有"整份契约走到 v4"那一档，而那个数就在 envelope 上。
+         * 判断本身不在组件里做（组件不认识上行），这里只负责两个数一起递过去。 */
+        if (cJSON_IsObject(a) && s_cb.on_ack != NULL) s_cb.on_ack(a, (int)num_or(root, "v", 1));
     } else {
         contract_error(raw, "不认识的帧类型");
         esp_websocket_client_close(s_ws, pdMS_TO_TICKS(500));
@@ -585,6 +603,51 @@ static void sleep_backoff(uint32_t seconds)
     }
 }
 
+/* 组件那个 ws 任务的栈要给多大。2026-11-10 真机：4096 字那一档在建任务那一步反复要不到
+ * （`Error create websocket task`，那一刻内部 7K 空闲/最大连续 3K、PSRAM 3549K），
+ * 而**同一毫秒**我们自己那条 4096 字的 link_task 建出来了 —— 所以"要不到的是 16K 这块栈"
+ * 这个说法本身没被称过。这一档先按阶梯降下来试，同时下面那个探针把当场的事实量出来。
+ *
+ * 【2026-11-11 晚：2048 那一档删掉了，它把"拨不上"变成了"重启循环"。】阶梯降到 2048 时
+ * `xTaskCreate` **是给得到的**（那一刻内部最大连续正好 2K），于是 ws 任务带着 2 KB 栈跑起来，
+ * 连上 Wi-Fi 约 10 秒后 `***ERROR*** A stack overflow in task websocket_task` →
+ * `rst:0xc (RTC_SW_CPU_RST)` 反复重启；`addr2line` 对现 elf（SHA256 前缀 ee85e60e6）解出来
+ * `panic_abort ← esp_system_abort ← vApplicationStackOverflowHook ← vTaskSwitchContext`，
+ * 是真栈溢出。一台永远在重启的屏比一台连不上的屏更糟，所以**宁可诚实失败也不给一条不够用的栈**：
+ * 现在最多降到 3072。真出路不是继续降，是把内部 RAM 腾出来 —— 见下面 `fill_ws_cfg()` 那两条
+ * buffer 的去处，那一处才是当场能改的那一块。
+ * 再提醒一次单位：这一版 IDF 里 `xTaskCreate` 的栈深度收的是**字节**，不是字数
+ * （`StackType_t` 是 1 字节，日志里那行 `3072 字（3 KB）` 的括号才是真大小）。 */
+static const int WS_STACKS[] = {4096, 3072};
+static const int WS_STACK_N = (int)(sizeof WS_STACKS / sizeof WS_STACKS[0]);
+static int s_ws_stack_i;   /* 当前用的是阶梯里的哪一档；成了就不往回升 */
+
+static void probe_task(void *arg)
+{
+    (void)arg;
+    vTaskDelete(NULL);
+}
+
+/* 只在 start 失败那一刻跑一次：用和组件完全一样的参数再要一次，看它到底给不给。
+ * 四条结果连在一起才能分清真凶：
+ *   xTaskCreate 成 + ws 不成  → 不是内存，是组件那一路自己有别的要求（下一步查 transport）
+ *   xTaskCreate 不成 + 16K(任意 RAM) 成 → 栈确实要不到，降档/回收内部 RAM 才是出路
+ *   16K(内部) 成 而 16K(任意) 不成 → 那 PSRAM 才是问题，反过来 */
+static void ws_probe(void)
+{
+    void *ram16 = heap_caps_malloc(16384, MALLOC_CAP_8BIT);
+    void *int16 = heap_caps_malloc(16384, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    void *ps16  = heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    TaskHandle_t h = NULL;
+    BaseType_t ok = xTaskCreate(probe_task, "ws_probe", WS_STACKS[0], NULL, 5, &h);
+
+    ESP_LOGE(TAG, "探针：同样 4096 字的 xTaskCreate %s；16K(任意RAM)=%p 16K(内部)=%p 16K(PSRAM)=%p",
+             ok == pdPASS ? "要得到" : "要不到", ram16, int16, ps16);
+    if (ram16 != NULL) heap_caps_free(ram16);
+    if (int16 != NULL) heap_caps_free(int16);
+    if (ps16 != NULL) heap_caps_free(ps16);
+}
+
 /* 这一句存在的唯一理由：失败的时候现场要能一眼看出是"内存"而不是"网络"。
  * 光一条 ESP_ERR_NO_MEM 分不开 —— 内部 RAM 空闲多少、最大连续块多少，才是那条判据。
  * 调用处的缓冲区一律 96 字节：这三个数拼起来最长 66 字节，而 -Wformat-truncation
@@ -599,20 +662,28 @@ static void mem_note(char *out, size_t n)
 
 /* 组件 config 的填法只留这一处：开机建一次，start 失败换句柄时还要建同一份。
  * 抄两遍的下场是以后改一处漏一处。 */
-static void fill_ws_cfg(esp_websocket_client_config_t *ws_cfg)
+static void fill_ws_cfg(esp_websocket_client_config_t *ws_cfg, int stack_words)
 {
     memset(ws_cfg, 0, sizeof(*ws_cfg));
     ws_cfg->uri = s_cfg.url;
-    ws_cfg->buffer_size = SCREEN_LINK_MAX_FRAME;
-    /* 两份 buffer_size 的缓冲（rx/tx）是 `malloc` 出来的：这一版
-     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096，正好 4096 字节这一档留在**内部 RAM**，
-     * 所以链路一起来就固定要走 8 KB 内部 —— 这就是真机稳态内部空闲从 22K 掉到 10K
-     * （2026-11-10，`hb t=7s int=10K/4K min=2K`）里最大的那一块。
-     * task_stack 这一格收的是**字**（不是字节），4096 字 = 16 KB，跟组件默认档
-     * WEBSOCKET_TASK_STACK(4*1024) 同一档，先不动。
-     * 2026-11-10 真机 153366 那条 `Error create websocket task` 就是这一档要不到：
-     * 那一刻内部只剩 10K 空闲 / 4K 最大连续；换句柄那条出路在下面 link_task 里。 */
-    ws_cfg->task_stack = 4096;
+    /* 【2026-11-11 晚：这一格从 4096 提到 4608，不是为了收更大的帧，是为了换一块内存。】
+     * rx/tx 两份缓冲在组件里是 `malloc(buffer_size)`（esp_websocket_client.c 684/688 行），
+     * 走普通 malloc ⇒ 命中 `heap_caps_malloc_default()` 那条分界：
+     * `size <= CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`（这一版 = 4096，`devices/sdkconfig.muse`
+     * 那一层写的）就**只从内部 RAM 要**，大于它才先要 PSRAM、要不到再退回任意堆
+     * （esp_heap/heap_caps.c:117-125，源码里读到的）。正好 4096 这一档卡在界内，所以链路一开
+     * 就固定从内部 RAM 走掉 8 KB —— 真机稳态内部空闲从 22K 掉到 10K、最大连续掉到 2K，
+     * 这一笔是里面最大的那块（`hb t=7s int=10K/4K min=2K`）。
+     * 4608 = 帧上限 4096 + 512：`SCREEN_LINK_MAX_FRAME` 那个语义上限没动（组件只是多给一点缓冲），
+     * 但跨过那条界之后这两份缓冲落到 PSRAM，把 8 KB 内部还给堆 —— 下面 ws 任务要的那 4096 字节
+     * 连续栈缺的就是这一块。 */
+    ws_cfg->buffer_size = SCREEN_LINK_MAX_FRAME + 512;
+    /* task_stack 这一格在这一版 IDF 里收的是**字节**，不是字数（`StackType_t` 1 字节；
+     * 日志里那句"3072 字（3 KB）"括号里那个才是真大小）：4096 = 4 KB，跟组件默认档
+     * WEBSOCKET_TASK_STACK(4*1024) 同一档；真机要不到时由上面 WS_STACKS 那两档降着试。
+     * 2026-11-10 真机那条 `Error create websocket task` 就是这一档要不到，
+     * 出路不是继续降栈，是换句柄 + 把内部 RAM 腾出来（就是上面那两条 buffer 的去处）。 */
+    ws_cfg->task_stack = stack_words;
     /* 阶梯退避要自己走，所以关掉库内那个固定间隔的自动重连。
      * 头文件里没有 auto_reconnect 这个字段（只有 disable_auto_reconnect / enable_close_reconnect），
      * 写了编不过；reconnect_timeout_ms 在 disable_auto_reconnect=true 时不起作用，留着只为以后好读。 */
@@ -621,12 +692,12 @@ static void fill_ws_cfg(esp_websocket_client_config_t *ws_cfg)
 }
 
 /* 建出一个装好事件回调的句柄（不含 start）。成功时 s_ws 非空。 */
-static esp_err_t client_open(void)
+static esp_err_t client_open(int stack_words)
 {
     esp_websocket_client_config_t ws_cfg;
     char mem[96];
 
-    fill_ws_cfg(&ws_cfg);
+    fill_ws_cfg(&ws_cfg, stack_words);
     s_ws = esp_websocket_client_init(&ws_cfg);
     if (s_ws == NULL) {
         mem_note(mem, sizeof mem);
@@ -659,15 +730,21 @@ static void link_task(void *arg)
             if (s_stopping) break;
             s_dial_fails++;
             mem_note(mem, sizeof mem);
-            ESP_LOGE(TAG, "start 没起来（第 %lu 次连续失败）：%s；换掉整个 ws 句柄重来",
-                     (unsigned long)s_dial_fails, mem);
+            ESP_LOGE(TAG, "start 没起来（第 %lu 次连续失败，ws 栈 %d 字）：%s；换掉整个 ws 句柄重来",
+                     (unsigned long)s_dial_fails, WS_STACKS[s_ws_stack_i], mem);
+            if (s_dial_fails == 1) ws_probe();   /* 只称第一下，后面每轮都印同一组数没意义 */
             sleep_backoff(BACKOFF_S[step]);
             if (step < BACKOFF_STEPS - 1) step++;
             /* 只有链路任务自己在这一刻持有 s_ws：s_up 是 false，发帧那条(第 139 行)
              * 有 `s_up && s_ws != NULL` 兜着，screen_link_stop() 也在 s_ws==NULL 时直接返回。 */
             esp_websocket_client_destroy(s_ws);
             s_ws = NULL;
-            if (client_open() != ESP_OK) {
+            if (s_ws_stack_i + 1 < WS_STACK_N) {
+                s_ws_stack_i++;
+                ESP_LOGW(TAG, "ws 任务的栈降到 %d 字（%d KB）再要一次",
+                         WS_STACKS[s_ws_stack_i], WS_STACKS[s_ws_stack_i] * (int)sizeof(StackType_t) / 1024);
+            }
+            if (client_open(WS_STACKS[s_ws_stack_i]) != ESP_OK) {
                 ESP_LOGE(TAG, "换句柄也没换成，%d 秒后再试一轮", (int)BACKOFF_S[step]);
                 sleep_backoff(BACKOFF_S[step]);
                 if (step < BACKOFF_STEPS - 1) step++;
@@ -810,7 +887,8 @@ esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_call
         return start_fail(ESP_ERR_NO_MEM);
     }
 
-    if (client_open() != ESP_OK) return start_fail(ESP_ERR_NO_MEM);
+    s_ws_stack_i = 0;
+    if (client_open(WS_STACKS[s_ws_stack_i]) != ESP_OK) return start_fail(ESP_ERR_NO_MEM);
 
     /* 这条以前写 8192。这个 kernel 的 usStackDepth 收的是**字**（task.h:315 +
      * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），所以那一行要的
