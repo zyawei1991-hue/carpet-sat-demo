@@ -93,6 +93,19 @@ class ScreenVoice(
     private val _tone = MutableStateFlow(initialTone)
     val tone: StateFlow<VoiceTone> = _tone
 
+    /** 手机起头那一轮由哪个设备发声（owner 2026-11-11 拍的规矩）。默认圆屏 */
+    private val _screenDevice = MutableStateFlow(ScreenDevice.screen)
+    val screenDevice: StateFlow<ScreenDevice> = _screenDevice
+    fun setScreenDevice(next: ScreenDevice) { _screenDevice.value = next }
+
+    enum class ScreenDevice(val label: String) { screen("圆屏"), phone("这台手机") }
+
+    /** 起头在手机、落点是不是这台手机（屏没连 / 没升到 v3 时也落回手机） */
+    private fun answerHere(): Boolean {
+        val link = server()
+        return _screenDevice.value == ScreenDevice.phone || link == null || !link.audioReady
+    }
+
     /**
      * 这台引擎里的中文人声。空 = 引擎没报（老引擎不实现 voices）或者只有一种。
      *
@@ -302,9 +315,15 @@ class ScreenVoice(
     }
 
     /** 一句答话。**调用即返回**：合成要一两秒，不能在网关那条协程里等 */
-    fun speak(turnId: String, text: String) {
+    fun speak(turnId: String, text: String, origin: com.carpet.satdemo.core.protocol.DialogOrigin) {
         val body = text.trim()
         if (body.isEmpty()) return
+        // owner 规矩（2026-11-11）：起头在圆屏的那一轮**只有圆屏念**，手机一声不出，
+        // 也不受「发声设备」设置影响 —— 屏上对话时人就在屏边，手机兜底等于在另一个人耳边又念一遍
+        if (origin == com.carpet.satdemo.core.protocol.DialogOrigin.screen) {
+            worker.execute { runCatching { synthesizeAndSend(turnId, body, screenOnly = true) }.onFailure { log("屏幕语音失败：${it.message}") } }
+            return
+        }
         worker.execute { runCatching { synthesizeAndSend(turnId, body) }.onFailure { log("屏幕语音失败：${it.message}") } }
     }
 
@@ -459,16 +478,16 @@ class ScreenVoice(
      * 两条去处同源 —— 屏连着且 ≥v3 就解码成 16k PCM 推过去，否则就在本机播同一个 MP3。
      * 屏和手机喇叭因此念的是**同一句、同一个声音**，不会再出现"屏上是一种音色、手机是另一种"。
      */
-    private fun synthesizeAndSend(turnId: String, text: String) {
+    private fun synthesizeAndSend(turnId: String, text: String, screenOnly: Boolean = false) {
         val link = server()
         val screenReady = link != null && link.audioReady
 
-        val result = playNetAnswer(turnId, text, link)
+        val result = playNetAnswer(turnId, text, link, screenOnly)
         if (result != null) {
             // 必须分清"手机响了"和"屏收到了"：解码失败时只有手机在响，屏的缓冲里一个字都没有。
             // 只看手机这一侧就清 issue，下次拔掉手机才发现屏从来没说过话
             _issue.value = when (result) {
-                NetResult.Both, NetResult.ScreenOnly -> null
+                NetResult.ScreenOnly -> null
                 NetResult.PhoneOnly ->
                     if (screenReady) "这句只在这台手机上念了，圆屏那边暂时放不出来"
                     else whyNot(link)
@@ -560,21 +579,32 @@ class ScreenVoice(
         }
     }
 
-    private enum class NetResult { Both, ScreenOnly, PhoneOnly, Nothing }
+    private enum class NetResult { ScreenOnly, PhoneOnly, Nothing }
 
     /**
-     * 网络合成分支。拿到 MP3 后：屏能收就解码推屏，同时**本机也放**（屏可能音量小或被拔了）。
+     * 网络合成分支。拿到 MP3 后按**发声落点**决定去处：
+     * - [screenOnly]（起头在圆屏，或手机起头但用户选了圆屏）：只推屏，本机一声不出；
+     * - 本机落点：只在手机放，**屏一个音频帧都不收**（一句 27 字 ≈ 75 帧 / 262 KB，不该为
+     *   "反正屏也听不见"往链路上灌）；
+     * - 两个都不落点才退回旧行为（不会发生：设置只有圆屏/这台手机两档）。
      *
      * 返回值：null = 网络这条整个不通（调用方退本机引擎）；[NetResult] 说清到底谁听见了 ——
      * "手机响了"和"屏收到了"是两件事，混成一个布尔就把"解码失败"报成成功。
      */
-    private fun playNetAnswer(turnId: String, text: String, link: ScreenLinkServer?): NetResult? {
+    private fun playNetAnswer(
+        turnId: String,
+        text: String,
+        link: ScreenLinkServer?,
+        screenOnly: Boolean,
+    ): NetResult? {
         val mp3 = NetVoice.fetch(text, _tone.value) ?: return null
         // 这一句的声音来源此刻就定了：后面不管送屏还是本机放，都是网络合成那一份
         _source.value = NetVoice.lastSource
         var screenGot = false
 
-        if (link != null && link.audioReady) {
+        // 落点此刻就定死：屏起头=屏；手机起头=按设置，但屏没连/没升 v3 落回手机
+        val wantScreen = !screenOnly && !answerHere()
+        if (wantScreen && link != null && link.audioReady) {
             val pcm = NetVoice.pcm16k(mp3)
             if (pcm == null) {
                 log("屏幕语音：网络合成的 MP3 没解成 16k PCM，这句只在本机响")
@@ -594,33 +624,35 @@ class ScreenVoice(
         }
 
         var phoneGot = false
-        val player = NetVoice.playerFor(mp3)
-        if (player != null) {
-            stopPhonePlayer()
-            phonePlayer = player
-            player.setOnCompletionListener { mp ->
-                runCatching { mp.release() }
-                if (phonePlayer === mp) phonePlayer = null
-            }
-            player.setOnErrorListener { mp, _, _ ->
-                runCatching { mp.release() }
-                if (phonePlayer === mp) phonePlayer = null
-                true
-            }
-            try {
-                player.start()
-                phoneGot = true
-                log("屏幕语音：网络合成一句，本机喇叭播放中（${mp3.size} 字节）")
-            } catch (e: Exception) {
-                runCatching { player.release() }
-                phonePlayer = null
-                log("屏幕语音：本机播放器起不来（${e.message}）")
+        if (!wantScreen) {
+            val player = NetVoice.playerFor(mp3)
+            if (player != null) {
+                stopPhonePlayer()
+                phonePlayer = player
+                player.setOnCompletionListener { mp ->
+                    runCatching { mp.release() }
+                    if (phonePlayer === mp) phonePlayer = null
+                }
+                player.setOnErrorListener { mp, _, _ ->
+                    runCatching { mp.release() }
+                    if (phonePlayer === mp) phonePlayer = null
+                    true
+                }
+                try {
+                    player.start()
+                    phoneGot = true
+                    log("屏幕语音：网络合成一句，本机喇叭播放中（${mp3.size} 字节）")
+                } catch (e: Exception) {
+                    runCatching { player.release() }
+                    phonePlayer = null
+                    log("屏幕语音：本机播放器起不来（${e.message}）")
+                }
             }
         }
         return when {
-            screenGot && phoneGot -> NetResult.Both
             screenGot -> NetResult.ScreenOnly
             phoneGot -> NetResult.PhoneOnly
+            wantScreen -> NetResult.Nothing
             else -> NetResult.Nothing
         }
     }

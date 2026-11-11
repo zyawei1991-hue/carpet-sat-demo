@@ -3,9 +3,12 @@ package com.carpet.satdemo.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -15,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -64,6 +68,25 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
         EngRow("模拟卫星未过顶", flags.noPassWindow) { app.setFlag(flags.copy(noPassWindow = it)) }
         EngRow("模拟 GT1005 掉线", flags.gt1005Offline) { app.setFlag(flags.copy(gt1005Offline = it)) }
         EngRow("星历：用厂商 SDK（重启生效）", app.vendorEph) { app.setVendorEph(it) }
+
+        Text("GT1005 BLE 通道", style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+        val bleState by app.bleState.collectAsState()
+        Row(
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(vertical = Grid.x4),
+        ) {
+            Button(onClick = { app.bleConnect() }) { Text(if (bleState == "linked") "已连接" else "连接 GT1005") }
+            Spacer(Modifier.width(Grid.x8))
+            Text("状态：$bleState", style = Type.Body)
+        }
+        // 现场排障就靠这几行：扫描失败码（2=应用未注册 1=不支持）、found 的地址、CCCD 状态
+        val bleEvents = remember(bleState) { app.blePipe.events.toList().takeLast(6) }
+        bleEvents.forEach { ev ->
+            Text(ev, style = Type.Caption, color = Ink.TextLow, maxLines = 2)
+        }
+        if (bleState == "linked") {
+            EngRow("走 BLE 真模组（替换模拟模组）", flags.bleModem) { app.setFlag(flags.copy(bleModem = it)) }
+        }
 
         Button(
             onClick = { app.pressSos() },

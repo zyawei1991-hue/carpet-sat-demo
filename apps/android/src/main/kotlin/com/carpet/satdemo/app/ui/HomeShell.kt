@@ -50,6 +50,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.app.ScreenVoice
 import com.carpet.satdemo.app.VoiceTone
 import com.carpet.satdemo.core.ai.ReplySource
 import com.carpet.satdemo.core.ai.Turn
@@ -229,6 +230,7 @@ private fun AssistantHero(app: AppRuntime) {
     val voiceEngines by app.voiceEngines.collectAsState()
     val voiceChoice by app.voiceChoice.collectAsState()
     val voiceTone by app.voiceTone.collectAsState()
+    val answerDevice by app.answerDevice.collectAsState()
     val voiceFaces by app.voiceFaces.collectAsState()
     val faceChoice by app.voiceFaceChoice.collectAsState()
     val previewing by app.voicePreviewing.collectAsState()
@@ -357,6 +359,17 @@ private fun AssistantHero(app: AppRuntime) {
                 ) {
                     VoiceTone.all.forEach { t ->
                         Chip(t.label, selected = t.id == voiceTone.id) { app.setVoiceTone(t) }
+                    }
+                }
+                // 手机起头的那轮在哪念由这里定；屏上起头的轮次只有屏念，不受这项影响
+                Text("由哪个设备发声（手机上起头的话）", style = Type.Caption, color = Ink.TextLow)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                    verticalArrangement = Arrangement.spacedBy(Grid.x8),
+                ) {
+                    ScreenVoice.ScreenDevice.entries.forEach { d ->
+                        Chip(d.label, selected = d == answerDevice) { app.setAnswerDevice(d) }
                     }
                 }
                 GhostAction(if (previewing) "正在念…" else "试听一句") {

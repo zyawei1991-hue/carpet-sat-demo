@@ -23,6 +23,7 @@ import com.carpet.satdemo.core.ephemeris.EphemerisSource
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
 import com.carpet.satdemo.core.link.CellStatus
+import com.carpet.satdemo.core.modem.RawLine
 import com.carpet.satdemo.core.modem.SimulatedModem
 import com.carpet.satdemo.core.modem.TpiTracker
 import com.carpet.satdemo.core.protocol.CommandType
@@ -68,9 +69,38 @@ class AppRuntime(private val host: Application) {
 
     /**
      * 演示默认跑假卫星模块：GT1005 到货前手机就能整套演。
-     * 换真机是换 [VendorSdkModem]，下面那些开关一个都不用改。
+     * BLE 连上 GT1005 后工程页开关切到真模组（见 [SwitchableModem]）。
      */
-    val modem = SimulatedModem(passWindowMs = ALWAYS_VISIBLE)
+    val simModem = SimulatedModem(passWindowMs = ALWAYS_VISIBLE)
+    val modem = SwitchableModem(simModem) { msg -> runtimeRef?.log(msg) }
+
+    /** GT1005 的 BLE 管道与连接状态（工程页展示） */
+    val blePipe by lazy { BleBytePipe(host) }
+    private val _bleState = MutableStateFlow("idle")
+    val bleState: StateFlow<String> = _bleState
+
+    fun bleConnect() {
+        if (_bleState.value == "linked") {
+            blePipe.disconnect()
+            _bleState.value = "closed"
+            return
+        }
+        _bleState.value = "connecting"
+        blePipe.onRawLine { line ->
+            if (line.direction != RawLine.Direction.FROM_MODULE) return@onRawLine
+        }
+        val ok = blePipe.connect()
+        if (!ok) _bleState.value = "failed"
+        // 连接结果靠回调推进：轮询 BleBytePipe.state 同步给 UI。
+        // 终态是 linked/failed/scan-failed/closed —— 注意 connect() 先置 "scanning"，
+        // 轮询条件若只认 "connecting" 首轮就会退出，UI 永远卡在扫描
+        scope.launch {
+            while (_bleState.value !in setOf("linked", "failed", "scan-failed", "closed")) {
+                _bleState.value = blePipe.state
+                kotlinx.coroutines.delay(500)
+            }
+        }
+    }
 
     private val prefs = host.getSharedPreferences("demo", 0)
 
@@ -106,6 +136,8 @@ class AppRuntime(private val host: Application) {
         val engineering: Boolean = false,
         /** 线路原文窗。和上面那个不是一回事：工程页是"我们对发生之事的说法"，这一窗是"线路上真正来过什么" */
         val passthrough: Boolean = false,
+        /** GT1005 BLE 已连接后，把卫星模组从模拟切到真模组（VendorSdkModem on BleBytePipe） */
+        val bleModem: Boolean = false,
     )
 
     private val _flags = MutableStateFlow(Flags(acceptScreens = prefs.getBoolean(KEY_ACCEPT_SCREENS, false)))
@@ -260,6 +292,25 @@ class AppRuntime(private val host: Application) {
             prefs.edit().putBoolean(KEY_ACCEPT_SCREENS, next.acceptScreens).apply()
         }
         if (prev.demoMode != next.demoMode) runtime.setDemoMode(next.demoMode)
+        if (prev.bleModem != next.bleModem) switchBleModem(next.bleModem)
+    }
+
+    /** BLE 已连上且开关打开 → 换成真模组；关掉 → 回模拟模组 */
+    private fun switchBleModem(on: Boolean) {
+        if (on) {
+            if (_bleState.value != "linked") {
+                runtime.log("BLE 未连接，无法切真模组")
+                return
+            }
+            val vendor = VendorSdkModem(blePipe)
+            vendor.start()
+            runCatching {
+                scope.launch { vendor.bringUp() }
+            }
+            modem.switchTo(vendor, "已切到 GT1005 真模组（BLE）")
+        } else {
+            modem.switchTo(simModem, "已切回模拟模组")
+        }
     }
 
     fun setVendorEph(on: Boolean) {
@@ -426,7 +477,7 @@ class AppRuntime(private val host: Application) {
         screenScene = { screenSceneOf(runtime.status.value.screenPage) },
         // 答句落地之后合成语音推给屏。**问句不回镜的那一侧也不会走到这儿**，
         // 所以屏上不会把车主自己问的那句又念一遍
-        onAnswer = { d -> voice.speak(d.turnId, d.text) },
+        onAnswer = { d -> voice.speak(d.turnId, d.text, d.origin) },
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
@@ -519,6 +570,22 @@ class AppRuntime(private val host: Application) {
     /** 当前音色档。可爱女声不是换模型，是同一句合成成什么音高语速 */
     private val _voiceTone = MutableStateFlow(VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)))
     val voiceTone: StateFlow<VoiceTone> = _voiceTone
+
+    /** 手机起头那一轮由哪个设备发声（owner 2026-11-11 拍的规矩）。默认圆屏，落盘 */
+    private val _answerDevice = MutableStateFlow(
+        run {
+            val saved = prefs.getString(KEY_ANSWER_DEVICE, null)
+            ScreenVoice.ScreenDevice.entries.firstOrNull { it.name == saved } ?: ScreenVoice.ScreenDevice.screen
+        },
+    )
+    val answerDevice: StateFlow<ScreenVoice.ScreenDevice> = _answerDevice
+
+    fun setAnswerDevice(next: ScreenVoice.ScreenDevice) {
+        _answerDevice.value = next
+        voice.setScreenDevice(next)
+        prefs.edit().putString(KEY_ANSWER_DEVICE, next.name).apply()
+        runtime.log("答句发声设备 → ${next.label}")
+    }
 
     /** 这台引擎里的中文人声。空 = 引擎没报清单；这也是"默认给的是男声"最常见的坑 */
     val voiceFaces: StateFlow<List<VoiceFace>> get() = voice.faces
@@ -959,11 +1026,12 @@ class AppRuntime(private val host: Application) {
 
         /** 烧进包的那套端点已经写进 prefs 的标记。改网关/换密钥时改这个值，老机器才会被顶掉 */
         private const val KEY_AI_SEED = "ai_seed"
-        private const val AI_SEED = "1.18"
+        private const val AI_SEED = "1.20"
         private const val KEY_AI_TIER = "ai_tier"
         private const val KEY_VOICE_ENGINE = "voice_engine"
         private const val KEY_VOICE_TONE = "voice_tone"
         private const val KEY_VOICE_FACE = "voice_face"
+        private const val KEY_ANSWER_DEVICE = "answer_device"
 
         /** 主动扫描的间隔。比 1Hz 慢一个量级：提醒是"这事值得说一句"，不是刷屏 */
         private const val AI_SCAN_MS = 10_000L

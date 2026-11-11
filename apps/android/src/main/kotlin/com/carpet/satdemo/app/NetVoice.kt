@@ -33,8 +33,8 @@ import java.net.URLEncoder
 internal object NetVoice {
     private const val ENDPOINT = "https://fanyi.baidu.com/gettts"
 
-    /** 一句答话的上限。300 字 ≈ 40 秒 ≈ 1.3 MB PCM，仍小于屏侧 2 MB 的缓冲 */
-    private const val MAX_CHARS = 300
+    /** 一句答话的上限。答句已压到 ≤30 字（拍板口径）；再长的输入按 30 字截断 —— 300 字 ≈ 2.13 MB PCM 会撞穿屏侧 2 MB 缓冲整段不接 */
+    private const val MAX_CHARS = 30
 
     /** 晓伊的基频，把音色档的音高倍数换算成 prosody 的赫兹偏移 */
     private const val XIAOYI_BASE_HZ = 324.0

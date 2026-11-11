@@ -381,6 +381,8 @@ class OpenAiCompatProvider(
 
     private fun body(facts: String, history: List<ChatTurn>, question: String, thinking: Boolean): String = buildString {
         append("{\"model\":\"").append(escape(endpoint.model)).append("\",")
+        // 实测 20 字答句 completion 就要 158 token（145 是思考草稿），给 120 会截断漏推理，250 起步才稳
+        append("\"max_tokens\":250,")
         append("\"temperature\":0.2,\"messages\":[")
         append("{\"role\":\"system\",\"content\":\"").append(escape(SYSTEM)).append("\"},")
         append("{\"role\":\"system\",\"content\":\"").append(escape("已知事实（只有这些是真的，缺的就说缺）：\n$facts")).append("\"}")
@@ -397,12 +399,14 @@ class OpenAiCompatProvider(
         /**
          * 系统提示词里两条是硬要求：**不许编数字**（数字只能来自 facts），**SOS 一类不可逆动作不许替用户决定**
          * （§6.1 文案红线同样约束模型 —— 它也不能说"已送达"）。
+         * 一句 ≤30 字是 2026-11-11 拍的口径：答案要进语音，长句既慢又烧 token，屏侧 2 MB 缓冲也放不下。
          */
         private const val SYSTEM =
-            "你是车宠守护助手。规则：1) 只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
-                "2) 不得声称求救、消息已送达或平台已受理，除非事实里明确写了已交核心网；" +
-                "3) 不可逆动作（SOS、远程熄火、扣费）只能提示用户自己在界面上确认，不能替用户执行；" +
-                "4) 中文，简短，像设备在说话，不像客服。"
+            "你是车宠守护助手。用一句话回答，不超过30个字，直接给结论，不要解释推理过程。" +
+                "规则：只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
+                "不得声称求救、消息已送达或平台已受理，除非事实里明确写了已交核心网；" +
+                "不可逆动作（SOS、远程熄火、扣费）只能提示用户自己在界面上确认，不能替用户执行；" +
+                "中文，像设备在说话，不像客服。"
 
         val json = Json { ignoreUnknownKeys = true }
 
