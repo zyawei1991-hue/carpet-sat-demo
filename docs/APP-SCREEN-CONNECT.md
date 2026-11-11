@@ -598,32 +598,43 @@ PCM 得从屏推到手机，手机转写成字再走已有的问答面。**形�
 会抢同一个输出。`DialogBridge.kt:121-125` 对 `foreignCloud` 那几轮只记日志、**不会去闭 Muse 的嘴**。
 真做 v4 的时候，屏侧必须先定"我们的音频进来时 Muse 那条链路要不要静音"，这是固件侧的活。
 
-**⚠ 2026-11-10 晚 owner 实测反驳了上面这条推测，以他的实测为准**：
-原话「**现在实测绝对是手机发声圆屏不发声**」。所以"最可能是圆屏自己在念"这个推测**作废**，
-但**代码侧的证据仍然成立而且更硬了**（这一轮又补了两处）：
+**⚠ 上面那一大段（从"所以 owner 听到的那个声音，代码上不可能来自这个 App"起）2026-11-11 整段作废，
+以这一条为准。留下的唯一原因是我当时看的是没 fetch 的本地树。**
 
-- `apps/android/build/intermediates/{compile,runtime}_app_classes_jar/debug/**/classes.jar`
-  里逐个 `.class` 扫 `android/speech/tts`、`TextToSpeech`、`android/media/MediaPlayer`、`AudioTrack`、
-  `MediaCodec`、`audio/speech` → **两个 jar 都是 0 命中**（不只是源码没有，**这份构建产物也没有**）
-- 两个 `.aar` 解开来连内层 `classes.jar` 一起扫（`protocollibrary` 7 项 / `ephemerislibrary` 13 项，各 1 个内层 jar）
-  → **0 命中**；`core/build/libs/core-0.1.0.jar`（470 项）→ **0 命中**
-- 全仓库 `find . -name "*.apk"` → **一个 APK 都没有**；`apps/android/build/outputs/` 下只有
-  `logs/manifest-merger-debug-report.txt`，**没有 apk 产物**；`git worktree list` 只有这一棵树，
-  分支只有 `main` / `backup-before-rebase`，`git stash list` 空
+owner 的实测「**现在实测绝对是手机发声圆屏不发声**」是对的，**我给的解释是错的**。
+我那句「装机那份 APK 不是从这棵树的当前状态构建的」，全部依据是"这棵树里一行放音代码都没有"
+—— 那条扫的是本地，而**另一个 agent 早就把手机侧的语音推上来了**：`ff78279`（1.20.0），
+`apps/android/src/main/kotlin/com/carpet/satdemo/app/` 现在就有 `NetVoice.kt`（219 行）
+和 `ScreenVoice.kt`（634 行）。`git fetch` + 快进之后源码就在眼前，**根本不需要拉装机包** ——
+上面那些 `classes.jar` 扫描、`adb devices` 为空、"解法是把手机插上 USB"全部是不必要的弯路。
+仓库里也确实仍然没有 APK（`git ls-tree -r` 只有 `.aar`/`.jar`，GitHub API `releases=0`），
+**传上去的是源码，不是包**；owner 说"另一个 agent 上传了"，上传的是 commit。
 
-**⇒ 结论改判成这一句：owner 手机上装的那份 APK，不是从这棵树的当前状态构建的。**
-发声的那一半在**别的地方**（另一棵树 / 另一个 agent 的本地改动 / 更早或更晚的一次构建），
-不在这个仓库里。**这条没称到，卡在两个具体的东西上**：
-① `adb devices -l` → `List of devices attached` **后面是空的**（手机没插 USB 或没开 USB 调试），
-所以我没法把装机那份 APK 拉下来验；② 仓库里没有 APK，也没有构建它的那棵树。
-**解法只有一个，很小**：把手机插上 USB 并开 USB 调试（`adb devices` 能看到设备就行），
-我 `pm path` + `adb pull` 把装机那份拉下来扫一遍，当场就能说出发声走的是哪条；
-或者由负责 `apps/android` 的那位直接说明"装机那份是从哪棵树、哪个 commit 构建的"。
+**手机发声是代码设计如此，不是故障。** `ScreenVoice.playNetAnswer()` 拿到 MP3 之后两条一起做：
 
-**在查清之前，App 侧的要求改成这样（不要新加第二个发声源）**：
-屏出声是目标。装机那份既然已经会念，**要么复用它那条合成、把同一份 PCM 顺手切块发给屏，
-要么在屏出声时把手机那条静音** —— 不许两边各念一遍同一句。edge-tts 晓伊（§12.10）接在哪一条上，
-取决于上面那个问题的答案。
+```kotlin
+// 源码注释原话：「屏能收就解码推屏，同时**本机也放**（屏可能音量小或被拔了）」
+if (link != null && link.audioReady) { … link.broadcast(frames); screenGot = true }
+val player = NetVoice.playerFor(mp3)          // ← 无条件，不看 screenGot
+if (player != null) { player.start(); phoneGot = true }
+return when { screenGot && phoneGot -> NetResult.Both; … }
+```
+
+所以**"听到手机出声"证明不了"屏没收到"**，反过来也不行。手机上能读出来的判据是设置页
+「答句声音」那一行加它下面那行红字（`AppRuntime.voiceIssue`）：`Both` / `ScreenOnly` → 没有红字；
+`PhoneOnly` 且屏已 v3 → 「这句只在这台手机上念了，圆屏那边暂时放不出来」。
+
+**屏这一侧为什么没声音，当天就称到了，而且和手机无关。** 同一块板 `>carpet` 回
+`played=0 frames=3 drops=116 last=seq 不连续`，本机自喂的 `>audtest 3` 在**第 0 帧**就报
+「这段语音丢掉（播放任务起不来）」—— 手机、网络、模型全被这条实验排除在外。
+真因和内存数字、改法、复称结果都记在 `firmware/screen/muse/README.md` §8 第 7 条，
+那一条是这件事的正式记录，这里不重复。
+
+**屏侧修好之后一定会撞上的那条，改成 App 侧的要求**：现在这份代码是**两边无条件各念一遍**
+（`NetResult.Both` 还会把 `_issue` 清空，界面上一个字都不提示）。owner 的规矩是不许两边各念一遍同一句，
+所以要改成：**屏这一段真的收下了就别在本机放**，本机那条只留给"屏收不到"的兜底 ——
+判据不用新加，`screenGot` 已经是那条布尔。`NetVoice.MAX_CHARS = 300` 和 owner 拍的"压缩答句"
+（§12.10）也对不上，一并提给 App 侧；`apps/android` 我不改，只写要求。
 
 ### 12.4 两个要 owner 先答的问题（答不了这条就没法定实现）
 
@@ -829,9 +840,15 @@ sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现
 2. 一个 multipart 上传客户端：**把屏送来的裸 PCM 封 44 字节 RIFF 头**（16000 / 1 / 16）再传；
    HTTPS 必须（`network_security_config.xml` 全局禁明文）
 3. 转写那句回 `dialog{dir:"up", turn_id:屏给的那个}`，再喂 `DialogBridge.ask(question, via="screen", turnId)`
-4. **接上 `DialogBridge.onAnswer`**（`AppRuntime.kt:375-384` 现在构造参数里根本没有它）——
-   这同时是 v3 `audio_chunk` 至今没声音的缺口。**但先看 §12.3 那条 ⚠**：owner 实测手机会发声，
-   而这份树里没有放音代码 ⇒ 装机那份另有来源，**接之前先确认会不会变成两个声源各念一遍**
+4. ~~**接上 `DialogBridge.onAnswer`**~~ **已接（远端 `ff78279`，1.20.0）**：
+   `AppRuntime.kt:429` 现在是 `onAnswer = { d -> voice.speak(d.turnId, d.text) }`。
+   **但两条新要求从这份代码里长出来了，都在 `apps/android`，我不改，只写要求**：
+   ① `ScreenVoice.playNetAnswer()` 拿到 MP3 之后**无条件也在本机起一个 `MediaPlayer`**，
+   和推屏那条一起成 `NetResult.Both`、还会把 `_issue` 清空 —— 屏侧这一版能放之后，
+   现场表现就是**手机和屏各念一遍同一句、同一个晓伊，而且界面上没有任何提示**。
+   要的是：**`screenGot` 为真就别在本机放**，本机那条只留给"屏收不到"的兜底（判据已经现成）。
+   ② `NetVoice.MAX_CHARS = 300` 和 owner 拍的压缩答句（§12.10，一句 ≤30 字）对不上；
+   300 字 ≈ 40 秒 ≈ 74 帧 ≈ 259 KB 下行，压到 30 字是 17 帧 ≈ 59.5 KB，**延迟和链路预算两头都省**
 5. 合成回来的 **MP3 用系统 `MediaExtractor`/`MediaCodec` 解码再重采样到 16k**，切成 2560 B 块走 v3 下行，
    **不引第三方解码库**。**重采样比值按 §12.10 定下的那条算：edge-tts 晓伊出 24000 Hz ⇒ 2/3**
    （本节的 22050 Hz / 320/441 是硅基流动那家收费档的数，**落点已不是它**，留作对照）
@@ -849,8 +866,14 @@ sherpa-onnx APK 从"先称这一步"降级成备选** —— 只有将来要"现
 - ~~6~16 s 太慢，需要 owner 拍~~ **已拍（§12.10）：压缩答句，一句 ≤30 字，言简意赅。**
   合成也拍了：edge-tts 晓伊。**这两条不再是待决项**
 - Mate 60 没有 GMS，系统 `TextToSpeech` 引擎在不在 —— 没称（不过落点是 edge-tts，不依赖系统引擎）
-- **手机为什么会发声** —— owner 实测「绝对是手机发声圆屏不发声」，而这棵树的源码/构建产物/jar 全 0 命中、
-  仓库里也没有 APK ⇒ **装机那份不是这棵树构建的**。卡在 `adb devices` 列表为空，拉不到那份 APK（§12.3 的 ⚠，任务 #14）
+- ~~**手机为什么会发声**~~ **已称到，两个半句分开答（2026-11-11，任务 #14）**：
+  手机发声是**代码设计如此** —— `ScreenVoice.playNetAnswer()` 推屏的同时无条件也在本机播同一个 MP3（§12.3）。
+  我之前那句"装机那份 APK 另有来源"**作废**，它依据的是没 fetch 的本地树；手机侧语音一直在远端
+  `ff78279`（1.20.0）里，仓库里也仍然没有 APK（`releases=0`），传的是源码不是包。
+  圆屏不发声的真因**在屏上，已修已复称**：播放任务的 `xTaskCreate` 要 4096 **字** = 16 KB 连续内部 RAM，
+  而板上稳态最大连续块只有 7,424 字节 ⇒ 每段第 0 帧就失败。改成 PSRAM 栈之后本机自喂
+  `@audio 放完 128000 字节 / 4.0 秒`、`drops=0`。**剩下的只有真机那一趟**：热点开着、屏 `ws=up`，
+  问一句之后看 `>carpet` 的 `frames` 往上涨、串口出现 `@audio 放完`，同时**手机和屏会不会各念一遍**（上面第 ① 条）
 - 43 KB/s 的 WS 持续入站、`mic_chunk` 的失败模式、屏上采集与放音同时跑（回声）—— 全没碰
 
 ### 12.10 owner 拍完了（2026-11-10 晚）：TTS 用 edge-tts 晓伊，延迟用压缩答句

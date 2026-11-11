@@ -269,26 +269,32 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
      落地代码仍是同一套：系统 `MediaExtractor`/`MediaCodec` 解码 + 重采样 + 切 2560 B 块，**不引库、APK 不长大**。
      **第一次调用会抖**：`list_voices()` 那次抛 `ConnectionResetError [WinError 64]`，原样重试一次就过 ——
      **这条链路要带一次重试，而且音色写死、不要调 `list_voices`**。详见 `docs/APP-SCREEN-CONNECT.md` §12.10
-   - **代码侧查到底了：这棵树里一行放音代码都没有。** `apps/android/src` + `core/src/main` 扫遍
-     `TextToSpeech`/`MediaPlayer`/`AudioTrack`/`SoundPool`/`MediaCodec`/`android.media`/`android.speech`/`ExoPlayer`
-     **只命中两行注释**；`setDataSource`/`RingtoneManager`/`.play(`/`prepareAsync` 零命中；gradle 无媒体依赖；
-     manifest 无音频权限；`res/` 无 `raw/`、无 `assets/`。**这一轮又补了三处更硬的**：
-     `build/intermediates/{compile,runtime}_app_classes_jar/**/classes.jar` 逐个 `.class` 扫 → **0 命中**；
-     两个 `.aar` 连内层 jar 一起扫、`core-0.1.0.jar`（470 项）扫 → **全 0 命中**；
-     全仓库 `find -name "*.apk"` → **一个都没有**，`build/outputs/` 下只有 manifest 合并日志。
-     `onAnswer` 没接这条原判也是对的（`DialogBridge.kt:53` `private val … = {}`，`:159` 才调；
-     `AppRuntime.kt:375-384` 没传，全仓库只此一个 App 侧实例）
-   - **但 owner 实测反驳了我的推测，以他的实测为准**：原话「**现在实测绝对是手机发声圆屏不发声**」。
-     所以"最可能是圆屏自己在念"那个推测**作废**。两条证据摆在一起只剩一个解释：
-     **他手机上装的那份 APK 不是从这棵树的当前状态构建的**，发声那一半在别的树/别的本地改动里。
-     **这条没称到，卡在**：`adb devices -l` 回的设备列表**是空的**（手机没插 USB 或没开调试），
-     拉不到装机那份 APK；仓库里也没有 APK、没有第二棵树（`git worktree list` 只有这一棵，stash 空）。
-     **解法很小**：手机插上 USB 开调试，我 `pm path` + `pull` 下来扫一遍就当场定性；
-     或者由 `apps/android` 那位说明装机那份是哪棵树、哪个 commit 构建的。详见 §12.3
-   - **在查清之前，屏侧这条规矩先立着**：喇叭只有一只，我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
+   - **手机为什么会发声，这一条在代码里定性了；我上一轮"装机那份 APK 另有来源"那句作废。**
+     作废的原因是那句所依据的证据本身不成立 —— **我当时本地还没 fetch**。远端
+     `ff78279`（1.20.0）里有 `apps/android/.../NetVoice.kt` + `ScreenVoice.kt`，
+     `playNetAnswer()` 拿到 MP3 之后**两条一起做**：屏 `audioReady` 就把 MP3 解成 16k PCM
+     切块推 `audio_chunk`，**同时无条件在本机起一个 `MediaPlayer` 播同一个 MP3**
+     （源码注释原话：「屏能收就解码推屏，同时**本机也放**（屏可能音量小或被拔了）」），
+     两条都成返回 `NetResult.Both`。
+     **所以"听到手机出声"不能当成"屏没收到"的证据**，反过来也不行。手机设置页
+     「答句声音」那一行加下面那行红字才是判据：`Both`/`ScreenOnly` → 没有红字；
+     `PhoneOnly` 且屏已经是 v3 → 「这句只在这台手机上念了，圆屏那边暂时放不出来」
+   - **屏没出声的真因当天就称到了，在屏这一侧，不在手机上**：`>carpet` 回
+     `played=0 frames=3 drops=116 last=seq 不连续`，本机自喂的 `>audtest 3` 在**第 0 帧**就报
+     「这段语音丢掉（播放任务起不来）」—— 网络、模型、手机全都排除掉了。起不来的原因是
+     `carpet_audio.c` 那句 `xTaskCreate(..., 4096, ...)`，4096 是**字** = 16,384 字节连续内部 RAM，
+     而同一块板 `>power` 实测稳态只有 `"heap":{"free":20587,"largest":7424}`。**细节和改法在
+     `firmware/screen/muse/README.md` §8 第 7 条**，那条是这件事的正式记录
+   - **仓库里没有 APK**：`git ls-tree -r` 只有 `.aar`/`.jar`，GitHub API `releases=0`。
+     传上去的是**源码**，不是包
+   - **屏侧这条规矩不受上面两条影响，先立着**：喇叭只有一只，我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
      ES8311+NS4150B 输出，而 `DialogBridge.kt:121-125` 对 `foreignCloud` 只记日志、不会去闭 Muse 的嘴。
-     **v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**；手机侧同理 ——
-     装机那份既然已经会念，**要么复用它那条合成顺手切块发屏，要么屏出声时把它静音，不许两边各念一遍**
+     **v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**
+   - **新增一条 App 侧的要求（屏侧修好之后一定会撞上）**：`playNetAnswer` 现在是**无条件两边同时念**。
+     屏侧这一版能放之后，现场表现就是**手机和屏各念一遍同一句、同一个晓伊**，
+     而 `NetResult.Both` 把 `_issue` 清空、界面上一个字都没有 —— 谁都不会发现。
+     要求是：**屏这一段真的收下了（`frames` 推过去了）就别在本机放**，本机那条只留给
+     "屏收不到"的兜底；判据不用新加，`screenGot` 已经是那条布尔
 
 ### 转写端点实测（2026-11-10，拿到 key 之后真打的，不是估的）
 
