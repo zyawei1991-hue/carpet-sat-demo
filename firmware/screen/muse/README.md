@@ -712,15 +712,87 @@ App 侧配套要改的四条（发帧、partial WakeLock、退出别停服务、
      串口探针是**第二个读者**，等满 esp_codec_dev 那 1000 ms 令牌超时后打出
      `The channel is not enabled`（那是超时日志，不是状态位）。判据已称到：进设置页声音那一栏对着麦克风拍手，
      **电平条和 dBFS 有反应**（owner 实测）→ 通路本来是好的。所以**上行不许新开读者**。
-   - **新增一条屏侧必须先定的事：喇叭只有一只。** 我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
+   - **屏不出声的真因已称到并修掉（2026-11-11）：播放任务从来没起来过，不是链路、不是手机、不是模型。**
+     两行回读就是全部证据。改之前，`>carpet` 报
+     `played=0 frames=3 drops=116 last=seq 不连续`，而**本机自喂**的 `>audtest 4` 在第 0 帧就报
+     ```
+     W (77188061) carpet_audio: 这段语音丢掉（播放任务起不来），文字不受影响
+     @audtest 第 0 块被拒，停在这
+     ```
+     `>audtest` 不碰网络、不碰手机、不接模型，走的却是**同一套** `feed()` 和同一个播放任务，
+     所以这一条把手机端、WS 链路、TTS 全排除在外了 —— 屏**从来没有放过一声**。
+   - **为什么起不来**：`carpet_audio.c` 里那句是 `xTaskCreate(player_task, "carpet_audio", 4096, ...)`，
+     **4096 是字，ESP32-S3 上 32 位 = 16,384 字节连续内部 RAM**。同一块板 `>power` 实测稳态
+     `"heap":{"free":20587,"largest":7424,"min":8227}`，`link.heartbeat` 也一直打 `int=17K/7K`
+     —— 最大连续块只有 7.4 KB，**这个申请永远不可能成功**。缩栈救不了：降到 2048 字 = 8 KB
+     还是大于 7,424。同一个坑上一次是在 `carpet_link.c` 的 `url_restart` 上撞到的
+     （那里 16 KB→8 KB 侥幸绕过去了），音频这一条没人动过。
+   - **改法**：栈挪进 PSRAM（那里 `psram_free=1529916`），用的是这块板自己已经在走的写法 ——
+     `muse_chat_session.cpp` 的 `muse_chat` 就是 48 KB PSRAM 栈、同样在那条栈上调
+     `esp_codec_dev_write`；`sdkconfig` 里 `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM` 和
+     `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY` 两份构建都是开的。DMA 相关的缓冲一个都不在栈上
+     （`s_scratch` 是静态 .bss、`muse_audio.c` 的 `s_out_stereo` 同理），所以挪栈不动 DMA。
+     **注意 WithCaps 这一族的栈深度单位是字节，不是字**，和 `xTaskCreate` 不一样。
+     失败那支现在还打四个内存数（PSRAM / 内部各报空闲和最大连续），因为现场只有
+     "内存"和"别的"两种死法分得开，没数字就只能回去怀疑 Wi-Fi。
+   - **改完复称（同一块板、`app-flash`、`Hash of data verified`）**：
+     ```
+     @audio at 32000/128000 level 0.95
+     @audio at 64000/128000 level 0.95
+     @audio at 96000/128000 level 0.00
+     @audio at 128000/128000 level 0.95
+     @audtest 发了 50 块 / 128000 字节，喂了 4.75 秒（音频 4.0 秒）
+     @audio 放完 128000 字节 / 4.0 秒
+     ```
+     `>carpet` 跟着变成 `frames=50 drops=0 last=-`（改前 `frames=3 drops=116 last=seq 不连续`）。
+     中间那行 `level 0.00` 是本机造的静音段，口型跟着真电平动这一条也顺带称到了。
+   - **同日第二半：先承认 `>audtest` 自己在骗人，然后它当场称出两处真 bug。**
+     以前这条 bench 直接调 `feed()`，**把 base64 解码和 args 校验整个绕开了** —— 于是"本机自喂通过"
+     并不能证明真从手机进来那一句也会通过，而现场只会撞后一种。现在每块现编 `b64`、现拼
+     `cJSON args`（`turn_id/seq/total/rate/b64` 一个字段都不省），走 `carpet_audio_on_chunk()`
+     进同一个 `feed()`、同一个播放任务，和线上那一帧同一条路：
+     ```
+     @audtest 发了 188 块 / 480000 字节，喂了 15.04 秒（音频 15.0 秒，1.00 倍实时），最大一块 b64=3416
+     @audio 放完 480000 字节 / 15.0 秒
+     @audio ... frames=238 drops=0 last=- gaps=0 gap_ms=0
+     ```
+     `b64=3416` 是帧预算的现场读数：一块 2,560 字节 PCM 编出来 3,416 字符，加 JSON 外壳整帧约 3.5 KB，
+     屏侧组帧上限 `SCREEN_LINK_MAX_FRAME=4096`、App 侧 `AudioChunks.JSON_LIMIT=3800`，两头都在线上。
+   - **bench 暴露的第一处：节拍会自己漂慢。** 以前是"发完睡 80 毫秒"，而本机编码 + 拼 JSON 每块多花
+     20 来毫秒，15 秒的音频被喂成 19.4 秒（0.77 倍实时），称到的停顿就分不清是链路还是 bench 自己。
+     改成按**绝对到期时间**（第 n 块该在 `t0 + n*80 ms` 发）；超了立刻补发下一块，平均速率锁在 1.00 倍实时，
+     上面那行 `1.00 倍实时` 就是这个改完的读数。
+   - **第二处更要紧：prebuffer 是永久闸门，屏会抖着放。** 节拍锁回 1.00 倍实时之后第一次读数
+     `gaps=232 gap_ms=10692` —— 19.5 秒音频里停了 10.7 秒。根因不在链路，在 `player_task()`：
+     `avail < PREBUFFER_BYTES && !complete` 这一支只管"开场先攒 200 毫秒"，却写成了永远生效，
+     而生产者按实时速率喂时缓冲存量本来就永远不到 6,400 字节，于是**放 200 毫秒、停 200 毫秒重新攒**。
+     改法：加 `spoke` 标志，闸门**只在开口之前生效**，开口之后只看"有没有数据"（`avail==0` 那一支负责，
+     1.5 秒判死照旧），开场那 200 毫秒余量留着吸收到达抖动。改完同样节拍 `gaps=0 gap_ms=0`。
+   - **新增的两个读数就是给现场用的**：`@audio … gaps=<次数> gap_ms=<累计毫秒>`，
+     从此"边到边放顺不顺"是数出来的，不用人耳判断，也不靠日志翻。
+   - **`last=seq 不连续` 那 116 次不是真的丢包**，是这个 OOM 的次生现象：`feed()` 先 `s_frames++`
+     再建任务，任务建不起来就 `drop_locked()` → `reset_locked()` → `s_expect_seq=0`，
+     于是同一段的第 2 帧开始每帧都"跳号"，一路刷到段尾。所以**丢弃原因写 seq 的时候先去看有没有一句
+     "播放任务起不来"**，别看成 Wi-Fi。
+   - **仍然没称到的**：这是**本机自喂**那一条。真从 App 进来的 `audio_chunk`（手机热点开着、
+     屏 `ws=up`）刚才称不了 —— 这一轮抓的时候板子 `wifi=down ws=down`、`scan complete, 0 APs found`，
+     热点没开。**现场那一趟要看的是**：问一句之后 `>carpet` 的 `frames` 跟着往上涨、
+     串口出现 `@audio 放完 …`、`gaps=0`（放顺了，没有中途重新攒缓冲），
+     而手机设置页「答句声音」下面**没有那行红字**，并且按 §12.11 那条规矩**只听得到一个声音**。
+   - **这一处改动已经单独重打进 `firmware/screen/muse/muse-carpet.patch`（2026-11-11），只换了
+     `carpet/carpet_audio.c` 那一节。** 那棵树现在还压着另一路会话未提交的本地化改动
+     （`muse_lang.c` / `muse_settings*.c` / `muse_ui.c` 等），整份 `git diff` 出去会把别人的活一起卷走，
+     所以不重打整份补丁、只把这一节的内容换成现在的工作区版本（carpet 目录在补丁里是
+     `new file mode 100644`，一节就是整个文件）。
+     **验证是硬的**：`git archive cdc169d` 解一份干净基线树 → `git apply --check -p1` 通过 →
+     真 apply 之后 `carpet_audio.c` 和板子上刚刷进去那份逐字节一致（只差 apply 时 autocrlf 给的 CRLF，
+     整份补丁 27 节都这样，与本节无关）。重装固件的人现在拿得到这个修复了。
+   - **喇叭只有一只这条规矩照旧立着**：我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
      ES8311+NS4150B 输出，手机侧对 `foreignCloud` 那几轮只记日志、不会来闭 Muse 的嘴
      （`core/.../ai/DialogBridge.kt:121-125`）。**v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**。
-     顺带一条已查清的事实：**这棵树的手机 App 里没有任何放音代码**（源码、构建产物 `classes.jar`、
-     两个 `.aar` 的内层 jar、`core-0.1.0.jar` 全扫过，0 命中；仓库里也没有 APK）。
-     **但 owner 2026-11-10 晚实测「绝对是手机发声圆屏不发声」** ⇒ 他装机那份 APK 不是从这棵树的当前状态构建的，
-     发声那一半在别的树里。**这条还没定性**（`adb devices` 列表是空的，拉不到装机那份），
-     详见 `docs/APP-SCREEN-CONNECT.md` §12.3。**屏侧这条规矩不受它影响，先立着**：
-     我们的音频进来时 Muse 那条云链路要不要静音，v4 落地前必须定。
+     上一轮这里写的"这棵树的手机 App 里没有任何放音代码、装机那份 APK 另有来源"**整段作废**，
+     依据扫的是没 fetch 的本地树；手机侧语音在远端 `ff78279`（1.20.0）里，
+     定性见 `docs/APP-SCREEN-CONNECT.md` §12.3。
 8. 屏幕上的第三块 tile **还没有目视确认过**（判据见 §9）。
 
 ## 9. 已经实测到的 / 还差的（2026-11-04 这一轮）

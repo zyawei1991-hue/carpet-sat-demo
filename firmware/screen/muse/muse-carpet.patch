@@ -97,10 +97,10 @@ index 588d7c6..9c454d0 100644
      choice MUSE_JC3248W535_MIC
 diff --git a/esp32/components/muse/carpet/carpet_audio.c b/esp32/components/muse/carpet/carpet_audio.c
 new file mode 100644
-index 0000000..a237347
+index 0000000..f86e50b
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_audio.c
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,479 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -130,6 +130,7 @@ index 0000000..a237347
 +#include "esp_log.h"
 +#include "esp_timer.h"
 +#include "freertos/FreeRTOS.h"
++#include "freertos/idf_additions.h"
 +#include "freertos/semphr.h"
 +#include "freertos/task.h"
 +#include "mbedtls/base64.h"
@@ -159,6 +160,10 @@ index 0000000..a237347
 +#define MAX_BLOCK_BYTES  2560                     /* 契约里一块 = 80 毫秒，也是发送侧那个数 */
 +#define PREBUFFER_BYTES  6400                     /* 先攒 200 毫秒再开口，免得一句里断三截 */
 +#define UNDERRUN_MS      1500                     /* 空了这么久还没新块 = 这段断了，别拖着放杂音 */
++#define PLAYER_STACK_BYTES (16 * 1024)            /* 播放任务的栈，**在 PSRAM**：内部 RAM 稳态最大连续块只有 7.4 KB（见 feed() 里那段） */
++#define B64_BUF_BYTES      (4 * ((MAX_BLOCK_BYTES + 2) / 3) + 8)
++/* ^ 一块 PCM 编成 b64 的最坏长度 + 结尾 NUL + 余量：2,560 → 3,416 → 3,424。
++ *   只给开发口 `>audtest` 用（真链路上解码吃的是 ws 帧里的字符串，不另外开这块）。 */
 +
 +static char *s_buf;
 +static SemaphoreHandle_t s_lock;
@@ -176,6 +181,7 @@ index 0000000..a237347
 +static bool s_live;           /* 播放任务认为还有声音要放 */
 +static volatile float s_level;
 +static uint32_t s_frames, s_drops;
++static uint32_t s_gaps, s_gap_ms;           /* 开口之后停下来等过数据几回 / 一共停了多久（毫秒，累计） */
 +static const char *s_last_drop = "-";   /* 最近一次为什么丢，给串口回读 */
 +
 +static void reset_locked(void);
@@ -248,8 +254,29 @@ index 0000000..a237347
 +    xSemaphoreGive(s_lock);
 +
 +    if (!s_player) {
-+        if (xTaskCreate(player_task, "carpet_audio", 4096, NULL, 5, &s_player) != pdPASS) {
++        /* 这条任务的栈**必须在 PSRAM**，这是 2026-11-11 称出来的，不是风格问题：
++         * 真机稳态内部 RAM 只剩 `free 20587 / largest 7424` 字节（`>power` 那行
++         * `"heap":{...}` 的原文），而原来这一句是 `xTaskCreate(..., 4096, ...)`
++         * —— 4096 是**字**，ESP32-S3 32 位 = **16,384 字节连续内部 RAM**，最大块才 7.4 KB，
++         * 所以 `xTaskCreate` **每一段都在第 0 帧失败**：现场表现是"屏上整句话、喇叭一声不出"，
++         * 而 `>carpet` 只报 `played=0`，一句都没放。降到 8 KB 也一样起不来，缩栈救不了。
++         *
++         * 走的是这块板自己已经在用的那条：`muse_chat_session.cpp` 的 `muse_chat`
++         * 就是 48 KB PSRAM 栈，而且同样在那条栈上调 `esp_codec_dev_write`。
++         * DMA 相关的缓冲一个都不在栈上 —— `s_scratch` 是静态 .bss（内部 RAM），
++         * `muse_audio.c` 里的 `s_out_stereo` 同理，所以挪栈不动 DMA。
++         * WithCaps 这一族的栈深度单位是**字节**，不是字。
++         *
++         * 失败必须当场把数打出来：这里只有"内存"和"别的"两种死法分得开，
++         * 而没数字的话现场只能回去怀疑 Wi-Fi。 */
++        if (xTaskCreateWithCaps(player_task, "carpet_audio", PLAYER_STACK_BYTES, NULL, 5,
++                               &s_player, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
 +            s_player = NULL;
++            ESP_LOGE(TAG, "播放任务起不来：PSRAM 空闲 %u KB/最大连续 %u KB，内部 %u KB/最大连续 %u KB",
++                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
++                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
++                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
++                     (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 +            xSemaphoreTake(s_lock, portMAX_DELAY);
 +            drop_locked("播放任务起不来");
 +            xSemaphoreGive(s_lock);
@@ -270,7 +297,9 @@ index 0000000..a237347
 +static void player_task(void *arg)
 +{
 +    (void)arg;
-+    int64_t empty_since = 0;
++    int64_t empty_since = 0;   /* 真·一个字节都不剩的起点，只给 1.5 秒判死用 */
++    int64_t stall_t0 = 0;      /* 本轮"开口之后又停下来等数据"的起点 */
++    bool spoke = false;        /* 本轮开过口没有：没开口前的攒缓冲不算停顿 */
 +
 +    for (;;) {
 +        size_t take_bytes = 0;
@@ -280,6 +309,11 @@ index 0000000..a237347
 +        xSemaphoreTake(s_lock, portMAX_DELAY);
 +        if (!s_live || !s_buf) {
 +            empty_since = 0;
++            if (stall_t0) {
++                s_gap_ms += (uint32_t)((esp_timer_get_time() - stall_t0) / 1000);
++                stall_t0 = 0;
++            }
++            spoke = false;
 +            xSemaphoreGive(s_lock);
 +            vTaskDelay(pdMS_TO_TICKS(40));
 +            continue;
@@ -294,6 +328,7 @@ index 0000000..a237347
 +             * 一句里断三截比整段没声音更难解释，也更难怀疑到我们自己头上。 */
 +            int64_t now = esp_timer_get_time();
 +            if (!empty_since) empty_since = now;
++            if (spoke && !stall_t0) { stall_t0 = now; s_gaps++; }
 +            if ((now - empty_since) / 1000 > UNDERRUN_MS) {
 +                drop_locked("断了 1.5 秒没新块");
 +                stalled = true;
@@ -302,10 +337,21 @@ index 0000000..a237347
 +            if (stalled) muse_state_set_level(0);
 +            vTaskDelay(pdMS_TO_TICKS(10));
 +            continue;
-+        } else if (avail < PREBUFFER_BYTES && !complete) {
++        } else if (avail < PREBUFFER_BYTES && !complete && !spoke) {
++            /* 攒够 200 毫秒才开口 —— 这一条**只管开场那一次**。
++             * 2026-11-11 称到过：节拍按 1.00 倍实时喂（本机走线上同一种帧），播放任务
++             * 停在 `gaps=232 gap_ms=10692`，19.5 秒的音频里有一多半是静音。真因不是链路慢，
++             * 是这里把"开场先攒 200 毫秒"写成了永久闸门：生产者按实时速率喂时，缓冲里的
++             * 存量本来就永远不到 6,400 字节，于是放 200 毫秒、停 200 毫秒重新攒，来回抖。
++             * 开口之后只看"有没有数据"（`avail == 0` 那条负责），开场那 200 毫秒的余量
++             * 留着吸收到达抖动 —— 这才是流式播放该有的样子。 */
 +            xSemaphoreGive(s_lock);        /* 还没攒够 200 毫秒，别开口 */
 +            vTaskDelay(pdMS_TO_TICKS(20));
 +            continue;
++        }
++        if (stall_t0) {
++            s_gap_ms += (uint32_t)((esp_timer_get_time() - stall_t0) / 1000);
++            stall_t0 = 0;
 +        }
 +        empty_since = 0;
 +
@@ -337,6 +383,7 @@ index 0000000..a237347
 +            continue;
 +        }
 +        float lv = muse_audio_level(s_scratch, take_bytes / 2);
++        spoke = true;                              /* 已经开口了：此后任何等数据都算一次停顿 */
 +        s_level = lv;
 +        muse_state_set_level(lv);
 +        if ((s_played % (AUDIO_RATE * 2)) < take_bytes) {   /* 每秒一行，能对着听 */
@@ -410,11 +457,17 @@ index 0000000..a237347
 +
 +/*
 + * `>audtest [秒]`：本机造一段"有词有停顿"的语音（440 Hz 音节 + 静音交替），
-+ * 走和线上一模一样的缓冲与播放任务。网络、模型、服务端全不接，也能把
-+ * 「环收得进 / 节拍按 16k 走 / 口型跟着真实电平动 / 念稿跟着播放位置翻页」称清楚。
++ * **走和线上一模一样的那一帧**：`b64` → `cJSON args` → `carpet_audio_on_chunk()` → `feed()`
++ * → 同一个播放任务。网络、模型、服务端全不接。
++ *
++ * 2026-11-11 改的：以前这条直接调 `feed()`，**把 base64 解码和 args 校验整个绕开了**，
++ * 于是"本机自喂通过"并不能证明真从手机进来那一句也会通过 —— 而现场只会撞后一种。
++ * 现在它连解码器一起称，屏侧这一条才算把手机、Wi-Fi、模型排除干净。
 + *
 + * 静音那几段是重点：口型要是全程不动，说明喂给 muse_state 的不是真电平。
-+ * 发送节拍刻意贴着实时（80 毫秒一块），测的是"边到边放顺不顺"，不是"缓冲能装多少"。
++ * 发送节拍刻意贴着实时（80 毫秒一块，按绝对到期时间补发），测的是"边到边放顺不顺"，不是"缓冲能装多少"。
++ * 最后那个 `b64=` 是帧预算的现场读数：一块 2,560 字节 PCM 编出来 3,416 字符，
++ * 加 JSON 外壳整帧约 3.5 KB，而屏侧组帧上限是 4,096。
 + */
 +void carpet_audio_bench(int seconds)
 +{
@@ -422,7 +475,16 @@ index 0000000..a237347
 +    if (seconds > 15) seconds = 15;
 +    size_t total = (size_t)seconds * AUDIO_RATE * 2;
 +    unsigned seq = 0;
++    size_t b64_max = 0;
 +    int64_t t0 = esp_timer_get_time();
++
++    /* 一块 b64 最多 4/3 倍再加结尾 NUL：2,560 → 3,416，3,600 有余量。放 PSRAM ——
++     * 内部 RAM 稳态最大连续块只有 7.4 KB（见 feed() 里那段），别在这上面赌 */
++    char *b64 = heap_caps_malloc(B64_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!b64) {
++        printf("@audtest PSRAM 里拿不到 %d B 的编码缓冲，这一条没称\n", B64_BUF_BYTES);
++        return;
++    }
 +
 +    for (size_t at = 0; at < total; at += MAX_BLOCK_BYTES) {
 +        size_t n = (total - at) >= MAX_BLOCK_BYTES ? MAX_BLOCK_BYTES : (total - at);
@@ -434,15 +496,47 @@ index 0000000..a237347
 +            s[i] = voiced ? (int16_t)(0.28f * 32767.0f
 +                       * sinf(2.0f * (float)M_PI * 440.0f * (float)g / AUDIO_RATE)) : 0;
 +        }
-+        if (!feed("audtest", seq, total, s_bench, n)) {
-+            printf("@audtest 第 %u 块被拒，停在这\n", seq);
++
++        /* 拼成手机那头 `AudioChunks.commands()` 发出来的同一种 args，一个字段都不省 */
++        size_t olen = 0;
++        if (mbedtls_base64_encode((unsigned char *)b64, B64_BUF_BYTES, &olen,
++                                  (const unsigned char *)s_bench, n) != 0 ||
++            olen + 1 > B64_BUF_BYTES) {
++            printf("@audtest 第 %u 块编码失败，停在这\n", seq);
++            break;
++        }
++        b64[olen] = '\0';
++        if (olen > b64_max) b64_max = olen;
++
++        cJSON *args = cJSON_CreateObject();
++        bool ok = false;
++        if (args) {
++            ok = cJSON_AddStringToObject(args, "turn_id", "audtest") &&
++                 cJSON_AddNumberToObject(args, "seq", (double)seq) &&
++                 cJSON_AddNumberToObject(args, "total", (double)total) &&
++                 cJSON_AddNumberToObject(args, "rate", AUDIO_RATE) &&
++                 cJSON_AddStringToObject(args, "b64", b64);
++            if (ok) ok = carpet_audio_on_chunk(args);
++            cJSON_Delete(args);
++        }
++        if (!ok) {
++            printf("@audtest 第 %u 块被拒（b64 %u 字符），停在这\n", seq, (unsigned)olen);
 +            break;
 +        }
 +        seq++;
-+        vTaskDelay(pdMS_TO_TICKS(80));
++        /* 节拍贴着墙上时钟走：第 n 块该在 t0 + n*80 毫秒发出去。
++         * 本机编码 + 拼 JSON 实测每块多花 20 来毫秒，按"发完再睡 80"就会把这点开销
++         * 攒成整段偏慢（15 秒的音频喂 19.4 秒），称到的停顿就不是链路的问题了。
++         * 到期已过就立刻发下一块，平均速率仍然是实时的 1.0 倍。 */
++        int64_t due = t0 + (int64_t)seq * 80000;
++        int64_t now = esp_timer_get_time();
++        if (due > now) vTaskDelay(pdMS_TO_TICKS((int)((due - now) / 1000)));
 +    }
-+    printf("@audtest 发了 %u 块 / %u 字节，喂了 %.2f 秒（音频 %.1f 秒）\n",
-+           seq, (unsigned)total, (float)(esp_timer_get_time() - t0) / 1e6f, (float)seconds);
++    heap_caps_free(b64);
++    float fed = (float)(esp_timer_get_time() - t0) / 1e6f;
++    printf("@audtest 发了 %u 块 / %u 字节，喂了 %.2f 秒（音频 %.1f 秒，%.2f 倍实时），最大一块 b64=%u\n",
++           seq, (unsigned)total, fed, (float)seconds, (float)seconds / (fed > 0 ? fed : 1.0f),
++           (unsigned)b64_max);
 +    fflush(stdout);
 +}
 +
@@ -467,7 +561,7 @@ index 0000000..a237347
 +    size_t wrote = 0, total = 0, played = 0;
 +    int live = 0;
 +    float level = 0;
-+    uint32_t frames = 0, drops = 0;
++    uint32_t frames = 0, drops = 0, gaps = 0, gap_ms = 0;
 +    const char *why = "-";
 +
 +    xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -475,11 +569,13 @@ index 0000000..a237347
 +    wrote = s_wrote; total = s_total; played = s_played;
 +    live = (int)s_live; level = s_level;
 +    frames = s_frames; drops = s_drops; why = s_last_drop;
++    gaps = s_gaps; gap_ms = s_gap_ms;
 +    xSemaphoreGive(s_lock);
 +
-+    printf("@audio turn=%s wrote=%u total=%u played=%u live=%d level=%.2f frames=%u drops=%u last=%s\n",
++    printf("@audio turn=%s wrote=%u total=%u played=%u live=%d level=%.2f frames=%u drops=%u last=%s gaps=%u gap_ms=%u\n",
 +           turn, (unsigned)wrote, (unsigned)total, (unsigned)played, live,
-+           (double)level, (unsigned)frames, (unsigned)drops, why);
++           (double)level, (unsigned)frames, (unsigned)drops, why,
++           (unsigned)gaps, (unsigned)gap_ms);
 +    fflush(stdout);
 +}
 +
