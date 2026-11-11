@@ -436,6 +436,11 @@ data class AckPayload(
     @SerialName("for_event_id") val forEventId: String? = null,
     /** 非空表示拒绝，目前只有 proto_mismatch */
     val error: String? = null,
+    /**
+     * App 支持的契约版本表。v4 上行（mic_chunk，屏把 PCM 推给手机转写）走"App 先发版"：
+     * 屏看到这份表里有 4 才打开上行，四张表这轮不改。
+     */
+    val protocols: List<Int>? = null,
 )
 
 @Serializable

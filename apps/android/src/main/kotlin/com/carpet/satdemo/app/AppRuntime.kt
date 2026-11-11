@@ -475,7 +475,7 @@ class AppRuntime(private val host: Application) {
         screenScene = { screenSceneOf(runtime.status.value.screenPage) },
         // 答句落地之后合成语音推给屏。**问句不回镜的那一侧也不会走到这儿**，
         // 所以屏上不会把车主自己问的那句又念一遍
-        onAnswer = { d -> voice.speak(d.turnId, d.text) },
+        onAnswer = { d -> voice.speak(d.turnId, d.text, d.origin) },
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
@@ -568,6 +568,22 @@ class AppRuntime(private val host: Application) {
     /** 当前音色档。可爱女声不是换模型，是同一句合成成什么音高语速 */
     private val _voiceTone = MutableStateFlow(VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)))
     val voiceTone: StateFlow<VoiceTone> = _voiceTone
+
+    /** 手机起头那一轮由哪个设备发声（owner 2026-11-11 拍的规矩）。默认圆屏，落盘 */
+    private val _answerDevice = MutableStateFlow(
+        run {
+            val saved = prefs.getString(KEY_ANSWER_DEVICE, null)
+            ScreenVoice.ScreenDevice.entries.firstOrNull { it.name == saved } ?: ScreenVoice.ScreenDevice.screen
+        },
+    )
+    val answerDevice: StateFlow<ScreenVoice.ScreenDevice> = _answerDevice
+
+    fun setAnswerDevice(next: ScreenVoice.ScreenDevice) {
+        _answerDevice.value = next
+        voice.setScreenDevice(next)
+        prefs.edit().putString(KEY_ANSWER_DEVICE, next.name).apply()
+        runtime.log("答句发声设备 → ${next.label}")
+    }
 
     /** 这台引擎里的中文人声。空 = 引擎没报清单；这也是"默认给的是男声"最常见的坑 */
     val voiceFaces: StateFlow<List<VoiceFace>> get() = voice.faces
@@ -1008,11 +1024,12 @@ class AppRuntime(private val host: Application) {
 
         /** 烧进包的那套端点已经写进 prefs 的标记。改网关/换密钥时改这个值，老机器才会被顶掉 */
         private const val KEY_AI_SEED = "ai_seed"
-        private const val AI_SEED = "1.18"
+        private const val AI_SEED = "1.19"
         private const val KEY_AI_TIER = "ai_tier"
         private const val KEY_VOICE_ENGINE = "voice_engine"
         private const val KEY_VOICE_TONE = "voice_tone"
         private const val KEY_VOICE_FACE = "voice_face"
+        private const val KEY_ANSWER_DEVICE = "answer_device"
 
         /** 主动扫描的间隔。比 1Hz 慢一个量级：提醒是"这事值得说一句"，不是刷屏 */
         private const val AI_SCAN_MS = 10_000L

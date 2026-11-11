@@ -505,7 +505,13 @@ class DemoRuntime(
             t = MsgType.ack,
             seq = seq.getAndIncrement(),
             ts = clockMs(),
-            ack = AckPayload(forSeq, forEventId, error),
+            ack = AckPayload(
+                forSeq,
+                forEventId,
+                error,
+                // v4 上行申报：App 先发版，屏看到 4 才开 mic_chunk 上行
+                protocols = listOf(ScreenCodec.CONTRACT_VERSION, 4),
+            ),
         )
         if (screenId != null) server.sendTo(screenId, msg) else push(listOf(msg))
     }
