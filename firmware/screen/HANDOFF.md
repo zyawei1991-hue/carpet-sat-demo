@@ -2525,9 +2525,9 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
 
 ### 17.5 同步状态
 
-- `muse-carpet.patch` 重打过：**30 个文件（29 文本 + 字库）、5,274 行新增 / 86 行删，8,410 行 / 438,957 字节**
-  （相对 §16.5 那版：`carpet_link.c` 1208 → 1228 行，就是 §17.1b 那一处；没有新增文件）。
-  干净 worktree `D:/dev/tmp/muse-clean-gate`（`git worktree add --detach … cdc169d`）
+- `muse-carpet.patch` 重打过：**30 个文件（29 文本 + 字库）、5,291 行新增 / 86 行删，8,427 行 / 440,190 字节**
+  （相对 §16.5 那版：`carpet_link.c` 1208 → 1228 → **1245** 行，后 17 行是 §18.2 那一处；没有新增文件）。
+  11-11 夜里那一次的验法：干净 worktree `D:/dev/tmp/muse-clean-gate`（`git worktree add --detach … cdc169d`）
   `git apply --check --binary` 过、真 `git apply` 过、30 个文件全落对、字库 154,528 字节
   （sha256 前缀 `a77558a4`，与工作树同一份），`diff --strip-trailing-cr` 比
   `carpet_link.c` / `carpet_mic.c` / `muse_voice.c` / `muse_input.c` / `CMakeLists.txt` 五个全 SAME，
@@ -2551,7 +2551,56 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
   `fake-phone.mjs --v4-ready` 的自测法、以及真屏 + 真 App 的验收只看哪两处数 ——
   owner 已拍「同步到远端，我让 App 那边的 agent 改」，交接给那个会话**给这一份 §0 就够**，
   细节才回 §5。
-- **本轮唯一一处只有代码证据、没有串口证据的**：`can_record()` 里那句把「SET UP MUSE FIRST」换成
-  「对着屏说话还没开」（§16.1 落的第 1 条）。屏上显示的字从 COM8 读不到，那条分支里也没有日志。
-  ⇒ 现场五秒钟可以自己证：装机的 App 开着、屏连上之后按下那个键，屏上该是中文那句。
-  （真要台架证据就得在那一格加一行 `ESP_LOGI` 再刷一次 —— 本轮没做，不值得为它重打一次 patch。）
+- **~~本轮唯一一处只有代码证据、没有串口证据的~~：这一条 11-12 已由 owner 的现场观察关闭**（见 §18.2）：
+  `can_record()` 里那句把「SET UP MUSE FIRST」换成「对着屏说话还没开」（§16.1 落的第 1 条），
+  他在真机上按下了键、看到的是中文那句。屏上显示的字从 COM8 读不到，但**看到哪一句本身就是判据** ——
+  走那一格的前提是链路通着且上行闸关着。
+
+## 18. 11-12：owner 现场报的三件事 —— 两件已定性（一件是我的回归），第三件把路线改成「语音唤醒词」
+
+### 18.1 「又连不上圆屏」= 两个独立原因，其中一个是我的回归
+
+- **我留下的 NVS 拨号地址**。11-11 夜里台架把 `link_url` 设成了 `ws://192.168.43.161:9100`
+  （我这台 PC 上的假手机），收工忘了清。NVS 那条压过出厂常量 ⇒ 手机热点就算开着，屏也永远拨不到手机上。
+  已 `>url clear`，回读原文：`now=ws://192.168.43.1:8443 src=factory saved=(none)`。
+  **这条是我的回归，不是 App 的问题**；以后台架用完必须清，或者干脆只用 `>url` 临时档。
+- **演示那台 Mate 60 的热点当时根本没在空中**。屏扫描原文 `no saved wifi network nearby`；
+  同一时刻这台 PC `netsh wlan show networks` 只看见隔壁那台 Mate 30（2.4 GHz、ch10）。
+  ⇒ 那一刻屏连的是隔壁的网络，不是演示手机。这一条不需要改代码，开热点就好。
+- 「点击下键还是提示没配置 muse」是**设计好的链路-down 兜底**（`can_record()`：链路没通就说
+  `SET UP MUSE FIRST`），所以它其实是个可用的链路指示灯，不是新故障。
+  顺带一个现场有用的动作：**按下键会立刻 `muse_wifi_apply()` 重试一次**，否则要等 480 s 退避。
+
+### 18.2 「按住不能对话，提示未开启圆屏对话」= 闸关着，而旧代码在关着的时候一行日志都不打
+
+- owner 看到的中文那句就是 `muse_voice.c:989` 的 `go_idle("对着屏说话还没开")`（他的原话是转述）。
+  看到这一句同时证明三件事：链路那一刻**是通的**（`carpet_mic_link_up()` 为真才走这一格）、
+  `carpet_mic_armed()` **为假**（真的话 `voice_task` 会先把这次按键接走，根本到不了这里）、
+  装机那版没配对 Muse（`MUSE_HATCH_NOT_SET`）。⇒ §17.5 末尾那条"只有代码证据"到此关闭。
+- 闸要**两个数都点头**：ack **整帧**的 `v >= 4` **且** `ack.protocols ∋ 4`（§17.1b）。
+  而 App 那半边的代码不在这棵树里：远端 tip 没变、本地 `ScreenLink.kt:27` 还是 `CONTRACT_VERSION = 3`、
+  `CommandType` 里没有 `mic_chunk` ⇒ **只能靠屏的回读判**，不能靠读代码判。
+- 旧 `on_ack()` 把 `ESP_LOGI` 写在"都点头"的分支里，另两种失败情形（没报 `protocols` / 报了 4 但整份还是 v3）
+  **一行都不打** ⇒ 现场恰好落在这两种之一时，串口里查不出为什么。已改成**无条件**打一行：
+  `ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`，另加两句 W 分别说明那两种情形。
+- **称到了**（COM8，本轮我自己占的口）：`Project build complete`（WEXIT=0）、
+  esptool `Hash of data verified.`、开机 `I (1051) carpet_mic: 上行地基就绪：2 只 256000 字节段缓冲（PSRAM）…`、
+  `I (2024) link.app: saved network beats the built-in creds in NVS, reconnecting (first: Mate 60)`。
+- **没称到**：那一行 ack 本身 —— 要等 owner 把热点和 App 再开一次。读到之后按这三种判：
+  `v=3 protocols=[3,4]` ⇒ App 没抬 `CONTRACT_VERSION`（清单 §0 第 2 件，钥匙）；
+  `v=4 protocols=[3]` 或 `没报` ⇒ 抬了版本但漏了申报；
+  `v=4 protocols=[4]` 却仍 `armed=0` ⇒ 才回来查屏侧（本地 `mic_mode` / 熔断）。
+
+### 18.3 owner 拍了「直接做语音唤醒词」
+
+- 原话：「按住并不能直接和圆屏对话…我觉得要按下键才能对话也不是很合理，开车的时候不方便操作按键，
+  不能用语音唤醒词来对话吗」；给的三个选项里他选了**直接做语音唤醒词**，
+  不要"免按键常开"或"点一下说"那两个过渡档。
+- 现状（扫过，不是推测）：屏上**没有任何唤醒词代码**，Muse BSP 里也没有；
+  唯一那条对话入口是按键 BOOT=TALK。所以这是一件新功能，不是修一处 bug。
+- 设计取向（还没落代码，先记在这儿免得下一轮重新想）：**只上 WakeNet，先不上 AFE/AEC**；
+  喂 `idle_capture()` 那**唯一**的 20 ms 块（绝不新开第二个读者，§16 那条坑）；
+  **放音期间不检测**（和"放音期间停上行"同一条规矩，也省掉 AEC 的参考通道）；
+  句尾用能量判（`muse_vc_peak` / rms 那几个现成的原语），不引 VAD 模型；
+  模型走**新追加的分区**（现有偏移一个不动 ⇒ NVS 和设置全保住）；
+  开关走 `muse_settings` 现成的 bool 那一套 + 设置页同风格的一格，**不新增页面**。

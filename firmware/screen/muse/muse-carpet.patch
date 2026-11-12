@@ -3483,10 +3483,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..ff4f8bf
+index 0000000..3ce502a
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1228 @@
+@@ -0,0 +1,1245 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -4180,22 +4180,39 @@ index 0000000..ff4f8bf
 +static void on_ack(const cJSON *ack, int v)
 +{
 +    const cJSON *p = cJSON_GetObjectItemCaseSensitive(ack, "protocols");
-+    if (!cJSON_IsArray(p)) return;
-+    const cJSON *it = NULL;
 +    int says4 = 0;
-+    cJSON_ArrayForEach(it, p) {
-+        if (cJSON_IsNumber(it) && it->valueint >= 4) {
-+            says4 = 1;
-+            break;
++    char plist[40];
++    size_t pn = 0;
++    plist[0] = '\0';
++    if (cJSON_IsArray(p)) {
++        const cJSON *it = NULL;
++        cJSON_ArrayForEach(it, p) {
++            if (!cJSON_IsNumber(it)) continue;
++            if (it->valueint >= 4) says4 = 1;
++            int w = snprintf(plist + pn, sizeof(plist) - pn, "%s%d", pn ? "," : "", it->valueint);
++            if (w < 0 || (size_t)w >= sizeof(plist) - pn) break;
++            pn += (size_t)w;
 +        }
 +    }
-+    if (!says4) return;
-+    if (v >= 4) {
++    /* 这一行**无条件打**，包括"对面根本没报 protocols"那一种。
++     * 为什么：现场"按了键、屏说『对着屏说话还没开』"只有两种可能 —— 整份契约没到 4，
++     * 或者 protocols 里没有 4。旧写法这两种都静默 return，串口上一个字都没有，
++     * 而 App 那半边的代码不在这棵树里（2026-11-11 夜真机就卡在这儿：链路通了、armed=0，
++     * 却读不到对面到底申报了什么）。两个数 + 判定一行打出来，现场一眼定位，不用改闸。 */
++    bool open = says4 && v >= 4;
++    ESP_LOGI(TAG, "ack：整份契约 v=%d、protocols=[%s] ⇒ 上行%s",
++             v, plist[0] ? plist : "没报", open ? "开" : "不开");
++    if (open) {
 +        carpet_mic_phone_declared(true);
 +        return;
 +    }
-+    ESP_LOGW(TAG, "对面在 protocols 里报了 v4（上行），但它整份契约还是 v%d —— 那一版解不了 mic_chunk，"
-+                  "发上去就是关线，上行不开", v);
++    if (says4) {
++        ESP_LOGW(TAG, "对面在 protocols 里报了 v4（上行），但它整份契约还是 v%d —— 那一版解不了 mic_chunk，"
++                      "发上去就是关线，上行不开", v);
++    } else if (v >= 4) {
++        ESP_LOGW(TAG, "对面整份契约已经到 v%d，但 protocols 里没报 4 —— 按契约它该报，"
++                      "上行先不开（要它把 4 加回 ack.protocols）", v);
++    }
 +}
 +
 +static void on_disconnected(void)
