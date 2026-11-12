@@ -3,9 +3,12 @@
 这份是给**另一台电脑**看的。你要研究的是"功能整合进我们自己的 App"，所以正文在第 5 节；
 前面几节只到"能把这一版重出来、能刷上板"为止。
 
-基准：本文件正文与 `muse-carpet.patch` 记的是 2026-11-06 契约 v3 那一轮的功能状态；
-补丁本身更靠前 —— 它已经带上 2026-11-11 的两轮（播放任务的 PSRAM 栈 + 屏侧上行 `mic_chunk`，
-`HANDOFF.md` §15.17、§16），**但 v4 手机那一半还没实现**，所以这一块对装机 App 完全无反应。
+基准：本文件正文的功能状态记到 2026-11-06 契约 v3 那一轮；**补丁本身更靠前** ——
+它已经带上 11-11 的两轮（播放任务的 PSRAM 栈 + 屏侧上行 `mic_chunk`，`HANDOFF.md` §15.17、§16）、
+11-12 的 `ack` 无条件回读（§18.2），以及 **11-13 凌晨的语音唤醒词整块**（§18.4）。
+手机那半边的 v4 不在本仓库里，**屏侧只能靠串口回读判它到没到位**，别从这里的代码推。
+唤醒词这一版**改了分区表**，第一次装必须全片刷（§3 第 4 步）；
+而且**真人语音唤醒还没称到**（台架没有能出声的物理输出设备），别把它当已验收的功能。
 
 ---
 
@@ -27,48 +30,58 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 30 个文件、5291 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，8,427 行 / 440,190 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-12 实读的，
-  比 11-11 夜里那版多的 17 行只有一处：`on_ack()` 改成**无条件**回读「整份契约 v + protocols」
-  （旧版在"没报 protocols"和"报了 4 但 v 还是 3"这两种失败情形下**一行日志都不打**，
-  而现场恰好就是这两种之一 ⇒ 屏上只说「对着屏说话还没开」，串口里查不出为什么）：
+- 我们的全部改动 = 34 个文件、5819 行新增 / 86 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，9,045 行 / 471,665 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13 凌晨实读的。
+  比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
+  `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
+  带 rule 的 `espressif/esp-sr`、`partitions_muse.csv` 尾部追加的 `model` 分区，
+  外加 `app.c` 关 BLE 腾内部 RAM、设置页「声音」里那一格、`muse_voice.c` 的免按键一轮。
+  **这一版起分区表变了 ⇒ 装机必须全片刷一次**（见 §3 第 4 步）。
+  上一版那 17 行（`on_ack()` 无条件回读「整份契约 v + protocols」）仍在里面，没被这轮覆盖掉。
   ```
   （下面每一行的两个数是实读的「新增行数 + / 删除行数 -」，只写一个数的是整份新文件；
   上一版这张表用的是 diffstat 那一列合成数，和 5291/86 对不上，从这一轮起改成分开写）
-  esp32/components/muse/CMakeLists.txt       |  22 + /   1 -   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行)
+  esp32/components/muse/CMakeLists.txt       |  29 + /   1 -   (11-12 唤醒词：carpet_wake.c 进 srcs + **按 Kconfig 分叉**的 `espressif__esp-sr` 进 PRIV_REQUIRES（它是带 rule 的托管组件，无条件写会让别的板子 configure 阶段就找不到组件）；原有：+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行)
   esp32/components/muse/Kconfig              |  30 + /   1 -   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
+  esp32/components/muse/idf_component.yml    |  10 +   (11-12 唤醒词新入列：`espressif/esp-sr` 钉死 `==2.4.7`，带 rule `if: "$CONFIG{MUSE_CARPET_CARDS} == True"`。**右边必须是 `True` 不是 `"y"`** —— MUSE_CARPET_CARDS 是真 bool，组件管理器的 `IfClause` 对 bool 只走 `eval_bool`（只认 True/False），写 `"y"` 当场 `Invalid boolean ""y"" in "if" clause` 构建失败；隔壁 mdns 那条能写 `"y"` 是因为 MUSE_VIDEO_MDNS 是 string。别的板子上这个符号不存在 ⇒ `MissingKconfigError` 被 manifest/models.py 吃掉 = 跳过这条依赖，不是报错，所以不影响任何非 carpet 构建)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
-  esp32/components/muse/carpet/carpet_lang_zh.c | 314 +   (新，「英文串→中文」那张表 166 条 + `>zh` 的命中计数；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条，11-09 加 `熄屏后保持联网` + 那句说明两条)
+  esp32/components/muse/carpet/carpet_lang_zh.c | 315 +   (新，「英文串→中文」那张表 **163 条**（实数，上一版这里写的 166 是旧数）+ `>zh` 的命中计数；11-12 唤醒词 +1 条 `Wake word`→`语音唤醒词`；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条，11-09 加 `熄屏后保持联网` + 那句说明两条)
   esp32/components/muse/carpet/carpet_lang_zh.h |  58 +   (新)
   esp32/components/muse/carpet/carpet_audio.c | 493 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB。383 → 493 是这两轮涨的：11-11 下午播放任务从 `xTaskCreate` 换成 `xTaskCreateWithCaps` + MallocCaps 栈（内部 RAM 拿不到 16 KB 连续块，那条任务**从来没起来过**，这就是"圆屏不出声"的真因），prebuffer 从永久闸门改成只在开口前生效；11-11 晚上再加 `carpet_audio_live()`，给上行那句"对着屏说话先掐掉在播的答句"用)
   esp32/components/muse/carpet/carpet_audio.h |  61 +   (新)
   esp32/components/muse/carpet/carpet_diag.c | 226 +   (新，11-09 深夜「断电验尸」：NVS 命名空间 `cdiag` 一圈 24 条，每条带同一组 PMU 原始寄存器 + VBAT；`>diag` 翻、`>diag clear` 抹。开机那两条**先存 RAM**，等 NVS 写得动了再补 —— 第一版没绕这一道，刷完实测 `>diag seq=0`，两条开机记录当场静默丢失，根因就是 §2 下面那条"`carpet_link_start()` 早于 `muse_settings_init()`"。)
   esp32/components/muse/carpet/carpet_diag.h |  41 +   (新，那五个入口：latched / boot / event / tick / dump)
-  esp32/components/muse/carpet/carpet_link.c | 1245 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」 + 11-11 晚：契约 v4 那三处接线 —— `on_ack()` 读 `protocols` 里有 ≥4 就 `carpet_mic_phone_declared(true)`、`on_connected()` 把它清掉（每一连重新判一次，不给跨会话缓存）、`on_disconnected()` 叫 `carpet_mic_link_lost()` 掐掉在录的那一段，`carpet_link_start()` 尾部补 `carpet_mic_init()`，`>carpet` 那一行尾部多印 `mic=<模式> armed=<0|1>` + 11-11 夜：`on_ack(ack, v)` 多收一个 envelope 的 `v`，许可改成 **`v >= 4` 且 `protocols ∋ 4` 两个都点头**；只报 4 而 `v` 还是 3（= 今天装机那版：申报发早了、`CommandType` 里没 mic_chunk，收到就关线）当场留一行 W 说明为什么不开上行 + 11-12：那一行改成**无条件打** —— `ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`，开/不开都留证据；旧版只在"两个数都点头"时才有动静，另两种失败情形一行不打，现场只看到屏上那句「对着屏说话还没开」)
+  esp32/components/muse/carpet/carpet_link.c | 1251 +   (新，11-12 唤醒词：`carpet_link_start()` 尾部 +`carpet_wake_init()` —— create() 要一块 12 KB **连续内部** RAM，开机这几十秒是内部 RAM 最整的时候，等 Wi-Fi/TLS/LVGL 铺开再要就是"总量够、连续不够"；要不到只打日志，按键那条路照常好使。原有：v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」 + 11-11 晚：契约 v4 那三处接线 —— `on_ack()` 读 `protocols` 里有 ≥4 就 `carpet_mic_phone_declared(true)`、`on_connected()` 把它清掉（每一连重新判一次，不给跨会话缓存）、`on_disconnected()` 叫 `carpet_mic_link_lost()` 掐掉在录的那一段，`carpet_link_start()` 尾部补 `carpet_mic_init()`，`>carpet` 那一行尾部多印 `mic=<模式> armed=<0|1>` + 11-11 夜：`on_ack(ack, v)` 多收一个 envelope 的 `v`，许可改成 **`v >= 4` 且 `protocols ∋ 4` 两个都点头**；只报 4 而 `v` 还是 3（= 今天装机那版：申报发早了、`CommandType` 里没 mic_chunk，收到就关线）当场留一行 W 说明为什么不开上行 + 11-12：那一行改成**无条件打** —— `ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`，开/不开都留证据；旧版只在"两个数都点头"时才有动静，另两种失败情形一行不打，现场只看到屏上那句「对着屏说话还没开」)
   esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_mic.c | 463 +   (新，11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口)
   esp32/components/muse/carpet/carpet_mic.h |  98 +   (新，那八个入口 + `carpet_mic_mode_t` 三档)
   esp32/components/muse/carpet/carpet_page.c | 880 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
   esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
+  esp32/components/muse/carpet/carpet_wake.c | 229 +   (新，11-12 语音唤醒词：只用 esp-sr 的 **WakeNet**，不上 AFE/AEC/MultiNet。`esp_srmodel_init("model")` → filter(ESP_WN_PREFIX) → `create(name, DET_MODE_90)`；喂的是 `idle_capture()` 那**唯一**的 20 ms/320 样本块，内部用累加器重切成引擎要的 512 样本/32 ms（**绝不新开第二个麦克风读者**，§16 那条坑）。`init()` 校验 chunk∈(0,1024]、单声道、16000 Hz，不对就 destroy 退出 —— 块长错了引擎会**静默永不命中**。三道不检测：设置关 / `carpet_audio_live()` 在念 / 一轮还没完（`s_inhibit`），命中后 62 块≈2 s 不应期。`>wake` 回读三行 `@wake`：ready/词/blocks/hits/dropped + detect 平均与最坏耗时 + 内部与 PSRAM 余量。**一个只有实读模型才发现的坑**：`esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段原文，四个候选里只有「你好小安」那份写的是拼音 `nihaoxiaoan` ⇒ 屏上会教人念拼音，已加一行 strcmp 译回中文)
+  esp32/components/muse/carpet/carpet_wake.h |  67 +   (新，那七个入口：init / ready / feed / take / inhibit / word / dump)
   esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 335 + /   6 -   (>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
+  esp32/components/muse/muse_input.c         | 355 + /   6 -   (11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
-  esp32/components/muse/muse_settings.c      |  46 + /   2 -   (11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
-  esp32/components/muse/muse_settings.h      |  18 +   (11-08：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头；11-09：`MUSE_SETTING_STAY_ONLINE` + `muse_settings_stay_online/set_stay_online`)
-  esp32/components/muse/muse_settings_ui.c   | 279 + /  45 -   (11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态。11-09：熄屏页加 `s_stay_sw` 那一格，**放在五个时长选项上面**——圆屏一屏放不下五格再加一格，滚动条是关的、台架也没有滚的口)
+  esp32/components/muse/muse_settings.c      |  66 + /   2 -   (11-12 唤醒词：NVS 再多一条 `wake_on`（u8，**缺键=默认开** —— owner 要的就是免按键，默认关等于没做）+ 那两个函数 + 开机日志尾部 `wake %s`；11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
+  esp32/components/muse/muse_settings.h      |  25 +   (11-12 唤醒词：`MUSE_SETTING_WAKE` + `muse_settings_wake_on/set_wake_on`，同样刻意不加 CONFIG 闸（主机侧 harness 也 include 这份头）；11-08：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头；11-09：`MUSE_SETTING_STAY_ONLINE` + `muse_settings_stay_online/set_stay_online`)
+  esp32/components/muse/muse_settings_ui.c   | 302 + /  45 -   (11-12 唤醒词：「声音」页加一格 `Wake word`（**不新开页面**，owner 的规矩），说明那一行是**动态**的 —— 要念哪个词由 `carpet_wake_word()` 报（真在听的词不是屏幕上写的那个，是最难查的一种"唤醒词不灵"），模型没起来就直说「唤醒词没起来：model 分区里没有模型」。这一格的中文走 `muse_lang_montserrat()` 挂的**全量** Noto 16px fallback（7765 个码位），所以**不用重跑字库子集脚本** —— 那份 683 字的 `carpet_font.ttf` 只服务 `carpet_page.c`；11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态。11-09：熄屏页加 `s_stay_sw` 那一格，**放在五个时长选项上面**——圆屏一屏放不下五格再加一格，滚动条是关的、台架也没有滚的口)
   esp32/components/muse/muse_ui.c            | 127 + /  19 -   (tile + 手势吞并修 + 圆点可点 + show_carpet)
   esp32/components/muse/muse_ui.h            |  10 +
-  esp32/components/muse/muse_voice.c         | 106 +           (11-11 晚新入列：`talk_to_phone(bool barge_in)` —— 按下即录、松开整段发给手机那一条路；`BTN_TALK` 的 press 分支在**进 Hatch 那道闸之前**先看 `carpet_mic_armed()`， armed 就自己吃掉这次按键（`pre_reset()` + `continue`，不再走 Muse 云端那套）。owner 报的"按下键屏上让我装 Muse"就是这里：那条键是 BOOT=TALK，没配对时 `can_record()` 撞 `MUSE_HATCH_NOT_SET`，屏上打的是英文串「SET UP MUSE FIRST」；现在链路已经接上就改口成「对着屏说话还没开」，且带子里没配对的这句只留作真的没配时才出)
-  esp32/devices/sdkconfig.carpet             |  46 +   (新，含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
-  esp32/main/app.c                           |  25 + /  10 -   (11-08 新入列：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
+  esp32/components/muse/muse_voice.c         | 186 +           (11-12 唤醒词：`idle_capture()` 里 +`carpet_wake_feed(s_chunk, MUSE_AUDIO_CHUNK)`（同一个块，不新读麦克风）；idle 循环里 `carpet_wake_take()` 命中 ⇒ 先 `muse_input_wake("voice")` 点亮，再按 `carpet_mic_armed()` 分三路：armed 就 `muse_wifi_power(FULL)` + `inhibit(true)` + **走按键同一条 `talk_to_phone(false, true)`** + `inhibit(false)`，没 armed 说「对着屏说话还没开」，没链路说「先让手机连上圆屏」。**免按键那一轮的句尾判据**（按下那条路不变，仍可提前松手发送）：1 秒滑窗取**最低**电平当底噪，阈值 = 底噪 +8 dB 且封顶 −25 dBFS；连续 700 ms 低于阈值且真出过声 ≥160 ms 就收口发送；2 秒还没人出声判成误触发、撤回这一轮并说「没听清，再说一次」（判据是 `loud < HF_MIN_LOUD` 不是 `!loud` —— 一声关门响就能把 loud 顶到 1，那样这道保险就废了，会一路录到 8 秒上限把一车噪声发上去）；11-11 晚：`talk_to_phone(bool barge_in)` —— 按下即录、松开整段发给手机那一条路；`BTN_TALK` 的 press 分支在**进 Hatch 那道闸之前**先看 `carpet_mic_armed()`， armed 就自己吃掉这次按键（`pre_reset()` + `continue`，不再走 Muse 云端那套）。owner 报的"按下键屏上让我装 Muse"就是这里：那条键是 BOOT=TALK，没配对时 `can_record()` 撞 `MUSE_HATCH_NOT_SET`，屏上打的是英文串「SET UP MUSE FIRST」；现在链路已经接上就改口成「对着屏说话还没开」，且带子里没配对的这句只留作真的没配时才出)
+  esp32/devices/sdkconfig.carpet             |  72 +   (新，11-12 唤醒词：+`CONFIG_MODEL_IN_FLASH=y` +`CONFIG_SR_WN_WN9_NIHAOXIAOAN_TTS2=y`（你好小安）+ 那一段**这块板上实读**的开销注释：app 镜像 3,346,432 B / 4M 槽余 847,872 B（20%）、srmodels.bin 291,068 B、create() 34.0 ms 吃内部 21,128 B（最大连续块 131072→98304）+ PSRAM 322,864 B、detect() 一块 32 ms 平均 2.74 ms 最坏 4.61 ms（≈8.6% 一个核）、带引擎稳态 `int=43K/29K min=32K`。**探针那份更大的数（21,140 B / 3.63 ms / 11%）量的是 wn9_nihaoxiaozhi_tts，它的 `_MODEL_INFO_` 是 wakenet9l = 重档，只能当上限看**；原有：含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
+  esp32/main/app.c                           |  49 + /  10 -   (11-13 补一处**误导性读数**：`enter_advertising_state()` 在 carpet 构建下报 `off` 并直接 return —— 关了 BLE 之后心跳原本还在报 `setup=advertising … ble=advertising`，那是给一个根本没起来的协议栈贴标签，而这两格是下一轮排查唯一能读到的东西。已刷已验：`setup stage: idle -> off` + `hb … setup=off … ble=off`；11-12 唤醒词：carpet 构建**跳过 BLE 配网服务的启动**（`start_ble_setup_server_if_needed()` 顶上 `#if CONFIG_MUSE_CARPET_CARDS` 直接 return）。实测这一步吃 41 KB 内部 RAM：`after noise_ctrl_init int=102K/62K` → `after ble_start int=61K/52K`，稳态落到 `int=16K/8K`，**低于唤醒词引擎要的 21 KB 总量 / 12 KB 连续** ⇒ 不关 BLE 这功能根本装不下。关掉后 int 16K/8K → 73K/56K，带上引擎稳态 43K/29K。车联屏从来不用 BLE 配网（它从自己的 Wi-Fi 页入热点再拨 App 的 WebSocket），`ble_server_*` 在 `!s_started` 时本来就全是空操作，等 BLE 同步的调用方都在 `CONFIG_HOMEHUB_BLE_COMMANDS` 下而这个构建关着。**代价：这一版起 BLE 配网没了**，要退回官方行为把那个 `#if` 去掉；11-08：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
   esp32/main/muse_glue.c                     |  54 + /   2 -   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
+  esp32/partitions_muse.csv                  |   8 +   (11-12 唤醒词新入列：**只往尾巴上加一行** `model, data, spiffs, 0x822000, 0x300000,`（3 MB）。上面每一行的偏移一个都没动 ⇒ NVS(0x11000) 里的 Wi-Fi、`link_url`、`mic_mode`、`wake_on` 全保住，换这张表不用重新配网（用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对过，不是看着 csv 推的）。**分区名必须就叫 `model`**：esp-sr 的 CMakeLists 用 `partition_table_get_partition_info("--partition-name model")` 找它，找不到就只打印一句提示、不生成 `srmodels.bin`，运行期 `esp_srmodel_init("model")` 返回空 —— 现象是"编译刷机全成功、唤醒词永远不灵"。16 MB flash 到 0x1000000，这张表到 0xB22000，后面还空约 4.8 MB)
   ```
-  这份 patch 在这台机器上**用 baseline 干净树验过能打上**（`git worktree add --detach ... cdc169d`
-  再 `git apply`，30 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 18 份被改文件的
+  原样副本，再 `git apply`，34 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  验法脚本：`D:/dev/tmp/verify_carpet_patch.py <patch> <muse_root> cdc169d <空目录>`，
+  它同时做两件事 —— ① 在 baseline 空仓上 `git apply --check` + 真 apply；
+  ② 把 apply 出来的每一份和**工作树**（就是真正编译刷机那份）逐字节比。
   2026-11-08 这天打了四次：第一次收进 R1~R4 那几处；**上板第一次刷机就死循环**
   （`assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))`，根因是 `carpet_link_start()`
   里提前 `url_read()`，那时设置模块的锁还没建）之后改成 `url_effective()`，重编、重刷、称到了数字，
@@ -245,15 +258,31 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     源码这一版**已编已刷已开机验过**（`Project build complete` / `Hash of data verified.` /
     `I (1051) carpet_mic: 上行地基就绪…`），**但那一行 ack 还没在真机上读到过** ——
     要等 owner 把热点和 App 再开一次（记在 `HANDOFF.md` §17.5）。
+  - 2026-11-13 凌晨 **语音唤醒词那一整块**（owner 拍的路线，`HANDOFF.md` §18.4）——
+    `verify_carpet_patch.py` 实跑：`baseline copies restored: 18` / `git apply: OK (34 sections)` /
+    `byte-compare: 32/34 identical`。差的两个又是 `carpet_mic.c/.h`，归一行尾后
+    `normalized_same=True`（工作树 CRLF 463 / 98 行，patch 里 LF），和 11-12 那轮同一个已知坑，不是漏打。
+    这一版 34 个文件 / 5819+ / 86- / 9,045 行 / 471,665 字节，字库仍 154,528 字节。
+    **源码已编已刷已开机称过，这一轮刷了两次**：第一次带唤醒词整块（全片刷，5 个写入段全
+    `Hash of data verified.`），第二次只 `app-flash` 带上面那处 BLE 标签修正
+    （`Project build complete` / WEXIT=0 / `Hash of data verified.`）。
+    第二次开机回读：`setup=off … ble=off`、引擎 `ready=1 word=你好小安`、
+    `blocks=821 hits=0 dropped=0`（≈26 s 环境音，**0 误触发**）、`detect avg=2.75 ms worst=4.00 ms`、
+    稳态 `int=43K/29K min=32K`。
+    **但真人语音唤醒没称到** —— 卡在这台 PC 没有能出声的物理输出设备，详见 §18.4。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
   git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet
   git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet esp32/main \
+      esp32/partitions_muse.csv \
       > D:/dev/projects/carpet-sat-demo/firmware/screen/muse/muse-carpet.patch
   git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet   # 别让状态多个暂存
   ```
+  **`esp32/partitions_muse.csv` 是 11-12 这轮加进路径清单的**：它在 `esp32/` 根下，
+  不在原来那三个路径里，漏了它补丁就少一行 `model` 分区 ⇒ 对端机器全片刷也没有模型，
+  唤醒词永远 `ready=0`，而编译刷机全都"成功"。
   `esp32/components/screen_link/` **不在 patch 里** —— 它就是把本仓库
   `firmware/screen/components/screen_link/` 整目录复制过去，只换一个 `CMakeLists.txt`（原因见 §4），
   复制命令在 §3。
@@ -290,17 +319,32 @@ idf.py -B build-muse-s3-175-carpet -DIDF_TARGET=esp32s3 \
     reconfigure
 idf.py -B build-muse-s3-175-carpet ... build      # 同一串参数，子命令换 build
 
-# 4) 只刷 app 分区（这一版没动分区表，别全片刷）
+# 4) 刷机 —— 【2026-11-13 起改了：第一次装这一版必须全片刷】
+#    上一版这里写的是"只刷 app 分区，这一版没动分区表，别全片刷"。**那句话现在不成立**：
+#    唤醒词往 partitions_muse.csv 尾部加了 model 分区，分区表本身变了，而且 srmodels.bin
+#    要写进那个新分区。只 app-flash 的话分区表还是旧的 ⇒ esp_srmodel_init("model") 找不到
+#    分区、返回空，唤醒词永远 ready=0，而日志里一句报错都没有。
+idf.py -B build-muse-s3-175-carpet ... -p COM8 flash          # 全片：分区表 + app + srmodels.bin
+#    全片刷过一次之后，只改代码（没动 CONFIG_SR_WN_* 也没动分区表）就可以回到快的那条：
 idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
+#    判刷对了看两处：esptool 的命令行里要有 `0x822000 .../srmodels/srmodels.bin`，
+#    以及每个写入段后面的 `Hash of data verified.`。
+#    注意：全片刷会重写分区表，但**不会**擦掉 NVS(0x11000) —— 偏移没动，配网和设置都还在。
 ```
 
 板子插这台机器时是 **COM8**（就是那颗 USB-Serial-JTAG，同时也是第二控制台）。
 
-**两个必须照做的步骤，跳了会静默：**
+**四个必须照做的步骤，跳了会静默：**
 - `reconfigure`：新增 `components/` 目录**不是 ninja 的监视输入**，不 reconfigure 的现象是
   "编译成功"但 `esp-idf/screen_link/` 根本不存在、日志里零句提到它。
 - 判成败只看日志里的 `Project build complete`，**别看包装脚本的退出码**
   （`idf.py` 外面套一层 PowerShell/grep 时，`grep -c` 命中 0 就是 exit 1，会把成功的构建报成失败）。
+- **唤醒词这一版 `reconfigure` 要联网**：`espressif/esp-sr ==2.4.7` 是托管组件，
+  第一次配置时下载到 `managed_components/`。这台机器上还要设 `IDF_GITHUB_ASSETS=dl.espressif.com/github_assets`
+  才拉得动它的模型包。下不下来的现象是 configure 阶段就报找不到组件，不是静默。
+- **PowerShell 包装脚本必须 `$ErrorActionPreference = 'Continue'`**（不是 `'Stop'`）：
+  esp-sr 的 Kconfig 会往 **stderr** 写 NOTE 行，`'Stop'` 把它当成 NativeCommandError，
+  整轮在 esptool 启动之前就被杀掉 —— 看着像刷机失败，其实一个字都还没写进板子。
 
 ## 4. v6.0.1 的三个坑（都是这轮实测踩出来的，不是文档里读来的）
 
@@ -516,6 +560,13 @@ reboot_ui / card_next / card_auto / poke / page_report`。
 Muse 给的中文只有 **16 px 位图**两档（`muse_font_cjk_16.c` 是 Unifont 1bpp 约 1.2MB flash，
 `muse_font_cjk_noto_16.c` 是 Noto Sans SC 4bpp、GB2312 那 6763 字、约 910KB，车联页 select 的是这份）。
 位图字体的字号是刻死的，**这一页嫌字小就没有"调大一号"这条路**。
+
+**先分清哪块屏面用哪份字，别为改设置页去重跑子集脚本**（11-13 唤醒词那一格就踩过这个疑问）：
+- **只有 `carpet_page.c`（车联页）用下面那份 683 码位的 `carpet_font.ttf` 子集 + tiny_ttf。**
+- **设置页和菜单走另一条**：`muse_lang.c` 的 `muse_lang_montserrat()` 把 Montserrat
+  14/16/20/28 四档各复制一份、`.fallback` 挂到 `muse_font_cjk_noto_16`（**全量**位图，
+  从它的 cmaps 实解出 **7765 个码位** = GB2312 那 6763 字 + ASCII 与标点）。
+  所以设置页加中文格子**不需要动字库**，代价是中文只有 16 px 一档。
 
 做法是把老固件那套搬过来了：页面上用 LVGL 的 **tiny_ttf** 现算字号，字库是一份
 **只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，154,528 字节（683 个码位），

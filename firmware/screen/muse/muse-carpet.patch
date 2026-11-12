@@ -1,5 +1,5 @@
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..fbb14d3 100644
+index b478d5e..b93d057 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -46,6 +46,23 @@ if(CONFIG_MUSE_ENABLED)
@@ -9,7 +9,7 @@ index b478d5e..fbb14d3 100644
 +    if(CONFIG_MUSE_CARPET_CARDS)
 +        # Our car-link tile: the page (LVGL task) and the Screen-Link gate.
 +        list(APPEND srcs "carpet/carpet_page.c" "carpet/carpet_link.c" "carpet/carpet_audio.c"
-+                         "carpet/carpet_mic.c" "carpet/carpet_diag.c")
++                         "carpet/carpet_mic.c" "carpet/carpet_diag.c" "carpet/carpet_wake.c")
 +        # Chinese for the settings pages and the menu, when CONFIG_MUSE_UI_LANG_ZH
 +        # picks it. The table itself is only read then; the file costs nothing
 +        # otherwise, and keeping it out of muse_lang.c keeps the host test
@@ -26,7 +26,7 @@ index b478d5e..fbb14d3 100644
      if(CONFIG_MUSE_HATCH)
          list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
-@@ -192,7 +209,11 @@ set(muse_priv_requires
+@@ -192,8 +209,19 @@ set(muse_priv_requires
      esp_driver_pcnt efuse
      # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
      # before Kconfig values exist, so these can't depend on it; only the code does.
@@ -37,8 +37,16 @@ index b478d5e..fbb14d3 100644
 +    # object from it is referenced and none gets linked.
 +    screen_link)
  list(APPEND muse_priv_requires camera)
++# 唤醒词那一件的头文件（esp_srmodel.h / esp_wn_iface.h）。和上面 screen_link 那条
++# 不一样：esp-sr 是带 rule 的托管组件，只有 CONFIG_MUSE_CARPET_CARDS=y 才下载，
++# 所以这里必须同样按 Kconfig 分叉 —— 无条件写进 PRIV_REQUIRES 会让别的板子在
++#  configure 阶段就找不到组件。carpet_wake.c 也只在那个分叉里进 srcs。
++if(CONFIG_MUSE_CARPET_CARDS)
++    list(APPEND muse_priv_requires espressif__esp-sr)
++endif()
  
  idf_component_register(
+     SRCS ${srcs}
 diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
 index 588d7c6..9c454d0 100644
 --- a/esp32/components/muse/Kconfig
@@ -3099,10 +3107,10 @@ HcmV?d00001
 
 diff --git a/esp32/components/muse/carpet/carpet_lang_zh.c b/esp32/components/muse/carpet/carpet_lang_zh.c
 new file mode 100644
-index 0000000..798e6d3
+index 0000000..92769ce
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_lang_zh.c
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,315 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3314,6 +3322,7 @@ index 0000000..798e6d3
 +
 +    /* ---------- Sound ---------- */
 +    { "Voice notes", "语音留言" },
++    { "Wake word", "语音唤醒词" },
 +    { "Mic level", "麦克风电平" },
 +    { "Off: hold yellow to talk live, release to listen; blue ends the call. On: hold yellow to send a voice note. "
 +      "Applies to the next call.",
@@ -3483,10 +3492,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..3ce502a
+index 0000000..c2dae63
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1245 @@
+@@ -0,0 +1,1251 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -3516,6 +3525,7 @@ index 0000000..3ce502a
 +#include "carpet/carpet_audio.h"
 +#include "carpet/carpet_diag.h"
 +#include "carpet/carpet_mic.h"
++#include "carpet/carpet_wake.h"
 +#include "carpet/carpet_page.h"
 +#include "driver/gpio.h"
 +#include "esp_log.h"
@@ -4595,6 +4605,11 @@ index 0000000..3ce502a
 +     * 256 KB **连续** PSRAM，就是"按下没反应"那种现场最难查的死法。
 +     * 这里不碰 NVS（那一步还没跑 muse_settings_init()），开关第一次读发生在按下那一刻。 */
 +    carpet_mic_init();
++    /* 唤醒词同理，而且更挑时候：create() 要一块 12,288 B **连续内部**（实测），
++     * 开机这会儿内部 RAM 最整。等 Wi-Fi/TLS/LVGL 铺开之后再要，就是"总量够、连续不够"
++     * 那种要不到。这一步也不读设置（同上：muse_settings_init() 还没跑）。
++     * 要不到就只打日志：按键那条路照常好使，唤醒词这一格自己报 ready=0。 */
++    carpet_wake_init();
 +}
 +
 +void carpet_link_view(carpet_link_view_t *out)
@@ -6405,6 +6420,337 @@ index 0000000..53f5a9a
 +void carpet_page_goto(const char *page_name);
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
+diff --git a/esp32/components/muse/carpet/carpet_wake.c b/esp32/components/muse/carpet/carpet_wake.c
+new file mode 100644
+index 0000000..3365ac9
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_wake.c
+@@ -0,0 +1,229 @@
++/*
++ * 唤醒词那一件（见 carpet_wake.h 顶上那段：为什么只做 WakeNet、三条硬规矩、实测代价）。
++ *
++ * 这一份不读硬件、不发帧、不碰闸。它只把采集循环交进来的样本重分块、喂给 WakeNet，
++ * 命中就锁存一下。起轮、采集、发送、闸全在 muse_voice.c / carpet_mic.c 那两份里。
++ */
++
++#include "carpet_wake.h"
++
++#include <stdio.h>
++#include <string.h>
++
++#include "esp_heap_caps.h"
++#include "esp_log.h"
++#include "esp_timer.h"
++
++#include "model_path.h"
++#include "esp_wn_models.h"
++#include "esp_wn_iface.h"
++
++#include "carpet_audio.h"
++#include "carpet_mic.h"
++#include "muse_settings.h"
++
++static const char *TAG = "carpet.wake";
++
++/* 命中之后多少块之内不再判（一块 32 ms，62 块约 2 秒）。
++ * 为什么要这一道：一个词说完之后，尾音和紧接着的那句话还在同一段音频里，
++ * WakeNet 自己的不应期不够长时会连着报两次 —— 表现是"说一句话屏起了两轮"。
++ * 这一档不放宽闸，只是别让同一句话被数两遍。 */
++#define COOL_BLOCKS 62
++
++/* 模型说一块多少样本（实测 512）。要不到这个数就不起来，所以这里只给一个上限，
++ * 超过它就判成"这个模型不是我们称过的那一档"，宁可不用也不喂错块长。 */
++#define MAX_CHUNK 1024
++
++static const esp_wn_iface_t *s_wn;
++static model_iface_data_t *s_md;
++static srmodel_list_t *s_models;
++static const char *s_words = "";
++static int s_chunk;                 /* 模型要的块长（样本） */
++static int16_t *s_acc;              /* 重分块环，内部 RAM（1 KB 上下，detect 的 SIMD 吃它） */
++static size_t s_fill;
++
++static volatile bool s_hit;         /* 锁存的命中，take() 取走即清 */
++static volatile bool s_inhibit;
++static uint32_t s_cool;
++
++/* >wake 的回读数。都是自上次开机的累计，只在 RAM 里。 */
++static uint32_t s_blocks;           /* 喂够一块、真跑了 detect 的次数 */
++static uint32_t s_hits;
++static uint32_t s_dropped;          /* 被挡着（设置在关 / 屏在念 / inhibit）丢掉的块 */
++static int64_t s_us_sum;
++static int64_t s_us_worst;
++static unsigned s_int_free, s_int_largest, s_psram_free;   /* create() 之后那一份 */
++
++static void heap_now(unsigned *free_int, unsigned *largest_int, unsigned *free_psram)
++{
++    *free_int = (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
++    *largest_int = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
++    *free_psram = (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
++}
++
++void carpet_wake_init(void)
++{
++    if (s_md) return;
++
++    /* 分区名字必须就叫 model：esp-sr 的 CMakeLists 按这个名字找分区、把 srmodels.bin
++     * 刷进去（partitions_muse.csv 尾巴那一行）。名字不对这里返回 NULL，而不是报错。 */
++    s_models = esp_srmodel_init("model");
++    if (!s_models) {
++        ESP_LOGE(TAG, "model 分区里没有模型：srmodels.bin 没刷？（按键那条路照常好使）");
++        return;
++    }
++    char *name = esp_srmodel_filter(s_models, ESP_WN_PREFIX, NULL);
++    if (!name) {
++        ESP_LOGE(TAG, "模型分区里没有 wakenet 模型（CONFIG_SR_WN_* 一个都没开？）");
++        return;
++    }
++    s_wn = esp_wn_handle_from_name(name);
++    if (!s_wn) {
++        ESP_LOGE(TAG, "esp_wn_handle_from_name(%s) 返回 NULL", name);
++        return;
++    }
++    s_words = esp_srmodel_get_wake_words(s_models, name);
++    if (!s_words) s_words = "";
++    /* 模型报回来的"词"其实是 _MODEL_INFO_ 里第 3 个下划线段（esp-sr 的
++     * get_wake_words_from_info 就是这么切的），打包的人写什么就是什么。
++     * 四个候选都实读过：只有「你好小安」那一份写的是拼音 nihaoxiaoan，
++     * 你好东东 / 你好小益 / 你好小智 三份本来就是中文。屏上要教人念的是中文，
++     * 所以这一份单独译回来；换别的模型时这行不生效，仍用模型自己报的字。 */
++    if (strcmp(s_words, "nihaoxiaoan") == 0) s_words = "你好小安";
++
++    unsigned f0, l0, p0;
++    heap_now(&f0, &l0, &p0);
++    int64_t t0 = esp_timer_get_time();
++    /* DET_MODE_90 是称过的那一档（探针用的就是它）。换档要重新称误触发。 */
++    s_md = s_wn->create(name, DET_MODE_90);
++    int64_t t1 = esp_timer_get_time();
++    if (!s_md) {
++        ESP_LOGE(TAG, "create() 失败：内部 free=%u 最大块=%u（要一块 12288 B 连续内部）", f0, l0);
++        s_wn = NULL;
++        return;
++    }
++    heap_now(&s_int_free, &s_int_largest, &s_psram_free);
++
++    s_chunk = s_wn->get_samp_chunksize(s_md);
++    int rate = s_wn->get_samp_rate(s_md);
++    int chans = s_wn->get_channel_num(s_md);
++    if (s_chunk <= 0 || s_chunk > MAX_CHUNK || chans != 1 || rate != 16000) {
++        /* 喂错块长 detect() 不报错，只是永远不命中 —— 所以这里宁可判死。 */
++        ESP_LOGE(TAG, "模型这一档没称过：一块 %d 样本 × %d 声道 @ %d Hz，不用它", s_chunk, chans, rate);
++        s_wn->destroy(s_md);
++        s_md = NULL;
++        s_wn = NULL;
++        return;
++    }
++    /* 一块的缓冲放**内部**：只有 1 KB 上下，而 detect() 的 SIMD 一直在读它。
++     * 探针那版放 PSRAM 也跑得动（3.63 ms/块），但那是喂静音和正弦量的，真词没验过；
++     * 这里不拿识别率去赌一个可以白拿的差别。 */
++    s_acc = heap_caps_malloc((size_t)s_chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
++    if (!s_acc) {
++        ESP_LOGE(TAG, "要不到 %d B 的重分块缓冲", (int)(s_chunk * sizeof(int16_t)));
++        s_wn->destroy(s_md);
++        s_md = NULL;
++        s_wn = NULL;
++        return;
++    }
++    s_fill = 0;
++
++    ESP_LOGI(TAG, "唤醒词就绪：「%s」 模型=%s 一块=%d 样本(%.0f ms)@%d Hz",
++             s_words, name, s_chunk, (double)s_chunk * 1000.0 / (double)rate, rate);
++    /* 这四个数就是"这一版在这块板上到底吃不吃得下"的现场证据，和探针那份对得上才算数。 */
++    ESP_LOGI(TAG, "create() 用了 %.1f ms：内部 free %u→%u 最大块 %u→%u | PSRAM free %u→%u",
++             (double)(t1 - t0) / 1000.0, f0, s_int_free, l0, s_int_largest, p0, s_psram_free);
++}
++
++bool carpet_wake_ready(void)
++{
++    return s_md != NULL;
++}
++
++const char *carpet_wake_word(void)
++{
++    return s_words;
++}
++
++void carpet_wake_inhibit(bool on)
++{
++    s_inhibit = on;
++    if (on) {
++        s_fill = 0;      /* 半块陈料不留到下一轮 */
++        s_hit = false;
++    }
++}
++
++/* 够一块了：跑一次 detect。命中就锁存，并起不应期。 */
++static void detect_block(void)
++{
++    /* 屏自己在念答句的时候不听：否则答句里的字会被当成新一轮的唤醒词。
++     * 设置在关的时候也不跑 —— 省的就是那 11% CPU。 */
++    if (s_inhibit || carpet_audio_live() || !muse_settings_wake_on()) {
++        s_dropped++;
++        return;
++    }
++    if (s_cool) {
++        s_cool--;
++        s_dropped++;
++        return;
++    }
++    int64_t a = esp_timer_get_time();
++    int r = s_wn->detect(s_md, s_acc);
++    int64_t d = esp_timer_get_time() - a;
++    s_blocks++;
++    s_us_sum += d;
++    if (d > s_us_worst) s_us_worst = d;
++    if (r > 0) {
++        s_hits++;
++        s_hit = true;
++        s_cool = COOL_BLOCKS;
++        ESP_LOGI(TAG, "命中「%s」（第 %lu 块，累计 %lu 次）", s_words,
++                 (unsigned long)s_blocks, (unsigned long)s_hits);
++    }
++}
++
++void carpet_wake_feed(const int16_t *pcm, size_t frames)
++{
++    if (!s_md || !pcm || !frames) return;
++    /* 320 → 512 的重分块：采集那一档是 20 ms，模型那一档是 32 ms，两边不成整数倍，
++     * 所以必须留半块。直接按 320 喂 detect() 不会报错，只会永远不命中。 */
++    size_t done = 0;
++    while (done < frames) {
++        size_t need = (size_t)s_chunk - s_fill;
++        size_t take = frames - done < need ? frames - done : need;
++        memcpy(s_acc + s_fill, pcm + done, take * sizeof(int16_t));
++        s_fill += take;
++        done += take;
++        if (s_fill == (size_t)s_chunk) {
++            s_fill = 0;
++            detect_block();
++        }
++    }
++}
++
++bool carpet_wake_take(void)
++{
++    if (!s_hit) return false;
++    s_hit = false;
++    return true;
++}
++
++void carpet_wake_dump(void)
++{
++    unsigned f, l, p;
++    heap_now(&f, &l, &p);
++    printf("@wake ready=%d word=%s chunk=%d on=%d inhibit=%d live=%d armed=%d\n",
++           (int)carpet_wake_ready(), s_words[0] ? s_words : "(none)", s_chunk,
++           (int)muse_settings_wake_on(), (int)s_inhibit, (int)carpet_audio_live(),
++           (int)carpet_mic_armed());
++    printf("@wake blocks=%lu hits=%lu dropped=%lu cool=%lu detect avg=%.2f ms worst=%.2f ms\n",
++           (unsigned long)s_blocks, (unsigned long)s_hits, (unsigned long)s_dropped,
++           (unsigned long)s_cool,
++           s_blocks ? (double)s_us_sum / (double)s_blocks / 1000.0 : 0.0,
++           (double)s_us_worst / 1000.0);
++    printf("@wake create 之后 int=%u/%u psram=%u | 现在 int=%u/%u psram=%u\n",
++           s_int_free, s_int_largest, s_psram_free, f, l, p);
++    printf("@wake 设置页「声音」那一格 / 串口 >wake on|off；闸仍看 >mic\n");
++    fflush(stdout);
++}
+\ No newline at end of file
+diff --git a/esp32/components/muse/carpet/carpet_wake.h b/esp32/components/muse/carpet/carpet_wake.h
+new file mode 100644
+index 0000000..bbcf994
+--- /dev/null
++++ b/esp32/components/muse/carpet/carpet_wake.h
+@@ -0,0 +1,67 @@
++/*
++ * 唤醒词：免按键「对着屏说话」。
++ *
++ * 为什么有这一份：开车的时候按住屏上那个键是不合理的（owner 的原话）。所以这一份
++ * 只做一件事 —— 在**已有的那一个麦克风读者**上一直听着一个词，听见了就替人按下那个键。
++ * 后面整条路（预滚、采集、分帧、松手发、闸）一个字都不改，仍走 carpet_mic 那一份。
++ *
++ * 三条硬规矩，和 carpet_mic.h 顶上那三条是同一套：
++ *
++ * 1. **不开第二个读者**。这一份从不碰硬件：`muse_voice.c` 的 `idle_capture()` 每 20 毫秒
++ *    把读到的 320 个样本交进来（`carpet_wake_feed()`）。第二个读者会等满 1 秒令牌，
++ *    表现是"所有录音都失败在 The channel is not enabled"。
++ * 2. **屏自己在念的时候不听**。`carpet_audio_live()` 为真就把喂进来的样本丢掉 ——
++ *    否则答句里的字会被当成新一轮的唤醒词，屏会自己跟自己说个没完。
++ * 3. **闸照旧**。命中只是"替人按了一下"，能不能真发上去仍由 `carpet_mic_armed()` 判
++ *    （本地开关 + 对面申报过 v4 + 没被熔断）。这一份不放宽任何一道。
++ *
++ * 为什么只用 WakeNet、不用 esp-sr 的 AFE/MultiNet：AFE 那套要 100 KB 级别的内部 RAM，
++ * 这块板腾不出来；而我们要的只是"听见一个词"，降噪和命令词识别都用不上（转写在手机上）。
++ * 实测代价（esp-sr 2.4.7 / 这块 S3 / DET_MODE_90）：
++ *   进镜像 88,509 B；一个中文模型 291 KB（flash 的 model 分区，mmap，不占 RAM）；
++ *   create() 吃 21,140 B 内部 + 323,684 B PSRAM，要一块 12,288 B **连续内部**，56.8 ms；
++ *   detect() 一块 32 ms 音频平均 3.63 ms、最坏 5.11 ms（约 11% CPU）；
++ *   静音和 1 kHz 正弦各 200 块，误触发 0 次。
++ * 内部 RAM 是靠 app.c 里 carpet 构建跳过 BLE 启动腾出来的：同一份心跳
++ * int=16K/8K min=6K → int=73K/56K min=62K。BLE 在这个产品里没人用（屏自己入热点、
++ * 自己拨 App 的 WebSocket，见 docs/APP-SCREEN-CONNECT.md §1）。
++ *
++ * 一块的样本数由模型说（`get_samp_chunksize`，实测 512 = 32 ms），和采集那一档
++ * （MUSE_AUDIO_CHUNK = 320 = 20 ms）不一样，所以这里有一个 320→512 的重分块环。
++ * 这不是可以省的：喂错块长 detect() 不报错，只是永远不命中。
++ */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* 开机调一次（`carpet_link_start()`，和 carpet_mic_init() 同一处）。
++ * 为什么在那儿：create() 要一块 12 KB **连续内部**，开机这几十秒是内部 RAM 最整的
++ * 一段时间；等 Wi-Fi/TLS/LVGL 都铺开之后再要，就是"要得到总量、要不到连续"那种死法。
++ * 这一步不读设置（那会儿 muse_settings_init() 还没跑，读设置会撞 NULL 锁）。
++ * 失败不致命：模型分区没刷、内存不够，都只打日志，按键那条路照常好使。 */
++void carpet_wake_init(void);
++
++/* 模型和句柄都起来了没有。false 时 feed() 什么都不做。 */
++bool carpet_wake_ready(void);
++
++/* 采集循环每读一次就交一次（320 个样本，16 kHz 单声道）。
++ * 内部重分块成模型要的块长，够一块就 detect() 一次；命中锁存，等 take() 取。
++ * 设置关着、屏在念、被 inhibit 的时候直接丢掉并清空环（不留半块陈料）。 */
++void carpet_wake_feed(const int16_t *pcm, size_t frames);
++
++/* 取走一次命中（取走即清）。采集循环拿它决定要不要起一轮免按键对话。 */
++bool carpet_wake_take(void);
++
++/* 一轮对话期间挂起检测（起轮时 true、收尾时 false）。
++ * 和 carpet_audio_live() 是两道：那道挡的是"屏在念答句"，这道挡的是"这一轮还没完"。 */
++void carpet_wake_inhibit(bool on);
++
++/* 唤醒词本身（模型自己报的，例如「你好小安」）。没起来时返回空串。 */
++const char *carpet_wake_word(void);
++
++/* 开发口 `>wake`：起来没有、用的哪个词、一块多少样本、喂过几块、命中几次、
++ * 现在是不是被挡着、以及内部/PSRAM 余量。站在屏前说一句话是看不出这些的。 */
++void carpet_wake_dump(void);
+\ No newline at end of file
+diff --git a/esp32/components/muse/idf_component.yml b/esp32/components/muse/idf_component.yml
+index 62f5f85..3e97a8e 100644
+--- a/esp32/components/muse/idf_component.yml
++++ b/esp32/components/muse/idf_component.yml
+@@ -16,6 +16,16 @@ dependencies:
+   idf:
+     version: ">=5.5"
+   espressif/cjson: "~1.7"
++  # 车联屏的唤醒词（carpet/carpet_wake.c）。只用 WakeNet，不用 AFE/MultiNet：
++  # 实测整条 esp-sr 进镜像 88,509 B，一个中文模型 291 KB 放在尾部新加的 model
++  # 分区里（partitions_muse.csv）。别的 Muse 板子一条都不下载。
++  # 钉死 2.4.7：这是 IDF 6.0.1 上称过的那一版，换版要重新称 create() 的内部 RAM。
++  # 右边写 True 不写 "y"：MUSE_CARPET_CARDS 是真 bool，组件管理器对 bool 只认
++  # True/False（下面 mdns 那条能写 "y" 是因为 MUSE_VIDEO_MDNS 是 string）。
++  espressif/esp-sr:
++    version: "==2.4.7"
++    rules:
++      - if: "$CONFIG{MUSE_CARPET_CARDS} == True"
+   # Video over Wi-Fi announces itself with it (muse_video_wifi.c).
+   espressif/mdns:
+     version: "^1.8"
 diff --git a/esp32/components/muse/muse_app.c b/esp32/components/muse/muse_app.c
 index d27f69e..ccc566a 100644
 --- a/esp32/components/muse/muse_app.c
@@ -6420,10 +6766,10 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..c87bd72 100644
+index 7c579bb..e57d1ec 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
-@@ -48,6 +48,25 @@
+@@ -48,6 +48,26 @@
  #include "muse_ui.h"
  #include "muse_voice.h"
  #include "muse_wifi.h"
@@ -6432,6 +6778,7 @@ index 7c579bb..c87bd72 100644
 +#include "carpet/carpet_mic.h"
 +#include "carpet/carpet_page.h"
 +#include "carpet/carpet_diag.h"
++#include "carpet/carpet_wake.h"
 +#if CONFIG_MUSE_UI_LANG_ZH
 +#include "carpet/carpet_lang_zh.h"
 +#endif
@@ -6449,7 +6796,7 @@ index 7c579bb..c87bd72 100644
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
-@@ -140,6 +159,9 @@ static bool update_power(void);
+@@ -140,6 +160,9 @@ static bool update_power(void);
  
  static void power_off(void)
  {
@@ -6459,7 +6806,7 @@ index 7c579bb..c87bd72 100644
      if (!muse_board->power_off) {
          return;   /* a physical switch powers it off */
      }
-@@ -170,6 +192,9 @@ static void set_asleep(bool asleep, const char *why)
+@@ -170,6 +193,9 @@ static void set_asleep(bool asleep, const char *why)
  {
      if (asleep != muse_state_asleep()) {
          ESP_LOGI(TAG, "%s (%s)", asleep ? "sleeping" : "waking", why);
@@ -6469,7 +6816,7 @@ index 7c579bb..c87bd72 100644
          muse_state_set_asleep(asleep);
  #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
          if (asleep) {
-@@ -551,6 +576,9 @@ static bool update_power(void)
+@@ -551,6 +577,9 @@ static bool update_power(void)
      ESP_LOGI(TAG, "%s", s_cpu_low ? "low power: display paused"
                          : paused  ? "display paused (USB host: CPU at full speed)"
                                    : "full power");
@@ -6479,7 +6826,7 @@ index 7c579bb..c87bd72 100644
      return paused;
  }
  
-@@ -560,11 +588,35 @@ static bool update_power(void)
+@@ -560,11 +589,35 @@ static bool update_power(void)
   * power arrives; meanwhile nothing reaches the device over the network.
   * Not while a voice note recorded offline waits to go (for a while). Returns
   * true while napping.
@@ -6516,7 +6863,7 @@ index 7c579bb..c87bd72 100644
      if (!s_cpu_low) {
          low_since = now;
      }
-@@ -572,14 +624,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
+@@ -572,14 +625,19 @@ static bool update_wifi_nap(TickType_t now, bool paused)
          s_nap_now = false;
          muse_state_set_as_if_battery(false);
      }
@@ -6541,7 +6888,7 @@ index 7c579bb..c87bd72 100644
  }
  
  /* Independent POWER never goes through PTT, AUX's menu or its setup double
-@@ -589,6 +646,7 @@ static bool s_power_down, s_power_swallow;
+@@ -589,6 +647,7 @@ static bool s_power_down, s_power_swallow;
  static void power_release(void)
  {
      if (!s_power_down) return;
@@ -6549,7 +6896,7 @@ index 7c579bb..c87bd72 100644
      s_power_down = false;
      if (!s_power_swallow) set_asleep(true, muse_board->power_button);
      s_power_swallow = false;
-@@ -603,12 +661,14 @@ static void dedicated_buttons(unsigned ev)
+@@ -603,12 +662,14 @@ static void dedicated_buttons(unsigned ev)
          release = false;
      }
      if (!s_power_down && (ev & MUSE_BTN_POWER_PRESS)) {
@@ -6564,7 +6911,7 @@ index 7c579bb..c87bd72 100644
          s_power_swallow = true;   /* no sleep on release after shutdown/failure */
          if (s_talk_down) talk_button(MUSE_BTN_TALK_RELEASE);
          power_off();
-@@ -721,12 +781,23 @@ static void input_task(void *arg)
+@@ -721,12 +782,23 @@ static void input_task(void *arg)
              if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
                  muse_state_set_power(&p);
                  muse_battery_note_power(&p, muse_state_on_battery());
@@ -6588,7 +6935,7 @@ index 7c579bb..c87bd72 100644
          /* Paused, anything but a button (a pairing prompt, an image) is
           * noticed within REST_WAIT_MS. Napping, nothing comes over the
           * network; USB power arriving is noticed within NAP_WAIT_MS. */
-@@ -839,6 +910,34 @@ static void set_face(const char *name)
+@@ -839,6 +911,34 @@ static void set_face(const char *name)
      fflush(stdout);
  }
  
@@ -6623,7 +6970,7 @@ index 7c579bb..c87bd72 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +991,225 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,244 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -6706,6 +7053,25 @@ index 7c579bb..c87bd72 100644
 +    if (!strcmp(line, "mic")) {
 +        carpet_mic_dump();
 +        fflush(stdout);
++        return true;
++    }
++    /* 唤醒词：`>wake` 回读，`>wake on|off` 改（和设置页「声音」那一格同一个 NVS key）。
++     * 为什么串口也要有一条：这一路"没反应"分四种，屏上画的字一模一样 ——
++     * 模型没起来(ready=0) / 设置在关(on=0) / 屏正在念(live=1) / 闸没开(armed=0)。
++     * 这一句把四个数一起打出来，现场不用猜。blocks= 在涨才说明麦克风真喂进来了。 */
++    if (!strncmp(line, "wake", 4) && (line[4] == '\0' || line[4] == ' ')) {
++        const char *rest = line + 4;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "on")) {
++            muse_settings_set_wake_on(true);
++        } else if (!strcmp(rest, "off")) {
++            muse_settings_set_wake_on(false);
++        } else if (*rest) {
++            printf("@wake 只认 on / off（不带参数=回读）\n");
++            fflush(stdout);
++            return true;
++        }
++        carpet_wake_dump();
 +        return true;
 +    }
 +    /* 本机造一段语音走 begin/feed/end 那同一条上行路（不碰麦克风、不碰真按下），
@@ -6849,7 +7215,7 @@ index 7c579bb..c87bd72 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1244,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1264,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -6862,7 +7228,7 @@ index 7c579bb..c87bd72 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1352,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1372,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -7030,14 +7396,15 @@ index 238ee4f..205198c 100644
 +esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n);
 +#endif
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
-index fd499cd..6270596 100644
+index fd499cd..000efd9 100644
 --- a/esp32/components/muse/muse_settings.c
 +++ b/esp32/components/muse/muse_settings.c
-@@ -41,11 +41,13 @@ static struct {
+@@ -41,11 +41,14 @@ static struct {
      uint16_t sleep_s;
      bool wifi_on;
      bool ble_on;
 +    bool stay_online;
++    bool wake_on;
      char ssid[MUSE_SSID_MAX + 1];
      char pass[MUSE_PASS_MAX + 1];
      char host[MUSE_HOST_MAX + 1];
@@ -7047,12 +7414,25 @@ index fd499cd..6270596 100644
  } s = {
      .volume = CONFIG_MUSE_DEFAULT_VOLUME,
      .speaker_on = true,
-@@ -136,18 +138,23 @@ esp_err_t muse_settings_init(void)
+@@ -53,6 +56,9 @@ static struct {
+     .brightness = 100,
+     .sleep_s = 120,
+     .wifi_on = true,
++    /* 唤醒词出厂就开着：owner 要的就是"不用按键也能对着屏说话"，默认关等于没做。
++     * 它只决定听不听那个词，能不能真发上去仍由 carpet_mic 那三道闸判。 */
++    .wake_on = true,
+     .host = DEFAULT_HOST,
+ };
+ 
+@@ -136,18 +142,27 @@ esp_err_t muse_settings_init(void)
      if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
          s.ble_on = b;
      }
 +    if (nvs_get_u8(s_nvs, "stay_online", &b) == ESP_OK) {
 +        s.stay_online = b;
++    }
++    if (nvs_get_u8(s_nvs, "wake_on", &b) == ESP_OK) {
++        s.wake_on = b;
 +    }
      load_str("ssid", s.ssid, sizeof(s.ssid));
      load_str("pass", s.pass, sizeof(s.pass));
@@ -7065,15 +7445,16 @@ index fd499cd..6270596 100644
      s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
      s.brightness = clampi(s.brightness, 10, 100);
 -    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s",
-+    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s, nap %s",
++    ESP_LOGI(TAG, "vol %d%s, mic %d dB, bright %d, sleep %ds, wifi %s (%s), ble %s, muse %s, link %s, nap %s, wake %s",
               s.volume, s.speaker_on ? "" : " (speaker off)", s.mic_gain, s.brightness, s.sleep_s, s.wifi_on ? "on" : "off",
 -             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token");
 +             "network saved by Link", s.ble_on ? "on" : "off", s.token[0] ? "token set" : "no token",
-+             s.link_url[0] ? s.link_url : "built-in", s.stay_online ? "stays online" : "leaves wifi");
++             s.link_url[0] ? s.link_url : "built-in", s.stay_online ? "stays online" : "leaves wifi",
++             s.wake_on ? "on" : "off");
      return ESP_OK;
  }
  
-@@ -208,6 +215,29 @@ size_t muse_settings_hatch_token_len(void)
+@@ -208,6 +223,29 @@ size_t muse_settings_hatch_token_len(void)
      return n;
  }
  
@@ -7103,7 +7484,7 @@ index fd499cd..6270596 100644
  void muse_settings_set_volume(int pct)
  {
      s.volume = clampi(pct, 0, 100);
-@@ -258,6 +288,20 @@ void muse_settings_set_ble_on(bool on)
+@@ -258,6 +296,32 @@ void muse_settings_set_ble_on(bool on)
      notify(MUSE_SETTING_BLE);
  }
  
@@ -7121,11 +7502,23 @@ index fd499cd..6270596 100644
 +    notify(MUSE_SETTING_STAY_ONLINE);
 +}
 +
++bool muse_settings_wake_on(void)
++{
++    return s.wake_on;
++}
++
++void muse_settings_set_wake_on(bool on)
++{
++    s.wake_on = on;
++    save_u8("wake_on", on);
++    notify(MUSE_SETTING_WAKE);
++}
++
  void muse_settings_set_wifi(const char *ssid, const char *pass)
  {
      if (muse_link_wifi_set(ssid ? ssid : "", ssid && ssid[0] && pass ? pass : "")) {
 diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
-index 5788e5b..3571316 100644
+index 5788e5b..69e52de 100644
 --- a/esp32/components/muse/muse_settings.h
 +++ b/esp32/components/muse/muse_settings.h
 @@ -33,6 +33,10 @@
@@ -7139,15 +7532,16 @@ index 5788e5b..3571316 100644
  
  #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
  
-@@ -46,6 +50,7 @@ typedef enum {
+@@ -46,6 +50,8 @@ typedef enum {
      MUSE_SETTING_BLE,
      MUSE_SETTING_HATCH,
      MUSE_SETTING_VOICE_NOTES,
 +    MUSE_SETTING_STAY_ONLINE,   /* keep Wi-Fi associated through the screen's nap */
++    MUSE_SETTING_WAKE,          /* listen for the wake word instead of needing a press */
  } muse_setting_t;
  
  typedef void (*muse_setting_cb_t)(muse_setting_t what);
-@@ -69,6 +74,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
+@@ -69,6 +75,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
  void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
  void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
  size_t muse_settings_hatch_token_len(void);
@@ -7159,7 +7553,7 @@ index 5788e5b..3571316 100644
  
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
-@@ -77,6 +87,14 @@ void muse_settings_set_brightness(int pct);
+@@ -77,6 +88,20 @@ void muse_settings_set_brightness(int pct);
  void muse_settings_set_sleep_s(int secs);
  void muse_settings_set_wifi_on(bool on);
  void muse_settings_set_ble_on(bool on);
@@ -7171,11 +7565,17 @@ index 5788e5b..3571316 100644
 + * Polled where it's used (muse_input.c's nap), so no hardware applies it. */
 +bool muse_settings_stay_online(void);
 +void muse_settings_set_stay_online(bool on);
++/* 唤醒词（carpet/carpet_wake.c）。出厂默认**开** —— owner 要的就是免按键对着屏说话。
++ * 这一格只决定"听不听那个词"；听见之后能不能真把语音发上去，仍由 carpet_mic 那三道闸判
++ * （本地 mic_mode + 对面申报过 v4 + 没被熔断），这一格不放宽任何一道。
++ * 和 stay_online 一样是被读的那一方（采集循环每块读一次），没有硬件要跟着动。 */
++bool muse_settings_wake_on(void);
++void muse_settings_set_wake_on(bool on);
  /* A network name is remembered first among the saved ones and joined now;
   * an empty ssid forgets every saved network. */
  void muse_settings_set_wifi(const char *ssid, const char *pass);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..8344d33 100644
+index 20c46d3..bb486a9 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -7186,17 +7586,18 @@ index 20c46d3..8344d33 100644
  #include "muse_link.h"
  #include "muse_settings.h"
  #include "muse_state.h"
-@@ -45,6 +46,9 @@
+@@ -45,6 +46,10 @@
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"   /* the access-point row on the Wi-Fi page */
++#include "carpet/carpet_wake.h"   /* 唤醒词那一格：要念的是哪个词，只有模型自己知道 */
 +#endif
  
  /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
  #define LIST_W 330
-@@ -107,6 +111,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
+@@ -107,6 +112,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
  static int s_forget_armed = -1;
  static int64_t s_forget_armed_us;
  static char s_join_ssid[MUSE_SSID_MAX + 1];
@@ -7210,7 +7611,7 @@ index 20c46d3..8344d33 100644
  
  /* Hatch page. */
  static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
-@@ -128,6 +139,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+@@ -128,6 +140,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
  static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
  #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
  static lv_obj_t *s_sleep_checks[SLEEP_COUNT], *s_sleep_rows[SLEEP_COUNT];
@@ -7218,7 +7619,7 @@ index 20c46d3..8344d33 100644
  static int s_sleep_shown = -1;
  
  /* Battery page. */
-@@ -166,6 +178,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
+@@ -166,6 +179,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
      return font;
  }
  
@@ -7252,7 +7653,7 @@ index 20c46d3..8344d33 100644
  /* A 172 px portrait panel cannot fit an icon, name and status side by side. */
  static bool narrow_panel(void)
  {
-@@ -199,11 +238,17 @@ static int stacked_text_w(void)
+@@ -199,11 +239,17 @@ static int stacked_text_w(void)
      return (s_tiny ? TINY_LIST_W : muse_board->width - 16) - 20;
  }
  
@@ -7271,7 +7672,7 @@ index 20c46d3..8344d33 100644
      lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
      lv_label_set_text(l, muse_text_showable(text, shown, sizeof(shown)));
      return l;
-@@ -212,7 +257,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
+@@ -212,7 +258,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
  static void set_text(lv_obj_t *l, const char *text)
  {
      char shown[SHOWN_MAX];
@@ -7280,7 +7681,7 @@ index 20c46d3..8344d33 100644
      if (strcmp(lv_label_get_text(l), text) != 0) {
          lv_label_set_text(l, text);
      }
-@@ -480,6 +525,58 @@ static lv_obj_t *column(lv_obj_t *list)
+@@ -480,6 +526,58 @@ static lv_obj_t *column(lv_obj_t *list)
      return l;
  }
  
@@ -7339,7 +7740,7 @@ index 20c46d3..8344d33 100644
  /* Label and value, not tappable. */
  static lv_obj_t *info_row(lv_obj_t *list, const char *text)
  {
-@@ -635,7 +732,7 @@ static void on_text_show(lv_event_t *e)
+@@ -635,7 +733,7 @@ static void on_text_show(lv_event_t *e)
      (void)e;
      bool pw = !lv_textarea_get_password_mode(s_text_ta);
      lv_textarea_set_password_mode(s_text_ta, pw);
@@ -7348,7 +7749,7 @@ index 20c46d3..8344d33 100644
  }
  
  /* Beside the keyboard's field, a button to show a password. */
-@@ -752,7 +849,7 @@ static void build_text_page(lv_obj_t *tile)
+@@ -752,7 +850,7 @@ static void build_text_page(lv_obj_t *tile)
      int top = text_y(98);
      if (narrow_panel()) {
          /* Portrait panels need a header inside the screen, not the round layout. */
@@ -7357,7 +7758,7 @@ index 20c46d3..8344d33 100644
          single_line(s_text_title, muse_board->width - 16);
          lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
          lv_obj_set_width(s_text_ta, muse_board->width - 60);
-@@ -791,6 +888,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+@@ -791,6 +889,12 @@ static void open_text(const char *title, const char *initial, bool password, int
      lv_textarea_set_max_length(s_text_ta, max_len);
      lv_textarea_set_password_mode(s_text_ta, password);
      lv_textarea_set_text(s_text_ta, initial ? initial : "");
@@ -7370,7 +7771,7 @@ index 20c46d3..8344d33 100644
      lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
      if (s_text_kp) {
          muse_keypad_reset(s_text_kp, password);
-@@ -944,10 +1047,12 @@ static bool rebuild_scan_list(void)
+@@ -944,10 +1048,12 @@ static bool rebuild_scan_list(void)
          bool saved = is_saved(s_aps[i].ssid);
          saved_seen |= saved;
          char buf[24];
@@ -7385,7 +7786,7 @@ index 20c46d3..8344d33 100644
          }
          lv_label_set_text(v, buf);
      }
-@@ -973,6 +1078,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -973,6 +1079,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -7419,7 +7820,7 @@ index 20c46d3..8344d33 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1120,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1121,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -7435,7 +7836,7 @@ index 20c46d3..8344d33 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1006,27 +1147,29 @@ static void tick_wifi(void)
+@@ -1006,27 +1148,29 @@ static void tick_wifi(void)
      char buf[128];
      switch (w.state) {
      case MUSE_WIFI_OFF:
@@ -7472,7 +7873,7 @@ index 20c46d3..8344d33 100644
          break;
      }
      set_text(s_wifi_status, buf);
-@@ -1046,6 +1189,23 @@ static void tick_wifi(void)
+@@ -1046,6 +1190,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -7496,7 +7897,7 @@ index 20c46d3..8344d33 100644
  }
  
  /* ---------- Hatch ---------- */
-@@ -1125,12 +1285,26 @@ static void build_hatch_page(lv_obj_t *tile)
+@@ -1125,12 +1286,26 @@ static void build_hatch_page(lv_obj_t *tile)
      s_link_status = note(list, "");
      button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
      s_hatch_status = note(list, "");
@@ -7529,7 +7930,7 @@ index 20c46d3..8344d33 100644
                 "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
                 "gadgets.muse.ai; one set here replaces the firmware's. "
                 "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
-@@ -1142,7 +1316,8 @@ static void tick_hatch(void)
+@@ -1142,7 +1317,8 @@ static void tick_hatch(void)
      const char *paired = !muse_link_hatch_linked()    ? "not paired"
                           : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
                                                           : "paired";
@@ -7539,7 +7940,7 @@ index 20c46d3..8344d33 100644
      set_text(s_link_status, link);
      if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
          s_link_reset_armed_us = 0;
-@@ -1153,9 +1328,13 @@ static void tick_hatch(void)
+@@ -1153,9 +1329,13 @@ static void tick_hatch(void)
      muse_hatch_status(&h);
      char buf[96];
      if (h.detail[0]) {
@@ -7555,7 +7956,7 @@ index 20c46d3..8344d33 100644
      }
      set_text(s_hatch_status, buf);
      lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-@@ -1218,11 +1397,12 @@ static void tick_ble(void)
+@@ -1218,11 +1398,12 @@ static void tick_ble(void)
          strlcpy(buf, "Off", sizeof(buf));
          break;
      case MUSE_BLE_ADVERTISING:
@@ -7570,7 +7971,7 @@ index 20c46d3..8344d33 100644
          break;
      }
      set_text(s_ble_status, buf);
-@@ -1235,10 +1415,12 @@ static void tick_ble(void)
+@@ -1235,10 +1416,12 @@ static void tick_ble(void)
  
  /* ---------- Sound ---------- */
  
@@ -7584,7 +7985,43 @@ index 20c46d3..8344d33 100644
      set_text(l, buf);
  }
  
-@@ -1378,17 +1560,27 @@ static void on_sleep_now(lv_event_t *e)
+@@ -1288,6 +1471,13 @@ static void on_bright(lv_event_t *e)
+     }
+ }
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++static void on_wake_sw(lv_event_t *e)
++{
++    muse_settings_set_wake_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
++}
++#endif
++
+ static void build_sound_page(lv_obj_t *tile)
+ {
+     lv_obj_t *list;
+@@ -1309,6 +1499,21 @@ static void build_sound_page(lv_obj_t *tile)
+         s_vol_sl = slider(list, "Volume", 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
+     }
+     s_gain_sl = slider(list, "Mic gain", 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
++#if CONFIG_MUSE_CARPET_CARDS
++    /* 唤醒词那一格。放在「声音」页里，不新开一页（owner 的规矩：不加新页面）。
++     * 说明这一行必须是**动态**的：要念的是哪个词由模型自己报（carpet_wake_word()），
++     * 写死在词表里就会和"换模型只改 sdkconfig 一行"那一步脱节 —— 屏上教的词和
++     * 真在听的词不是一个，那是最难查的一种"唤醒词不灵"。 */
++    switch_row(list, "Wake word", muse_settings_wake_on(), on_wake_sw);
++    static char wake_note[96];
++    const char *word = carpet_wake_word();
++    if (word[0]) {
++        snprintf(wake_note, sizeof(wake_note), "说 %s 就能对话，不用按键。", word);
++    } else {
++        snprintf(wake_note, sizeof(wake_note), "唤醒词没起来：model 分区里没有模型。");
++    }
++    note(list, wake_note);
++#endif
+ 
+     lv_obj_t *meter = lv_obj_create(list);
+     lv_obj_remove_style_all(meter);
+@@ -1378,17 +1583,27 @@ static void on_sleep_now(lv_event_t *e)
      muse_state_set_asleep(true);
  }
  
@@ -7612,7 +8049,7 @@ index 20c46d3..8344d33 100644
      button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
      note(list, "Tap the screen or press either button to wake.");
  }
-@@ -1431,16 +1623,25 @@ static void build_battery_page(lv_obj_t *tile)
+@@ -1431,16 +1646,25 @@ static void build_battery_page(lv_obj_t *tile)
      s_battery = page(tile, "BATTERY", true, &list);
      s_batt_shown_us = 0;
      s_batt_status = note(list, "");
@@ -7647,7 +8084,7 @@ index 20c46d3..8344d33 100644
                 "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
  }
  
-@@ -1468,14 +1669,14 @@ static void tick_battery(void)
+@@ -1468,14 +1692,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -7666,7 +8103,7 @@ index 20c46d3..8344d33 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1697,10 @@ static void tick_battery(void)
+@@ -1496,10 +1720,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -7679,7 +8116,7 @@ index 20c46d3..8344d33 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1717,7 @@ static void tick_battery(void)
+@@ -1516,7 +1740,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -7688,7 +8125,7 @@ index 20c46d3..8344d33 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1744,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1767,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -7706,7 +8143,7 @@ index 20c46d3..8344d33 100644
      }
      note(list, text);
  }
-@@ -1658,13 +1860,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+@@ -1658,13 +1883,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
  
  #if LV_USE_SNAPSHOT
  static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
@@ -7737,7 +8174,7 @@ index 20c46d3..8344d33 100644
              return true;
          }
      }
-@@ -1688,6 +1906,22 @@ static void bench_open_pending(void)
+@@ -1688,6 +1929,22 @@ static void bench_open_pending(void)
              PAGES[i]->build(s_tile);
          }
          show(*PAGES[i]->obj);
@@ -8058,20 +8495,35 @@ index a671bbc..857c011 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..67ee352 100644
+index 000104e..89476cc 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -38,6 +38,9 @@
+@@ -38,6 +38,10 @@
  #include "muse_settings.h"
  #include "muse_state.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_mic.h"    /* 「对着屏说话」：这一轮的语音交给手机，不去 Muse 云 */
++#include "carpet/carpet_wake.h"   /* 免按键：听见那个词就替人按了一下键，后面整条路不变 */
 +#endif
  #if CONFIG_MUSE_REALTIME_VOICE
  #include "muse_voice_call.h"
  #include "muse_voice_call_core.h"
-@@ -414,6 +417,87 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -221,6 +225,13 @@ static void idle_capture(void)
+         vTaskDelay(pdMS_TO_TICKS(20));
+         return;
+     }
++#if CONFIG_MUSE_CARPET_CARDS
++    /* 唤醒词就挂在这儿：这是全机**唯一**那个麦克风读者，另起一个读者会等满 1 秒令牌
++     * （carpet_mic.h 顶上第 1 条）。放在 settle 判断**之前** —— 屏自己念完那 200 ms
++     * 的尾音也要喂进去让它丢掉，不然环里会留半块陈料，下一轮的第一块是拼错的。
++     * 挡不挡由 carpet_wake 自己判（设置在关 / 屏在念 / 一轮还没完）。 */
++    carpet_wake_feed(s_chunk, MUSE_AUDIO_CHUNK);
++#endif
+     if (s_monitor) {
+         float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
+         s_monitor_db = db > s_monitor_db ? db : s_monitor_db * 0.9f + db * 0.1f;
+@@ -414,6 +425,138 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
  
  static void go_idle(const char *caption);
  
@@ -8091,7 +8543,24 @@ index 000104e..67ee352 100644
 + * 这里不动 muse_lang 那张表（那是设置页的字），中文直接交给 caption：caption 那一条字路
 + * 本来就带 CJK fallback（muse_ui.c 的 set_caption_font），画得出来。
 + */
-+static void talk_to_phone(bool barge_in)
++/* 免按键那一轮的收尾判据。没有"松手"这个事件了，只能靠能量判静音：
++ *   底噪 = 最近 1 秒里最安静的那一块。为什么不用固定阈值：车里底噪本来就高，
++ *          写死一个数要么把说话判成静音（一句发不出去），要么永远判不出静音
++ *          （一直录到 8 秒上限，把一车噪声发给手机）。
++ *   门槛 = 底噪 + 8 dB，再压一个上限 —— 免得一次关门声把底噪抬到说话声以上。
++ *   连续 700 ms 低于门槛 = 说完了；判完再补 TAIL_FRAMES 那一小截，和按下那条同一个数。
++ * HF_MIN_LOUD / HF_NOTHING_CHUNKS 是误触发那一道保险：词命中了但真没人说话，
++ * 不该把两秒静音发上去（那会白跑一趟转写，还占住"上一句还在发"那道闸）。 */
++#define HF_WINDOW 50           /* 1 秒 @ 20 ms */
++#define HF_SILENCE_CHUNKS 35   /* 700 ms 连续静音 */
++#define HF_MIN_LOUD 8          /* 至少 160 ms 真有人出声 */
++#define HF_NOTHING_CHUNKS 100  /* 2 秒还没人出声：判成误触发 */
++#define HF_THRESH_CAP (-25.0f)
++
++/* 只有一条采集任务用它，放 .bss（200 B 内部）而不是那 6144 字节的任务栈上。 */
++static float s_hf_win[HF_WINDOW];
++
++static void talk_to_phone(bool barge_in, bool hands_free)
 +{
 +    if (!carpet_mic_begin()) {
 +        go_idle("上一句还在发，稍等一下");
@@ -8099,7 +8568,7 @@ index 000104e..67ee352 100644
 +    }
 +    muse_state_set_mode(MUSE_MODE_LISTENING);
 +    muse_state_set_progress(0);
-+    muse_state_set_caption("在听");
++    muse_state_set_caption(hands_free ? "在听，说完停一下" : "在听");
 +
 +    size_t n = 0;
 +    if (barge_in) {
@@ -8109,7 +8578,10 @@ index 000104e..67ee352 100644
 +            muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK);
 +        }
 +    } else {
-+        /* 人是在按下的同时开口的，而按键报上来晚一拍：把预滚那 320 毫秒也算进这一句。 */
++        /* 人是在按下的同时开口的，而按键报上来晚一拍：把预滚那 320 毫秒也算进这一句。
++         * 免按键那条同样要预滚：命中是在那个词**说完之后**才报上来的，人往往已经接着
++         * 往下说了，不留这一截就吃掉句子的第一个字。代价是转写里会带上那个唤醒词 ——
++         * 那比丢字轻得多，手机那头的提示词本来就该忽略它。 */
 +        for (size_t i = 0; i < s_pre_fill; i++) {
 +            pre_get(i, s_chunk);
 +            carpet_mic_feed(s_chunk, MUSE_AUDIO_CHUNK);
@@ -8120,6 +8592,7 @@ index 000104e..67ee352 100644
 +    size_t limit = carpet_mic_limit_frames();
 +    size_t stop_at = limit;
 +    bool released = false;
++    size_t win_n = 0, loud = 0, silent_run = 0;
 +    while (n + MUSE_AUDIO_CHUNK <= stop_at) {
 +        if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
 +            break;
@@ -8131,9 +8604,38 @@ index 000104e..67ee352 100644
 +        if (n % (MUSE_AUDIO_CHUNK * 10) == 0) {
 +            muse_state_set_caption("在听 %.1f 秒", (double)n / MUSE_AUDIO_RATE);
 +        }
++        bool end_now = false;
++        if (hands_free) {
++            float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
++            s_hf_win[win_n % HF_WINDOW] = db;
++            win_n++;
++            size_t have = win_n < HF_WINDOW ? win_n : HF_WINDOW;
++            float floor_db = s_hf_win[0];
++            for (size_t i = 1; i < have; i++) {
++                if (s_hf_win[i] < floor_db) floor_db = s_hf_win[i];
++            }
++            float thresh = floor_db + 8.0f;
++            if (thresh > HF_THRESH_CAP) thresh = HF_THRESH_CAP;
++            if (db >= thresh) {
++                loud++;
++                silent_run = 0;
++            } else {
++                silent_run++;
++            }
++            /* 词命中了但一直没人出声：这一轮不发，也别让人对着屏干等。
++             * 判据用 loud < HF_MIN_LOUD 而不是 !loud：一声关门响就能把 loud 顶到 1，
++             * 那样这道保险就废了，会一路录到 8 秒上限再把一车噪声发上去。 */
++            if (loud < HF_MIN_LOUD && win_n >= HF_NOTHING_CHUNKS) {
++                carpet_mic_end(false);
++                go_idle("没听清，再说一次");
++                return;
++            }
++            end_now = loud >= HF_MIN_LOUD && silent_run >= HF_SILENCE_CHUNKS;
++        }
 +        /* 采集比实时慢 60~80 毫秒，人在最后一个字上就松了手，所以松手之后再补一小截。
-+         * 和 record() 同一个数，两边念出来的"录了多久"才对得上。 */
-+        if (!released && got_event(MUSE_PTT_UP)) {
++         * 和 record() 同一个数，两边念出来的"录了多久"才对得上。
++         * 免按键那条也认按下：开车时想提前把这句发出去，按一下就行，不用等那 700 毫秒。 */
++        if (!released && (got_event(MUSE_PTT_UP) || end_now)) {
 +            released = true;
 +            stop_at = n + TAIL_FRAMES < limit ? n + TAIL_FRAMES : limit;
 +        }
@@ -8145,12 +8647,13 @@ index 000104e..67ee352 100644
 +        carpet_mic_end(false);
 +        /* 点一下不算说话。这一句是给"按了不知道要干嘛"的人看的 —— 也就是今天那句
 +         * "让我安装 muse" 要顶掉的那一格。 */
-+        go_idle("按住说话，松开发出去");
++        go_idle(hands_free ? "没听清，再说一次" : "按住说话，松开发出去");
 +        return;
 +    }
 +    carpet_mic_end(true);
-+    ESP_LOGI(TAG, "carpet: 这一句交给手机 %.2f 秒（按住 %zu 帧%s）",
-+             (double)held / MUSE_AUDIO_RATE, held, released ? "" : "，撞到 8 秒上限");
++    ESP_LOGI(TAG, "carpet: 这一句交给手机 %.2f 秒（%s %zu 帧%s）",
++             (double)held / MUSE_AUDIO_RATE, hands_free ? "免按键，静音收尾" : "按住", held,
++             released ? "" : "，撞到 8 秒上限");
 +    muse_state_set_mode(MUSE_MODE_THINKING);
 +    muse_state_set_caption("发给手机了");   /* 下一句是手机回来的转写，不是这里写的 */
 +}
@@ -8159,7 +8662,7 @@ index 000104e..67ee352 100644
  /*
   * Plays Hatch's reply as it arrives, with its text as the caption. Returns
   * true if interrupted by a new press. *delivered: the VM has the note.
-@@ -897,6 +981,15 @@ static bool can_record(void)
+@@ -897,6 +1040,15 @@ static bool can_record(void)
      muse_hatch_status_t st;
      muse_hatch_status(&st);
      if (st.state == MUSE_HATCH_NOT_SET) {
@@ -8175,7 +8678,35 @@ index 000104e..67ee352 100644
          go_idle("SET UP MUSE FIRST");
          return false;
      }
-@@ -1255,6 +1348,19 @@ static void voice_task(void *arg)
+@@ -1217,6 +1369,27 @@ static void voice_task(void *arg)
+             }
+             /* The 20 ms read paces this loop. */
+             idle_capture();
++#if CONFIG_MUSE_CARPET_CARDS
++            /* 唤醒词命中 = 替人按了一下那个键。**闸一道都不放宽**：能不能真发上去
++             * 仍由 carpet_mic_armed() 判（本地 mic_mode + 对面申报过 v4 + 没被熔断）。
++             * 没开的时候不出声也不发，只把真正的原因写在屏上 —— 否则"说了没反应"
++             * 分不清是词没听见还是闸没开，而那两件事的修法完全不同。 */
++            if (carpet_wake_take()) {
++                muse_input_wake("voice");
++                if (carpet_mic_armed()) {
++                    muse_wifi_power(MUSE_WIFI_FULL);
++                    carpet_wake_inhibit(true);
++                    talk_to_phone(false, true);
++                    carpet_wake_inhibit(false);
++                } else if (carpet_mic_link_up()) {
++                    go_idle("对着屏说话还没开");
++                } else {
++                    go_idle("先让手机连上圆屏");
++                }
++                pre_reset();
++                continue;
++            }
++#endif
+             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
+                 continue;
+             }
+@@ -1255,6 +1428,19 @@ static void voice_task(void *arg)
          }
  #endif
          muse_input_clear_call_pending(s_press_mark);
@@ -8187,7 +8718,7 @@ index 000104e..67ee352 100644
 +        if (carpet_mic_armed()) {
 +            bool barge = pending_down;
 +            pending_down = false;
-+            talk_to_phone(barge);
++            talk_to_phone(barge, false);
 +            pre_reset();
 +            continue;
 +        }
@@ -8197,10 +8728,10 @@ index 000104e..67ee352 100644
              continue;
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
-index 0000000..fd5ea98
+index 0000000..c27c506
 --- /dev/null
 +++ b/esp32/devices/sdkconfig.carpet
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,72 @@
 +# 车联（Screen-Link）覆盖层：叠在 devices/sdkconfig.muse-waveshare-s3-175 之后。
 +#
 +# 打开它就有的两件事：
@@ -8247,11 +8778,82 @@ index 0000000..fd5ea98
 +CONFIG_SCREEN_LINK_ID="WS175B-A3F7"
 +CONFIG_SCREEN_LINK_FW="muse-0.1.0"
 +CONFIG_SCREEN_LINK_DOCK_TYPE="desk_stand"
++
++# ── 唤醒词（免按键对着屏说话）─────────────────────────────────────────────
++# 只用 WakeNet：不做降噪、不做命令词识别。下面这组数是 2026-11-12 在**这块板上**
++# 刷了带唤醒词的固件之后实读的（不是探针推的）：
++#   app 镜像 3,346,432 B（0x331000），4M 槽余 847,872 B（828 KB，20%）
++#   srmodels.bin 291,068 B，只含下面选的那一个模型
++#   create() 34.0 ms；内部 free 204263→183135（吃 21,128 B）、
++#     最大连续块 131072→98304；PSRAM free 4652844→4329980（吃 322,864 B）
++#   detect() 一块 512 样本 = 32 ms，平均 2.74 ms、最坏 4.61 ms（约 8.6% 一个核）
++#   带上引擎之后的稳态心跳：int=43K/29K min=32K（关 BLE 之前是 int=16K/8K min=6K）
++# 内部 RAM 是靠 app.c 里 carpet 构建跳过 BLE 启动腾出来的（int 16K/8K → 73K/56K）。
++# 探针那份更大的数（21,140 B / 3.63 ms / 11%）量的是 wn9_nihaoxiaozhi_tts，
++# 它的 _MODEL_INFO_ 是 wakenet9**l** —— 重的那一档，只能当上限看。
++#
++# 模型从 flash 里 mmap，不占 RAM；分区就叫 model，见 partitions_muse.csv 尾巴。
++CONFIG_MODEL_IN_FLASH=y
++# 唤醒词本身。换词只改这一行 + 重新 flash（srmodels.bin 会跟着重打）。
++# 选「你好小安」的理由：开车场景里「安」字顺耳。**这个词的权利归属没查过**，
++# 是留给 owner 拍的一项（esp-sr README 顶上那条：商用前必须确认自己是权利人或拿到授权）。
++# 它是 wakenet9_tts2h12（轻档），四个候选里唯一一份 _MODEL_INFO_ 写拼音的，
++# 所以 carpet_wake.c 里有一行把 nihaoxiaoan 译回中文给屏上用。
++# 备选（每个约 291 KB；注意**后两个**是 wakenet9**l**，CPU/内存约 1.3 倍）：
++#   CONFIG_SR_WN_WN9_NIHAODONGDONG_TTS2 你好东东（wakenet9，轻档，和上面同一档开销）
++#   CONFIG_SR_WN_WN9_NIHAOXIAOYI_TTS2   你好小益（wakenet9l，重档）
++#   CONFIG_SR_WN_WN9_NIHAOXIAOZHI       你好小智（wakenet9l，重档；Espressif 演示词）
++CONFIG_SR_WN_WN9_NIHAOXIAOAN_TTS2=y
 diff --git a/esp32/main/app.c b/esp32/main/app.c
-index 1030652..e8fa4de 100644
+index 1030652..25ddc42 100644
 --- a/esp32/main/app.c
 +++ b/esp32/main/app.c
-@@ -2824,6 +2824,14 @@ void app_run(void) {
+@@ -1995,6 +1995,15 @@ static cJSON *on_ws_command(
+ // confirms pairing before provisioning commands are accepted.
+ static void enter_advertising_state(const char *reason) {
+     if (config_setup_complete()) return;
++#if CONFIG_MUSE_CARPET_CARDS
++    // BLE never starts on the car screen, so "advertising" would label a stack that
++    // is down. The heartbeat's setup=/ble= fields are the only thing the next
++    // debugging round can read; they must not claim a radio that isn't there.
++    ESP_LOGI(TAG, "%s - BLE off on the car screen", reason);
++    setup_stage_set("off");
++    ui_set_ble("off");
++    return;
++#endif
+     ESP_LOGI(TAG, "%s - advertising (always on while unpaired)", reason);
+     setup_stage_set("advertising");
+     ui_set_ble("advertising");
+@@ -2133,6 +2142,20 @@ static void on_client_disconnected(void) {
+ static void start_ble_setup_server_if_needed(void) {
+     if (s_ble_started) return;
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++    // The car screen never pairs over BLE: it joins the phone's hotspot from its
++    // own Wi-Fi page and dials the App's WebSocket (docs/APP-SCREEN-CONNECT.md
++    // §1: the main path needs zero bytes typed on the screen). Bringing the
++    // controller up here costs 41 KB of internal RAM -- measured on this board
++    // as "after noise_ctrl_init int=102K/62K" -> "after ble_start int=61K/52K"
++    // -- and the steady state ends at int=16K/8K, which is below what the
++    // wake-word engine needs (21 KB total, 12 KB contiguous). So leave the
++    // stack down and give that RAM to voice. Every ble_server_* entry point
++    // already no-ops while !s_started, and the only callers that wait for a
++    // BLE sync sit under CONFIG_HOMEHUB_BLE_COMMANDS, which this build has off.
++    ESP_LOGI(TAG, "BLE setup skipped on the car screen; internal RAM goes to voice");
++    return;
++#else
+     ble_callbacks_t cb = {
+         .on_provision = on_provision,
+         .on_wifi_scan = on_wifi_scan,
+@@ -2146,6 +2169,7 @@ static void start_ble_setup_server_if_needed(void) {
+     ble_server_start(identity_ble_name(), &cb);
+     s_ble_started = true;
+     heap_snapshot("after ble_start");
++#endif  // CONFIG_MUSE_CARPET_CARDS
+ }
+ 
+ 
+@@ -2824,6 +2848,14 @@ void app_run(void) {
      // provision action stores ssid/password/access_token there). If those
      // are present, reconnect automatically — the user shouldn't have to
      // re-pair via BLE after every flash.
@@ -8266,7 +8868,7 @@ index 1030652..e8fa4de 100644
      const char *ovr_ssid = CONFIG_HOMEHUB_WIFI_SSID;
      const char *ovr_pwd  = CONFIG_HOMEHUB_WIFI_PASSWORD;
  
-@@ -2833,18 +2841,25 @@ void app_run(void) {
+@@ -2833,18 +2865,25 @@ void app_run(void) {
      const char *wifi_ssid = NULL;
      const char *wifi_pwd = NULL;
  
@@ -8300,7 +8902,7 @@ index 1030652..e8fa4de 100644
      }
  
      if (wifi_ssid) {
-@@ -2852,7 +2867,7 @@ void app_run(void) {
+@@ -2852,7 +2891,7 @@ void app_run(void) {
          led_status_set_state(LED_STATE_WIFI_CONNECTING);
          char joined[WIFI_KNOWN_SSID_MAX + 1] = {0};
          bool wifi_joined;
@@ -8309,7 +8911,7 @@ index 1030652..e8fa4de 100644
              wifi_joined = wifi_mgr_connect(wifi_ssid, wifi_pwd, WIFI_CONNECT_TIMEOUT_MS);
              snprintf(joined, sizeof(joined), "%s", wifi_ssid);
          } else {
-@@ -2865,7 +2880,7 @@ void app_run(void) {
+@@ -2865,7 +2904,7 @@ void app_run(void) {
              ui_set_wifi(joined);
              ui_set_status("wifi_connected");
              led_status_set_state(LED_STATE_WIFI_CONNECTED);
@@ -8425,3 +9027,19 @@ index 0c74b08..74ebbb8 100644
  }
  
  void muse_glue_storage_ready(void) {
+diff --git a/esp32/partitions_muse.csv b/esp32/partitions_muse.csv
+index ed4e0c8..66d2abc 100644
+--- a/esp32/partitions_muse.csv
++++ b/esp32/partitions_muse.csv
+@@ -25,3 +25,11 @@ ota_0,     app,  ota_0,   0x20000,  4M,
+ ota_1,     app,  ota_1,   0x420000, 4M,
+ prod_data, data, 0x40,    0x820000, 0x1000,
+ prod_bak,  data, 0x41,    0x821000, 0x1000,
++# 唤醒词的模型（esp-sr 的 WakeNet）。名字必须就叫 model：esp-sr 的 CMakeLists 用
++# partition_table_get_partition_info("--partition-name model") 找它，找不到就只打印
++# 一句提示、不生成 srmodels.bin，运行期 esp_srmodel_init("model") 返回空。
++# 只往尾巴上加，上面每一行的偏移都没动 ⇒ NVS(0x11000) 里存的 Wi-Fi、link_url、
++# mic_mode 全部保留，换这张表不用重新配网。
++# 3 MB 装得下一个中文模型（实测 wn9 系列每个约 291 KB），剩下的留给以后换词。
++# 16 MB flash 到 0x1000000，这里到 0xB22000，后面还有约 4.8 MB 空着。
++model,     data, spiffs,  0x822000, 0x300000,

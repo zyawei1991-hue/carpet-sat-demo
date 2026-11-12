@@ -2604,3 +2604,114 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
   句尾用能量判（`muse_vc_peak` / rms 那几个现成的原语），不引 VAD 模型；
   模型走**新追加的分区**（现有偏移一个不动 ⇒ NVS 和设置全保住）；
   开关走 `muse_settings` 现成的 bool 那一套 + 设置页同风格的一格，**不新增页面**。
+
+### 18.4 落地了：引擎那一整条都称到了，**真人语音唤醒没称到**（卡在台架没有能出声的设备）
+
+§18.3 那六条设计取向全部照做了，没有一条改路线。代码已编已刷已开机称过，
+补丁已重打（34 个文件 / 5819+ / 86−，`muse/README.md` §2 那张表逐行更新过）。
+
+**落了哪七处**（都在 `muse-carpet.patch` 里）：
+`carpet/carpet_wake.c/.h`（新）、`idf_component.yml` 那条带 rule 的 `espressif/esp-sr ==2.4.7`、
+`partitions_muse.csv` 尾部追加的 `model` 分区、`devices/sdkconfig.carpet` 选词 + 实测开销注释、
+`main/app.c` 关 BLE 腾内部 RAM、`muse_settings.c/.h` + `muse_settings_ui.c` 那一格开关、
+`muse_voice.c` 的免按键一轮（喂块 + 命中后走按键同一条路 + 能量判句尾）。
+
+#### 称到了（COM8，本轮我自己占的口；下面都是串口原文）
+
+- **模型真的从新分区 mmap 上来了、引擎真的起来了**：
+  ```
+  I (1059) MODEL_LOADER: Successfully load srmodels
+  I (1098) carpet.wake: 唤醒词就绪：「你好小安」 模型=wn9_nihaoxiaoan_tts2 一块=512 样本(32 ms)@16000 Hz
+  I (1107) carpet.wake: create() 用了 34.0 ms：内部 free 204263→183135 最大块 131072→98304 | PSRAM free 4652812→4329948
+  ```
+  ⇒ 吃内部 21,128 B、最大连续块 131072→98304、PSRAM 322,864 B。
+  分区表是用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对的，**现有偏移一个没动**；
+  esptool 命令行里有 `0x822000 .../srmodels/srmodels.bin`，5 个写入段全 `Hash of data verified.`。
+- **屏上教人念的是中文，不是拼音**。这是一个只有实读模型才发现的坑：
+  `esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段**原文**
+  （esp-sr `src/model_path.c` 的 `get_wake_words_from_info`），四个候选都实读过，
+  只有「你好小安」那份写的是 `nihaoxiaoan`，另外三份（你好东东/你好小益/你好小智）本来就是中文。
+  加了一行 strcmp 译回来，重编重刷后回读 `word=你好小安`。
+- **实时喂得上，没有第二个麦克风读者**：`>wake` 回读
+  ```
+  @wake ready=1 word=你好小安 chunk=512 on=1 inhibit=0 live=0 armed=0
+  @wake blocks=1454 hits=1 dropped=62 cool=0 detect avg=2.74 ms worst=4.61 ms
+  @wake create 之后 int=183135/98304 psram=4329948 | 现在 int=44155/29696 psram=2896104
+  ```
+  `blocks` 跟墙钟对得上（1878 块 ≈ 60 s ÷ 32 ms），空闲时 `dropped=0`；
+  那 62 = `COOL_BLOCKS`，就是命中后那 2 s 不应期，不是丢块。
+  detect 一块 32 ms 音频平均 2.74 ms、最坏 4.61 ms ⇒ **约 8.6% 一个核**。
+- **内部 RAM 是靠关 BLE 腾出来的，这一步不做这功能装不下**：
+  `I (1489) link.app: BLE setup skipped on the car screen; internal RAM goes to voice`；
+  同一份心跳从 `int=16K/8K min=6K` 变成 `int=73K/56K min=62K`，
+  带上引擎之后稳态 `int=43K/29K min=32K`（引擎要 21 KB 总量 / 12 KB 连续，旧余量根本不够）。
+  app 镜像 3,346,432 B，4M 槽还余 847,872 B（20%）；`srmodels.bin` 291,068 B。
+- **不 panic**：带引擎连续跑几分钟，心跳照常，没有重启循环。
+- **一处顺手修的误导性读数（我这轮自己引入的），已重编重刷称到**：关了 BLE 之后心跳还在报
+  `setup=advertising … ble=advertising` —— `enter_advertising_state()` 照旧贴标签，
+  而协议栈根本没起来。已改成 carpet 构建下报 `off` 并直接 return，第二次刷机（只 `app-flash`，
+  分区表和模型没动）后回读原文：
+  ```
+  I (1494) link.app: boot: unpaired - BLE off on the car screen
+  I (1499) link.app: setup stage: idle -> off
+  I (9093) link.heartbeat: hb t=8s setup=off wifi=down ws=down raw=down ble=off int=43K/29K min=32K …
+  ```
+  理由和 §18.2 那条一样：**下一轮排查唯一能读到的就是这两格，不能让它说假话。**
+- **同一轮还称到一个有用的负结果**：修完标签后让它安静跑了 ≈26 s，
+  `@wake blocks=821 hits=0 dropped=0 cool=0 detect avg=2.75 ms worst=4.00 ms`
+  ⇒ 环境静音下**0 误触发、0 丢块**，引擎也照常 `ready=1 word=你好小安`。
+  注意这只是安静房间里的 26 s，**不等于开车噪声下的误触发率**，那个数还没有。
+
+#### 没称到（卡在哪，说清楚）
+
+- **真人语音唤醒 —— 这是唯一真正的验收项，没称到。**
+  卡点不在代码，在**这台 PC 没有能把声音送到板子上的物理输出设备**。
+  用板子自己的开机麦克风电平自检当声级计（`muse_audio_selftest`，18 dB 增益），
+  放音期间与不放音的基线对比：
+
+  | 放音设备 | 板载麦克风读数（原文） |
+  |---|---|
+  | 不放音（基线） | `mic L -78.9 dBFS (peak 12, dc 0)` |
+  | 默认设备 | `mic L -78.8 dBFS (peak 13, dc 0)` |
+  | Senary | `mic L -77.2 dBFS (peak 48, dc 0)` |
+  | Mivsn Out | `mic L -79.1 dBFS (peak 13, dc 0)` |
+
+  三个设备全在基线 1~2 dB 内、峰值 12~48（满量程 32768）⇒ **到板子的是数字静音**。
+  所以 `wake-detect1.txt` 里那一次
+  `I (22057) carpet.wake: 命中「你好小安」（第 507 块，累计 1 次）`
+  **不能算成"检测成功"** —— 同一时刻板子自己没在出声（那一段日志只有心跳和 `lcd_bands`），
+  播放的又是 edge-tts 造的「你好小安」clip，但声音根本没到麦克风。
+  这一次要当**一次误触发**看。后两轮各放 10 次，`hits=0`。
+  ⇒ 检测率、误触发率、真人念这个词能不能中，**三个数都还没有**。
+- **免按键那一整轮**（命中 → 点亮 → 录 → 静音收口 → 发给手机）：没称到，
+  因为它要 `armed=1`，也就是要手机热点 + App 真的连上并申报 v4（§18.2 那件事还没闭）。
+  现在回读是 `armed=0`，命中之后只会走「对着屏说话还没开」那一格。
+- **设置页那一格的视觉渲染**：没称到（串口读不到屏上的字）。代码走的是
+  `muse_lang_montserrat()` 挂的**全量** Noto 16px fallback（7765 个码位），
+  所以**不需要重跑字库子集脚本** —— 那份 683 字的 `carpet_font.ttf` 只服务 `carpet_page.c`。
+- **`voice_task` 的栈高水位**：没称到（这条任务没加回读口）。它现在多干一件事
+  （每 20 ms 喂一次引擎 + 一个 1 秒 float 滑窗在 .bss），栈还是 6144 字节。
+
+#### 待 owner 拍的三件事（其余不用他看）
+
+1. **唤醒词就用「你好小安」吗？** 备选：你好东东（同为轻档，开销一样）、
+   你好小益 / 你好小智（都是 wakenet9**l** 重档，CPU/内存约 1.3 倍）。
+   换词只改 `sdkconfig.carpet` 一行 + **重新全片刷**（`srmodels.bin` 跟着重打）。
+   **商标这一条必须他拍**：esp-sr 的 README 顶上写着商用前得确认自己是该唤醒词的权利人
+   或已拿到授权。「你好小安」的权利归属**我没查过**，别当成已经清过。
+2. **这一版起 BLE 配网没了**（carpet 构建跳过 BLE 启动，为了那 41 KB 内部 RAM）。
+   车联屏本来就不用 BLE 配网（从自己的 Wi-Fi 页入热点再拨 App），所以演示路径不受影响；
+   但要知道这是个取舍，退回官方行为把 `app.c` 那个 `#if` 去掉即可。
+3. **验收动作只有一个：他对着屏说「你好小安」。** 台架没有能出声的设备，这一条我在这儿称不了。
+   说之前先确认设置页「声音」里 `Wake word` 是开的（出厂默认开），
+   串口 `>wake` 能看到 `ready=1 word=你好小安`；说完看 `hits` 有没有 +1。
+   要它真的走完一轮对话，还得手机热点 + App 连着（`armed=1`）。
+
+#### 装机注意（和上一版不一样）
+
+**第一次装这一版必须全片刷**：分区表变了、`srmodels.bin` 要写进新的 `model` 分区。
+只 `app-flash` 的话 `esp_srmodel_init("model")` 找不到分区、返回空，
+现象是"编译刷机全成功、唤醒词永远 `ready=0`"，**日志里一句报错都没有**。
+全片刷过一次之后，只改代码就可以回到 `app-flash`。
+全片刷重写分区表但**不擦 NVS**（偏移没动）⇒ 配网、`link_url`、`mic_mode`、`wake_on` 都还在。
+`muse/README.md` §3 第 4 步已改（上一版那里写的"别全片刷"现在不成立）。
