@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,6 +22,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -583,8 +587,12 @@ private fun TierRow(label: String, tier: PrivacyTier, onPick: ((PrivacyTier) -> 
 }
 
 /**
- * 设备与底座。**这一张念的是台账（[com.carpet.satdemo.core.devices.DeviceBus]），不是卡片自己编的状态**：
- * 卫星终端、圆屏、手机传感器各自一行，掉线的那行留在原地写清"最后一次见到是几点"。
+ * 设备与底座中心（V1.24：终端层的一等入口，不只是场景里的一张卡）。
+ *
+ * 三层架构里终端层的规则是：**设备是一等公民，在线 / 离线 / 不在场三态分明** ——
+ * [com.carpet.satdemo.core.devices.DeviceLink] 本来就是四态，这里照台账念，不在卡片里再判一次色。
+ * 圆屏的**配对表单整个从首页搬到这里**（首页只留状态）：允许接入开关、白名单、编号输入、
+ * 接入点、配对说明 —— 一次性配置动作归设备中心，天天看的状态归首页。
  *
  * 台账放在场景之外，所以切场景、切 Tab 都不会让一台设备从页面上消失再出现（§5.3 硬要求 #2）。
  */
@@ -594,8 +602,10 @@ fun DeviceManagerCard(s: CardScope) {
     val list = s.app.devices.collectAsState().value
     val now = System.currentTimeMillis()
     val allowed = s.app.allowedScreens()
+    val acceptScreens by s.app.flags.collectAsState()
+    var draft by rememberSaveable { mutableStateOf("") }
     InkCard(icon = MIcons.terminal) {
-        CardTitle("我的设备", trailing = if (st.running) "守护运行中" else "守护已停")
+        CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")
         // 这一行必须是"钉住了没"，不是"守护开着没"：权限没批的时候 1Hz 照跑，
         // 但锁屏久了会被系统冻住，报"运行中"就是假话
         ValueRow(
@@ -610,8 +620,79 @@ fun DeviceManagerCard(s: CardScope) {
             Text("还没有设备。开启守护后会自动登记", style = Type.Caption)
         }
         list.forEach { d -> LedgerRow(s.app, d, now) }
+
+        HairLine()
+        // ── 圆屏接入 ── 下面这几样是配对动作，不是状态：搬进设备中心后首屏只留"连没连上"
+        SectionHead("圆屏接入", "配对、白名单都在这里")
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = Grid.x4).defaultMinSize(minHeight = 48.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("允许圆屏接入", style = Type.Body, modifier = Modifier.weight(1f))
+            Switch(checked = acceptScreens.acceptScreens, onCheckedChange = { s.app.setFlag(acceptScreens.copy(acceptScreens = it)) })
+        }
+        // **接入点必须直给**（V1.18 那条理由仍然成立）：同一个路由器下接不上，
+        // 唯一要动手的就是把这一行抄到屏上
         ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)
-        ValueRow("白名单", if (allowed.isEmpty()) "空" else allowed.joinToString())
+        if (allowed.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
+                SectionHead("白名单", "点一下移出，并立刻断开")
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+                ) {
+                    allowed.forEach { id ->
+                        // 台账里那台的链接状态才是"现在通不通"；只认白名单会把"填过号但从没来过"画成绿的
+                        val link = list.firstOrNull { it.title == id }?.link
+                        Box(
+                            modifier = Modifier
+                                .clickable { s.app.revokeScreen(id) }
+                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Badge(
+                                id,
+                                when (link) {
+                                    is DeviceLink.Online -> Tone.Ok
+                                    is DeviceLink.Degraded -> Tone.Wait
+                                    is DeviceLink.Connecting -> Tone.Wait
+                                    is DeviceLink.Offline -> Tone.Alert
+                                    else -> Tone.Neutral
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("圆屏编号", style = Type.Caption) },
+                    singleLine = true,
+                    textStyle = Type.Body,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Ink.Sat,
+                        unfocusedBorderColor = Ink.Track,
+                        focusedTextColor = Ink.TextHigh,
+                        unfocusedTextColor = Ink.TextHigh,
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { if (s.app.pairScreen(draft)) draft = "" }),
+                )
+            }
+            Button(
+                onClick = { if (s.app.pairScreen(draft)) draft = "" },
+                colors = ButtonDefaults.buttonColors(containerColor = Ink.Sat, contentColor = Ink.Deep),
+            ) { Text("加入") }
+        }
         // 出厂那个 id 一旦被移出白名单，现场就没有第二台屏能顶上来了，所以这里必须能放回去
         if (!allowed.contains(ScreenLinkServer.DEFAULT_SCREEN_ID)) {
             Button(
@@ -619,6 +700,13 @@ fun DeviceManagerCard(s: CardScope) {
                 colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
             ) { Text("放回出厂那台圆屏", style = Type.Caption) }
         }
+        CollapsableNote(
+            "配对怎么做",
+            "两种接法，选一种：\n" +
+                "① 常用：手机开 2.4GHz 热点，圆屏出厂就拨 ws://192.168.43.1:8443（手机在热点里的固定地址），屏上什么都不用填。\n" +
+                "② 同一个路由器：手机和圆屏连同一个 Wi-Fi 也行 —— 服务器监听所有网卡，只是圆屏出厂不知道手机被路由分到了哪个地址，所以第一次要在屏上「设置→WI-FI→接入点」把上面那行的地址原样打进去（之后屏自己记住，不用再填）。\n" +
+                "拨不通先看两点：路由器有没有开「AP 隔离」（开了两台设备互相看不见，换 ① 或关掉它）；手机上是不是同时开着热点（那样接入点那行可能报的是热点地址，屏走路由器时用不上）。",
+        )
     }
 }
 

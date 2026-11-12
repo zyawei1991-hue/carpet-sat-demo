@@ -137,8 +137,7 @@ fun SceneActions(actions: List<String>, app: AppRuntime) {
 
 /** 卡片流的管理：隐藏 + 上移。§5.1 里"可排序、可隐藏"就落在这两件事上 */
 @Composable
-fun CardManager(app: AppRuntime, keys: List<String>) {
-    val hidden by app.hiddenCards.collectAsState()
+fun CardManager(app: AppRuntime, keys: List<String>, hidden: Set<String>) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Grid.x4),

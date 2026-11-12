@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.runtime
 
+import com.carpet.satdemo.core.ai.MicUplink
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.diagnostic.PassthroughLog
 import com.carpet.satdemo.core.devices.Device
@@ -661,7 +662,48 @@ class DemoRuntime(
             true
         }
         CommandType.page_report -> reportScreenPage(args?.stringOf("page"))
+        CommandType.mic_chunk -> ingestMicChunk(args)
         else -> false
+    }
+
+    /**
+     * v4 上行：屏把按住说话那一段 PCM 推上来。拼齐一段就交 [onMicSegment]，
+     * 转写和入对话归宿主 —— core 不知道网关在哪。
+     *
+     * **帧的形状对齐 v3 下行**（同一组 args 键，2560 字节一块），但值域按屏侧上行口径卡死：
+     * 8 秒 = 100 帧 = 256 KB，超出/缺号/采样率不对整段作废 —— 半句语音比没有更难解释。
+     */
+    private val micCollector = MicUplink.Collector()
+
+    /** 拼齐一段上行语音。宿主拿它封 WAV → 转写 → `dialog{dir:"up"}` 走对话那条线 */
+    var onMicSegment: (MicUplink.Segment) -> Unit = {}
+
+    private fun ingestMicChunk(args: JsonObject?): Boolean {
+        val turnId = args?.stringOf("turn_id")
+        val b64 = args?.stringOf("b64")
+        if (turnId.isNullOrBlank() || b64.isNullOrEmpty()) {
+            log("mic_chunk 缺 turn_id 或 b64，这一帧扔掉")
+            return false
+        }
+        val seq = args.intOf("seq") ?: -1
+        val total = args.intOf("total") ?: -1
+        val rate = args.intOf("rate") ?: -1
+        val chunk = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrElse {
+            log("mic_chunk 的 b64 解不开，这一帧扔掉")
+            return false
+        }
+        return when (val r = micCollector.ingest(turnId, seq, total, rate, chunk)) {
+            is MicUplink.Collector.Result.More -> true
+            is MicUplink.Collector.Result.Done -> {
+                log("上行 m-段收齐：${r.segment.frames} 帧、${r.segment.pcm.size} 字节（%.1f 秒语音）".format(r.segment.seconds))
+                onMicSegment(r.segment)
+                true
+            }
+            is MicUplink.Collector.Result.Reject -> {
+                log("上行语音作废：${r.reason}")
+                false
+            }
+        }
     }
 
     /**

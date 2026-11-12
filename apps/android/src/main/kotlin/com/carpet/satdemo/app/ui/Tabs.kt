@@ -23,10 +23,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ai.PermissionTier
-import com.carpet.satdemo.core.ai.TurnScene
 import com.carpet.satdemo.core.runtime.DemoRuntime
+import com.carpet.satdemo.app.ui.viewmodel.MeAssistantUi
+import com.carpet.satdemo.app.ui.viewmodel.MeUiState
+import com.carpet.satdemo.app.ui.viewmodel.MeViewModel
+import com.carpet.satdemo.app.ui.viewmodel.familyVm
+import com.carpet.satdemo.app.ui.viewmodel.meVm
+import com.carpet.satdemo.app.ui.viewmodel.vehicleVm
 
 /**
  * Tab2/3/4 三页。它们和 Tab1 用的是同一个注册表、同一个 CardScope，
@@ -73,9 +79,19 @@ private fun Page(
 @Composable
 fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
+    val vm = vehicleVm(app)
+    val ask by vm.ask.collectAsState()
+    val cards by vm.cards.collectAsState()
     Page("车辆", "用车养车 · 卫星兜底", modifier = modifier) {
-        SceneAsk(app, TurnScene.vehicle, status.screenPage, "问一句这辆车", listOf("车在哪", "下次过境", "围栏开着吗"))
-        CardStream(app.orderedCards(Scene.Vehicle), scope, grouped = true)
+        SceneAsk(
+            app,
+            ask,
+            screenOnThisPage = vm.isScreenOnPage(status.screenPage),
+            placeholder = "问一句这辆车",
+            prompts = listOf("车在哪", "下次过境", "围栏开着吗"),
+            onAsk = vm::ask,
+        )
+        CardStream(cards, scope, grouped = true)
         SceneActions(app.scene.value.profile.actions, app)
     }
 }
@@ -93,6 +109,8 @@ fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier =
 @Composable
 fun FamilyTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val scope = CardScope(app, status)
+    val vm = familyVm(app)
+    val ask by vm.ask.collectAsState()
     val keys = listOf(
         "dock",
         "fence", "position", "sos",
@@ -102,7 +120,14 @@ fun FamilyTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
     )
     Page("家人", "亲子陪伴 · 健康助手 · 共享对象", modifier = modifier) {
         // 「娃在屏上说了啥」这一问读的就是那份记录：圆屏在亲子页时说的话已经归到这一串里
-        SceneAsk(app, TurnScene.family, status.screenPage, "问一句家里", listOf("娃在屏上说了啥", "额度还剩几条", "圆屏怎么连"))
+        SceneAsk(
+            app,
+            ask,
+            screenOnThisPage = vm.isScreenOnPage(status.screenPage),
+            placeholder = "问一句家里",
+            prompts = listOf("娃在屏上说了啥", "额度还剩几条", "圆屏怎么连"),
+            onAsk = vm::ask,
+        )
         CardStream(keys, scope, grouped = true)
     }
 }
@@ -116,35 +141,49 @@ fun MeTab(
     modifier: Modifier = Modifier,
 ) {
     val scope = CardScope(app, status)
-    val flags by app.flags.collectAsState()
+    val vm = meVm(app)
+    val s by vm.uiState.collectAsState()
+    // 首帧 Loading：这一页没有 Loading 骨架，等状态到了再画
+    val ready = s as? MeUiState.Ready ?: return
     Page("我的", "设备 · 订阅 · 隐私", modifier = modifier) {
         RenderCard("device.manager", scope)
         InkCard(icon = MIcons.task) {
             CardTitle("运行与服务")
+            val guardHaptic = rememberConfirmHaptic()
             ToggleRow(
                 "守护服务",
-                status.running,
+                ready.guardRunning,
                 "关掉后圆屏会断开，锁屏时也不再报位置",
-            ) { on -> app.setGuard(on) }
-            ToggleRow("允许圆屏接入", flags.acceptScreens, "开着才能把新圆屏配对进来；关掉后陌生设备一律拒绝") {
-                app.setFlag(flags.copy(acceptScreens = it))
+            ) { on ->
+                if (on) guardHaptic()
+                vm.setGuard(on)
             }
-            ToggleRow("演示模式", flags.demoMode, "把等待和过境都缩到几分钟，演示时一次看完") {
-                app.setFlag(flags.copy(demoMode = it))
+            ToggleRow("允许圆屏接入", ready.flags.acceptScreens, "开着才能把新圆屏配对进来；关掉后陌生设备一律拒绝") {
+                vm.setAcceptScreens(it)
+            }
+            ToggleRow("演示模式", ready.flags.demoMode, "把等待和过境都缩到几分钟，演示时一次看完") {
+                vm.setDemoMode(it)
             }
         }
         InkCard(icon = MIcons.guard) {
             CardTitle("守护开关")
+            // 这三枚开关都会让卫星开始/停止发消息（哨兵平安报、围栏出区报），是有后果的动作：
+            // 落下的那一下给触觉确认（UX #27），和 SOS 布防的分段震动同一族
+            val confirmHaptic = rememberConfirmHaptic()
             ToggleRow(
                 "哨兵模式",
-                status.snapshot?.sentinel?.armed == true,
-                "车停稳一段时间就报个平安，动过就留一个轨迹点") { app.setSentinel(it) }
+                ready.sentinel,
+                "车停稳一段时间就报个平安，动过就留一个轨迹点") {
+                confirmHaptic(); vm.setSentinel(it)
+            }
             ToggleRow(
                 "电子围栏：西湖景区",
-                status.snapshot?.fence?.active == true,
-                "车开出这个范围就用卫星发一条，不用等手机信号") { app.setFence(it, "西湖景区") }
+                ready.fence,
+                "车开出这个范围就用卫星发一条，不用等手机信号") {
+                confirmHaptic(); vm.setFence(it, "西湖景区")
+            }
         }
-        AssistantSettings(app)
+        AssistantSettings(vm, ready.assistant)
         RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
@@ -161,7 +200,10 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onChange(!checked) },
+            .clickable { onChange(!checked) }
+            // 触摸下限（Material 44dp / 我们的口径 48dp）：两行文字自身只有 ~38dp 高，
+            // 没有这一条，说明文字一短整行就矮下去，指头得瞄准标题那一行
+            .defaultMinSize(minHeight = 48.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -186,20 +228,17 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
  * 中间那道缝就是这两件事的分界。
  */
 @Composable
-private fun AssistantSettings(app: AppRuntime) {
-    val endpoint by app.aiEndpoint.collectAsState()
-    val granted by app.aiGranted.collectAsState()
-    val rows = remember(granted) { app.aiSkills() }
-    InkCard(icon = MIcons.agent, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
+private fun AssistantSettings(vm: MeViewModel, s: MeAssistantUi) {
+    InkCard(icon = MIcons.agent, tone = if (s.endpoint.configured) Tone.Sat else Tone.Neutral) {
         // 端点与密钥不再摆出来（V1.18）：出包时就配好了，车主没有需要填的东西
-        CardTitle("它能帮到什么程度", trailing = if (endpoint.configured) endpoint.model else "只用手上的信息回答")
+        CardTitle("它能帮到什么程度", trailing = if (s.endpoint.configured) s.endpoint.model else "只用手上的信息回答")
         // 档位标题必须大过它管的三枚芯片。之前这里用 11sp 的 SectionLabel，
         // 而下面的芯片是 12.5sp —— 屏幕上是小字在领读，标题在当注脚
-        SectionHead("放手交给它多少", "现在停在「${granted.label}」")
+        SectionHead("放手交给它多少", "现在停在「${s.granted.label}」")
         // 五档一行装不下，横向滚的话最后一枚「不可逆动作」只剩半个词 —— 这是权限档，
         // 切掉的那半恰恰是最该看清的一档。折成 3+2，一枚都不缺字
         ChipBand(PermissionTier.entries.map { t ->
-            ChipSpec(t.label, selected = t === granted) { app.setAiGranted(t) }
+            ChipSpec(t.label, selected = t === s.granted) { vm.setGranted(t) }
         })
         Text(
             "「发求救」它不会自己发，只会提醒你长按那颗按钮。",
@@ -208,8 +247,8 @@ private fun AssistantSettings(app: AppRuntime) {
         )
     }
     InkCard(icon = MIcons.task) {
-        CardTitle("这 ${rows.size} 件事它能做吗", trailing = "${rows.count { it.allowed }} 件可以做")
-        rows.forEach { r ->
+        CardTitle("这 ${s.skills.size} 件事它能做吗", trailing = "${s.skills.count { it.allowed }} 件可以做")
+        s.skills.forEach { r ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),

@@ -52,6 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -59,6 +62,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -436,7 +441,7 @@ fun BlockError(
         // 红点贴第一行字：8dp 的点在 21dp 的高上居中，就是这 7dp
         Dot(Tone.Alert, modifier = Modifier.padding(top = 7.dp))
         Column(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).announceChange(),
             verticalArrangement = Arrangement.spacedBy(Grid.x4),
         ) {
             Text(reason, style = Type.Body, color = Ink.TextHigh)
@@ -708,10 +713,23 @@ fun MockChip() {
     }
 }
 
+/**
+ * 确认类动作的一下触觉反馈（ui-ux-pro-max UX #27：确认/重要动作用、别滥用）。
+ * 目前只挂在三类地方：SOS 布防的分段、守护类开关（哨兵/围栏/守护服务）落下的那一刻、
+ * 圆屏连上的那一下。导航、翻页、勾选一律不震 —— 满屏都在震等于没有反馈。
+ */
+@Composable
+fun rememberConfirmHaptic(): () -> Unit {
+    val haptics = LocalHapticFeedback.current
+    return remember(haptics) { { haptics.performHapticFeedback(HapticFeedbackType.LongPress) } }
+}
+
+/** 告警/状态突变要被读出来（UX #44：错误不能只靠颜色）。挂在状态文本的容器上 */
+fun Modifier.announceChange(): Modifier = semantics { liveRegion = LiveRegionMode.Polite }
+
 /** 状态徽标。文案由调用方给，颜色只从 Tone 里取 */
 @Composable
-fun Badge(text: String, tone: Tone) {
-    Box(
+fun Badge(text: String, tone: Tone) {    Box(
         modifier = Modifier
             .background(tone.color.copy(alpha = Ink.TINT), RoundedCornerShape(Round.Chip))
             .padding(horizontal = Grid.x8, vertical = Grid.x4),

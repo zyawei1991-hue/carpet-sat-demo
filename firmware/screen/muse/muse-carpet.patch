@@ -5624,7 +5624,7 @@ index 0000000..18e2537
 +    PG_FACE, PG_PICKER, PG_VEHICLE, PG_KIDS, PG_AVATAR, PG_CLOCK, PG_GALLERY, PG_COUNT
 +};
 +static const char *const PAGE_NAMES[PG_COUNT] = {
-+    "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery"
++    "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery", "photo"
 +};
 +
 +/* ---------- 条目表 ---------- */

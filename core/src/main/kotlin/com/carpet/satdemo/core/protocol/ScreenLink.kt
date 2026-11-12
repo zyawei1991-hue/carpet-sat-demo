@@ -18,14 +18,17 @@ object ScreenCodec {
      * **v1 的连接仍然全部可用**：state / event / command / ack 的形状一个字段都没改，
      * 所以这里收 1、2、3 三个版本，协商看 `hello.protocols`（不看帧上的 `v` —— 出站帧
      * 因为 encodeDefaults=false 根本不写 `v`，把它当依据会在真固件上猜错）。
-     * 差别只有两条：v2 才发 `dialog`，v3 才发 `audio_chunk`。服务端按连接逐个过滤。
+     * 差别只有几条：v2 才发 `dialog`，v3 才发 `audio_chunk`，**v4 才收 `mic_chunk`**（上行，
+     * 屏把采好的 PCM 推给手机转写 —— 这也是为什么 v4 是入站那一侧的版本：
+     * 收这帧的闸在 [ScreenLinkServer] 的入站路径，不在 broadcast 的逐连接过滤里）。
+     * 服务端按连接逐个过滤。
      *
      * 音频走 `command` 而不是新的 `t`，是因为固件对**解不开的 t 直接关连接**（那边
      * `handle_frame` 的最后一条分支），而不认识的 cmd 只是忽略。一条新帧类型会让任何
      * 没升到 v3 的屏当场掉线，而"掉线"在现场永远被当成 Wi-Fi 抖。
      */
-    const val CONTRACT_VERSION = 3
-    val SUPPORTED_VERSIONS: Set<Int> = setOf(1, 2, 3)
+    const val CONTRACT_VERSION = 4
+    val SUPPORTED_VERSIONS: Set<Int> = setOf(1, 2, 3, 4)
 
     /**
      * 这条连接能不能收对话。取双方都支持的最高版。
@@ -54,7 +57,9 @@ object ScreenCodec {
      * 比退回总览难看得多也更难解释。
      */
     fun forVersion(msg: ScreenMessage, ver: Int): ScreenMessage {
-        if (ver >= CONTRACT_VERSION) return msg
+        // maint 是 v3 加的那一档，判据跟着它的引入版本走，**不能**写成 >= CONTRACT_VERSION：
+        // 那样每抬一次主版本，上一代的屏就被错误降级一次（v3 屏收到 status，"该做的事"一行凭空消失）
+        if (ver >= 3) return msg
         val state = msg.state ?: return msg
         val ui = state.ui ?: return msg
         if (ui.card != UiCard.maint) return msg
@@ -132,6 +137,21 @@ enum class CommandType {
      * 后者才是加性修订该有的失败方式。
      */
     audio_chunk, wake,
+
+    /**
+     * v4 的**上行**指令（其余上行全是"请求"，这条是数据）：屏把按住说话那一段采好的
+     * 16k/单声道/s16le 裸 PCM 按 [audio_chunk] 同一套 args（`turn_id/seq/total/rate/b64`）
+     * 一口气推给手机，手机拼齐、转写（`SiliconFlowAsr.transcribe`），再照 v3 那条下行把
+     * `dialog{dir:"up"}`（屏该显示的转写）和 `dialog{dir:"down"}`（答句）送回去。
+     * `turn_id` 由屏在按下的那一刻生成（`m-` 前缀），手机**不许另起一个** —— 拼段、去重、
+     * 答句配对全靠它。上限 8 秒 = 100 帧 = 256 KB PCM，超出整段拒收。
+     *
+     * 加这一枚的同时 `CONTRACT_VERSION` 必须同版抬到 4：屏那道闸现在认的是
+     * **帧外层的 `v` ≥ 4 且 ack.protocols ∋ 4 两个都点头**，只报 4 而解不了的版本
+     * 实测 `armed=0` 一条上行都不发 —— 申报和实现分家比不申报更危险
+     * （`protocol/screen-link.md` §上行音频通道）。
+     */
+    mic_chunk,
 }
 
 /**
@@ -150,7 +170,7 @@ enum class CommandType {
  * 换来的只有演示现场一次切不过去（和 [UiCard] 里不放 `image` 同一条理由）。
  */
 @Serializable
-enum class ScreenPage { face, picker, vehicle, kids, avatar, clock, gallery }
+enum class ScreenPage { face, picker, vehicle, kids, avatar, clock, gallery, photo }
 
 /**
  * 圆屏**当前那一页里**此刻该说哪件事。**这一层仍由手机定，固件不许自己挑内容**

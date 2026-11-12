@@ -141,6 +141,10 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
 
         EngRow("工程模式日志窗", flags.passthrough) { app.setFlag(flags.copy(passthrough = it)) }
 
+        Text("组件目录", style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+        // 注册表驱动：26 张卡逐张报档并画真身，加卡删卡这里自动跟着变
+        ComponentCatalogue(app, status)
+
         if (flags.passthrough) {
             Text(app.runtime.engineeringWindowHeader(), style = Type.Mono)
             app.runtime.passthrough.snapshot().forEach { line ->

@@ -26,8 +26,8 @@ android {
         // 星历 SDK 要 26（基础通信 SDK 只要 24），装到 24/25 上是 native 库起不来，不是少个功能
         minSdk = 26
         targetSdk = 34
-        versionCode = 12000
-        versionName = "1.20.0"
+        versionCode = 12600
+        versionName = "1.26.0"
 
         // 星历 aar 只带 arm64-v8a 的 libdecodeutil.so。真机都是 arm64，
         // 但别在这里加 abiFilters 之外的假设：换了 SoC 就得回来改
@@ -158,6 +158,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    // ViewModel 拿在 composable 手里要靠这个：viewModel {} 的入口住在这个包，
+    // runtime-compose 只有 collectAsStateWithLifecycle，不给 VM 的获取通道
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     // 只在 debug 变体里注册一个空 Activity 供 Compose 测试规则宿主使用（release 包不受影响）
     debugImplementation("androidx.compose.ui:ui-test-manifest")

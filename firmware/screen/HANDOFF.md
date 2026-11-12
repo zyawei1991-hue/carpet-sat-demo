@@ -767,7 +767,7 @@ gitignored 的 build sdkconfig 里。手机热点那条网已经不参与了，�
 ```c
 /* 页名表：和 core 的 ScreenPage 一字不差。SchemaDriftTest 会读这张表比对，
    名字定死 PAGE_NAMES —— 改了名那条守卫会静默失效 */
-static const char *const PAGE_NAMES[] = { "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery" };
+static const char *const PAGE_NAMES[] = { "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery", "photo" };
 
 /* 翻页处（page_index() 变了那一刻）：通报，不是申请。手机不许驳回，也不该被你去等回执 */
 cJSON *a = cJSON_CreateObject();
