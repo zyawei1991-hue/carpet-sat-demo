@@ -27,14 +27,15 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 30 个文件、5274 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，8,410 行 / 438,957 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-11 夜里连着两轮重打后实读的：
-  「对着屏说话」（v4 上行 + 那道闸）和「屏拨不上号」（ws 那两条 buffer 挪进 PSRAM、栈阶梯删掉 2048 那一档、
-  上行许可改成要看整帧的 `v`）：
+- 我们的全部改动 = 30 个文件、5291 行新增 / 86 行删，其中一份是 154,528 字节的字库
+  （`muse-carpet.patch`，8,427 行 / 440,190 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-12 实读的，
+  比 11-11 夜里那版多的 17 行只有一处：`on_ack()` 改成**无条件**回读「整份契约 v + protocols」
+  （旧版在"没报 protocols"和"报了 4 但 v 还是 3"这两种失败情形下**一行日志都不打**，
+  而现场恰好就是这两种之一 ⇒ 屏上只说「对着屏说话还没开」，串口里查不出为什么）：
   ```
   （下面每一行的两个数是实读的「新增行数 + / 删除行数 -」，只写一个数的是整份新文件；
-  上一版这张表用的是 diffstat 那一列合成数，和 5274/86 对不上，从这一轮起改成分开写）
+  上一版这张表用的是 diffstat 那一列合成数，和 5291/86 对不上，从这一轮起改成分开写）
   esp32/components/muse/CMakeLists.txt       |  22 + /   1 -   (+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行)
   esp32/components/muse/Kconfig              |  30 + /   1 -   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 154528   (新，字库；页面上 28/22 两档的词表)
@@ -44,7 +45,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_audio.h |  61 +   (新)
   esp32/components/muse/carpet/carpet_diag.c | 226 +   (新，11-09 深夜「断电验尸」：NVS 命名空间 `cdiag` 一圈 24 条，每条带同一组 PMU 原始寄存器 + VBAT；`>diag` 翻、`>diag clear` 抹。开机那两条**先存 RAM**，等 NVS 写得动了再补 —— 第一版没绕这一道，刷完实测 `>diag seq=0`，两条开机记录当场静默丢失，根因就是 §2 下面那条"`carpet_link_start()` 早于 `muse_settings_init()`"。)
   esp32/components/muse/carpet/carpet_diag.h |  41 +   (新，那五个入口：latched / boot / event / tick / dump)
-  esp32/components/muse/carpet/carpet_link.c | 1228 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」 + 11-11 晚：契约 v4 那三处接线 —— `on_ack()` 读 `protocols` 里有 ≥4 就 `carpet_mic_phone_declared(true)`、`on_connected()` 把它清掉（每一连重新判一次，不给跨会话缓存）、`on_disconnected()` 叫 `carpet_mic_link_lost()` 掐掉在录的那一段，`carpet_link_start()` 尾部补 `carpet_mic_init()`，`>carpet` 那一行尾部多印 `mic=<模式> armed=<0|1>` + 11-11 夜：`on_ack(ack, v)` 多收一个 envelope 的 `v`，许可改成 **`v >= 4` 且 `protocols ∋ 4` 两个都点头**；只报 4 而 `v` 还是 3（= 今天装机那版：申报发早了、`CommandType` 里没 mic_chunk，收到就关线）当场留一行 W 说明为什么不开上行)
+  esp32/components/muse/carpet/carpet_link.c | 1245 +   (新，v3 链路 + 上行命令队列 + page_report + 首屏那条带念稿 + `>audio` 探针 + on_command/几何申报 + 口型翻页跟播放位置 + maint 担心的脸三道让路 + `>maint` 造帧口 + 11-08：接入点地址运行期可设那一层 `url_read/url_effective/link_open/carpet_link_set_url/carpet_link_url_dump` + 11-09：`carpet_link_dial_fails`/`carpet_link_last_error` 两个转发、`@url`/`@carpet` 多印 `fails=` `err=` + 11-09 深夜：`carpet_link_start()` 顶上叫一次 `carpet_diag_boot()` + 11-10 深夜：`gate_task` 那道门不再一次性 —— `GATE_RETRY_S[] = {5,15,30,60}` 重拨阶梯，外加两条任务用完各自的栈高水位回读，`url_restart()` 那格从 4096 字降到 2048 字，OOM 那行多印「内部 RAM 多少空闲/最大连续」 + 11-11 晚：契约 v4 那三处接线 —— `on_ack()` 读 `protocols` 里有 ≥4 就 `carpet_mic_phone_declared(true)`、`on_connected()` 把它清掉（每一连重新判一次，不给跨会话缓存）、`on_disconnected()` 叫 `carpet_mic_link_lost()` 掐掉在录的那一段，`carpet_link_start()` 尾部补 `carpet_mic_init()`，`>carpet` 那一行尾部多印 `mic=<模式> armed=<0|1>` + 11-11 夜：`on_ack(ack, v)` 多收一个 envelope 的 `v`，许可改成 **`v >= 4` 且 `protocols ∋ 4` 两个都点头**；只报 4 而 `v` 还是 3（= 今天装机那版：申报发早了、`CommandType` 里没 mic_chunk，收到就关线）当场留一行 W 说明为什么不开上行 + 11-12：那一行改成**无条件打** —— `ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`，开/不开都留证据；旧版只在"两个数都点头"时才有动静，另两种失败情形一行不打，现场只看到屏上那句「对着屏说话还没开」)
   esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_mic.c | 463 +   (新，11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口)
   esp32/components/muse/carpet/carpet_mic.h |  98 +   (新，那八个入口 + `carpet_mic_mode_t` 三档)
@@ -227,6 +228,23 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     **还差的**：这一整套是拿假手机服务端称的，真机 App 那一头现在**还没有** `mic_chunk` 的解码，
     所以"按下屏上的键对着手机说话"要等 App 补完；而这块板上还需要一只手——真按那个键 + 真人出声
     （台架是 `'d'/'u'` 模拟按键 + 房间底噪，采到的 peak 只有 9 / rms 1 ≈ -71 dBFS，通路有信号但没语音）。
+  - 2026-11-12 「按了键屏说『对着屏说话还没开』，串口里却查不出为什么」这一轮 ——
+    只改一处：`on_ack()` 那一行日志改成**无条件打**（`ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`）。
+    旧版把 `ESP_LOGI` 写在"两个数都点头"的分支里，另两种失败情形（没报 `protocols` / 报了 4 但整份还是 v3）
+    **一行都不打** ⇒ 现场只剩屏上那句话，而 App 那半边的代码不在这棵树里，没这一行就无从判责。
+    patch 只重打 `carpet_link.c` 那一节（`D:/dev/tmp/splice_carpet_audio_patch.py`，3484..4717 → 1251 行），
+    到 **30 个文件 / 8,427 行 / 440,190 字节**（新增 5,291 / 删 86，`carpet_link.c` 解出来 1,245 行）。
+    **验法这一轮换了个更省的**（`D:/dev/tmp/verify_carpet_patch.py`）：不再 `git worktree` 拉整棵上游树，
+    而是空仓里只放 patch 会**修改**的那 16 个文件的 baseline 版（`git show cdc169d:<path>`），
+    `git apply --check` 过 → 真 `git apply` 过（30 节）→ 30 个文件逐个和工作树**逐字节**比。
+    结果 28/30 字节全等，另两个（`carpet_mic.c/.h`）差的正好是"每行一个字节"：
+    **工作树那两份是 CRLF、patch 里是 LF**，把行尾归一后 `same=True` ⇒ 内容没漂，不是漏打。
+    两个坑记在这儿：① 空仓 `git init` 会吃到 Git for Windows **system 级** `core.autocrlf=true`，
+    不 `git config --local core.autocrlf false` 的话 30 个文件会全部报"差一行一个字节"，看着像补丁全坏了；
+    ② 逐字节比之前先归一行尾，否则 CRLF 那两份永远比不平。
+    源码这一版**已编已刷已开机验过**（`Project build complete` / `Hash of data verified.` /
+    `I (1051) carpet_mic: 上行地基就绪…`），**但那一行 ack 还没在真机上读到过** ——
+    要等 owner 把热点和 App 再开一次（记在 `HANDOFF.md` §17.5）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
