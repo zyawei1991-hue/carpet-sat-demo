@@ -2747,8 +2747,9 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
 - 合并时 git **自动**把那一行并了进来（我重打的是别的区域，没冲突），所以不是"冲突了才要选"，
   是**合完必须回头查生成物**。已按工作树重打覆盖回 7 个页名，并重新验过：
   `git apply: OK (34 sections)` / `byte-compare: 32/34`（另 2 份是已知 CRLF）。
-- **schema 和 App 侧那个 `photo` 保留不动**（那是他们那半边，作为提前申报无害：
-  老固件不会报这个页名，手机认不出的页名只记一行日志）。§1 那段示例已改回 7 个并就地注明原因。
+- **schema 和 App 侧那个 `photo` 保留不动**（那是他们那半边，改 App 是 App agent 的活）。
+  §1 那段示例已改回 7 个并就地注明原因。
+  **注意：我原先在这里写"提前申报无害"，那句话已被实测推翻 —— 它会让一条守卫变红，见下面第四条。**
 - **要真落地 `photo` 得先在固件加 `PG_PHOTO` + 那一页**，这是新功能不是改个名字。
   按他们自己的 `docs/ROUND-SCREEN-GESTURES.md` §6，相册是 **P2**、还依赖手机端推图通道 ⇒
   **待 owner 排优先级，本轮不做。**
@@ -2760,3 +2761,39 @@ Avatar 常驻当唯一默认态 + 四方向手势（下拉换场景 / 上滑当�
 落地顺序 P0（Avatar 常驻 + 点击对话）→ P1（场景环、左滑设置）→ P2（右滑氛围、上滑功能）。
 **这是一份草案、也是一摊新工作量，和"唤醒词验收 + 现场演示"是竞争关系，待 owner 拍先做哪个。**
 本轮没动它。
+
+**四、称到了：main 上现在有一条守卫是红的，红的就是上面那件事（不是别的）。**
+
+```
+$ ./gradlew :core:test --offline --console=plain
+329 tests completed, 1 failed          # 其余 328 条全绿，含 v4 那几条
+
+SchemaDriftTest.kt:308
+org.opentest4j.AssertionFailedError: 屏侧 PAGE_NAMES 和 ScreenPage 对不上：
+多的是 []，缺的是 [photo]
+==> expected: <[face, picker, vehicle, kids, avatar, clock, gallery, photo]>
+    but was: <[face, picker, vehicle, kids, avatar, clock, gallery]>
+```
+
+守卫读的是**仓库里那份补丁**的 `PAGE_NAMES`（`SchemaDriftTest.kt:303` 那条正则），
+对面是 `ScreenLink.kt:173` 的 `ScreenPage`（现在 8 个）。所以：
+**他们那笔提交是绿的 —— 因为手改补丁正好把这条守卫喂饱了；我把固件真相恢复回来，它就红了。**
+这条红是守卫在干活，不是守卫坏了。**别为了让它绿去手改补丁**（那正是这一轮的病根）。
+
+我**没有**做的三件事，以及为什么：
+1. **没改 App 代码** —— owner 定的分工是「圆屏侧我修，App 那半边交给 App agent」。
+   而且 `ScreenPage.photo` 是**承重的**：`apps/android/…/ui/ScreenMirror.kt:452 / 462 / 719`
+   三处 `when` 分支在用它，单删枚举会让 App 编不过。撤回得四处一起动，那是他们的活。
+2. **没把守卫放宽成"子集就算过"** —— 那条精确相等是故意写的（同文件 :296-308 的注释）：
+   放宽之后「手机/云端让屏跳去一个屏根本没有的页」就从"当场拦住"变成"现场默默不动"。
+   为了让红灯变绿而削守卫，等于把这一轮抓到的病放回去。
+3. **没在固件里凭空造一页** —— 加 `PG_PHOTO` 是新功能（还依赖手机→屏推图通道），
+   不该由"让测试变绿"这个理由触发。
+
+**两条出路，待 owner 拍（我倾向 ①，因为相册按他们自己的规格是 P2）：**
+① **App 那边把 `photo` 撤回**（`ScreenPage` 枚举 + schema 两处枚举 + `ScreenMirror` 三处分支），
+   等固件真有那一页时**四处在同一笔里一起加**；
+② **固件补 `PG_PHOTO` + 相册页**（P2，依赖推图通道），补完这条守卫自然绿。
+
+**对现场的影响：没有。** 板上跑的是 7 页那份固件，能编能刷能演示；
+这条红拦的是"契约描述了一个屏画不出来的页"，不影响链路、上行、唤醒词。
