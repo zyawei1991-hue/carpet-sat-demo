@@ -6,6 +6,7 @@ import com.carpet.satdemo.core.ai.AiEndpoint
 import com.carpet.satdemo.core.ai.AiGateway
 import com.carpet.satdemo.core.ai.AzureSpeech
 import com.carpet.satdemo.core.ai.DialogBridge
+import com.carpet.satdemo.core.ai.MicUplink
 import com.carpet.satdemo.core.ai.OpenAiCompatProvider
 import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.ai.ReplySource
@@ -999,6 +1000,32 @@ class AppRuntime(private val host: Application) {
      */
     internal fun wireCommands() {
         runtime.onDialog = { msg -> dialog.onScreenFrame(msg) }
+        // 屏上行的那段录音收齐了：封 WAV → 转写 → 合成一帧 dialog{dir:up} 回灌对话那条线。
+        // turn_id 用屏起的那个（m- 前缀），重编号会坏掉问答配对；转写失败只出一句人话，不留半句
+        runtime.onMicSegment = { seg ->
+            scope.launch(Dispatchers.IO) {
+                val text = SiliconFlowAsr.transcribe(MicUplink.pcmToWav(seg.pcm))
+                if (text.isNullOrBlank()) {
+                    withContext(Dispatchers.Main) { say("屏上那句话没转出来：没听清或转写失败") }
+                } else {
+                    withContext(Dispatchers.Main) { say("屏上说了：「$text」") }
+                    dialog.onScreenFrame(
+                        ScreenMessage(
+                            t = MsgType.dialog,
+                            seq = 0,
+                            ts = System.currentTimeMillis(),
+                            dialog = DialogPayload(
+                                turnId = seg.turnId,
+                                dir = DialogDir.up,
+                                text = text,
+                                source = DialogSource.asr,
+                                origin = DialogOrigin.screen,
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
         runtime.onCancelResult = { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
         runtime.onCommand = { msg ->
             // 屏上按出来的呼救和手机上按的是同一件事，那首页就不许留着上一条"撤销中"

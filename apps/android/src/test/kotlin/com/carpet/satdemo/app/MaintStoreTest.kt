@@ -32,7 +32,7 @@ class MaintStoreTest {
         val board = s.board(quotaWaiting = 480, quotaCapacity = 500, quotaReal = false)
         val sg = s.suggest(board).single { it.rule == "quota.pack" }
         // 额度那条数现在是从模拟模组读的 —— 那它就是桩，标必须在
-        assertEquals("示意数据 · 未接真源", sg.badge)
+        assertEquals("示意数字 · 还没接上真车", sg.badge)
         assertEquals(ValueSource.Stub, sg.evidence.first().source)
     }
 
@@ -92,6 +92,6 @@ class MaintStoreTest {
         val s = store()
         assertFalse(s.vinReal)
         assertFalse(s.quotaReal)
-        assertEquals("示意判据 · 未接手册", s.criteria.badge)
+        assertEquals("标准值还是示意，手册没到", s.criteria.badge)
     }
 }

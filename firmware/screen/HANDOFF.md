@@ -766,7 +766,10 @@ gitignored 的 build sdkconfig 里。手机热点那条网已经不参与了，�
 
 ```c
 /* 页名表：和 core 的 ScreenPage 一字不差。SchemaDriftTest 会读这张表比对，
-   名字定死 PAGE_NAMES —— 改了名那条守卫会静默失效 */
+   名字定死 PAGE_NAMES —— 改了名那条守卫会静默失效。
+   【2026-11-13：App 1.26.0 往 schema 和这一行加了第 8 个名字 "photo"，但固件里没有这一页
+   （carpet_page.c 的 enum 到 PG_GALLERY 就 PG_COUNT=7）⇒ 8 个初值配 7 个槽，
+   excess elements in array initializer，直接编不过。已按工作树恢复成 7 个，见 §18.5。】 */
 static const char *const PAGE_NAMES[] = { "face", "picker", "vehicle", "kids", "avatar", "clock", "gallery" };
 
 /* 翻页处（page_index() 变了那一刻）：通报，不是申请。手机不许驳回，也不该被你去等回执 */
@@ -2715,3 +2718,45 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
 全片刷过一次之后，只改代码就可以回到 `app-flash`。
 全片刷重写分区表但**不擦 NVS**（偏移没动）⇒ 配网、`link_url`、`mic_mode`、`wake_on` 都还在。
 `muse/README.md` §3 第 4 步已改（上一版那里写的"别全片刷"现在不成立）。
+
+### 18.5 合并 App 1.26.0：v4 上行真的落地了（`armed=1` 那道闸解锁），但他们手改补丁加了一个固件没有的页
+
+推唤醒词这一轮时远端已经有三笔我没有的提交（`fd88460` 手势规格、`6cbe07a` 合并、
+`9e00844` App 1.26.0）。**没有强推**，正常合并。两件事要记：
+
+**一、App 侧 v4 做完了 —— §18.2 那件悬着的事有答案了。**
+`core/…/protocol/ScreenLink.kt`：`CONTRACT_VERSION = 3 → 4`、`SUPPORTED_VERSIONS = {1,2,3,4}`、
+`CommandType` 加 `mic_chunk`；新增 `core/…/ai/MicUplink.kt`（108 行，拼段 + 转写）；
+`protocol/screen-link.schema.json`：`v` 枚举加 4、`cmd` 枚举加 `mic_chunk`、
+**`ack` 加 `protocols` 数组**（正是屏那道闸要的第二个数）。
+⇒ 屏侧 `on_ack(ack, v)` 现在有机会读到 `v=4 protocols=[…,4]` 两个都点头。
+**但这一行还没在真机上读到过**：要 owner 把热点 + 新版 App 开一次，
+串口看 `ack：整份契约 v=?、protocols=[?] ⇒ 上行开/不开`，再看 `>carpet` 的 `armed=`。
+（顺带：他们把 `forVersion()` 的 `ver >= CONTRACT_VERSION` 改成 `ver >= 3` —— 这是对的，
+原来那种写法每抬一次主版本就把上一代屏的 maint 卡错误降级一次。）
+
+**二、`photo` 页漂移：契约里有，固件里没有，而且他们手改了生成物。**
+他们往三处加了第 8 个页名 `"photo"`：schema 的 `state.ui.page` 枚举、
+`HANDOFF.md` §1 那段 `PAGE_NAMES` 示例、**以及 `muse-carpet.patch` 里那一行**。
+问题在最后一处：
+- 固件 `carpet_page.c:149` 的 enum 是 `PG_FACE … PG_GALLERY, PG_COUNT` ⇒ **`PG_COUNT` = 7**。
+  往 `PAGE_NAMES[PG_COUNT]` 塞 8 个初值是 **excess elements in array initializer，直接编不过**。
+- **`muse-carpet.patch` 是生成物**（`git diff --binary` 从 Muse 工作树打的，见 `muse/README.md` §2
+  那条重打命令）。手改它有两个后果：下一轮重打就被覆盖；改的那一行没有对应的固件实现，
+  于是"补丁能对上 schema"和"固件能编译"这两件事分家了 —— `SchemaDriftTest` 会绿，板子会编不过。
+- 合并时 git **自动**把那一行并了进来（我重打的是别的区域，没冲突），所以不是"冲突了才要选"，
+  是**合完必须回头查生成物**。已按工作树重打覆盖回 7 个页名，并重新验过：
+  `git apply: OK (34 sections)` / `byte-compare: 32/34`（另 2 份是已知 CRLF）。
+- **schema 和 App 侧那个 `photo` 保留不动**（那是他们那半边，作为提前申报无害：
+  老固件不会报这个页名，手机认不出的页名只记一行日志）。§1 那段示例已改回 7 个并就地注明原因。
+- **要真落地 `photo` 得先在固件加 `PG_PHOTO` + 那一页**，这是新功能不是改个名字。
+  按他们自己的 `docs/ROUND-SCREEN-GESTURES.md` §6，相册是 **P2**、还依赖手机端推图通道 ⇒
+  **待 owner 排优先级，本轮不做。**
+
+**三、新来的活：`docs/ROUND-SCREEN-GESTURES.md`（v1 草案）是给屏侧的。**
+Avatar 常驻当唯一默认态 + 四方向手势（下拉换场景 / 上滑当前场景功能 / 左滑设置 / 右滑氛围），
+点 Avatar 永远兜底进对话；SOS 期间四手势冻结、对话中左右滑忽略。
+§7 明确「下行协议不加新帧」，场景切换仍走 `page_report`。
+落地顺序 P0（Avatar 常驻 + 点击对话）→ P1（场景环、左滑设置）→ P2（右滑氛围、上滑功能）。
+**这是一份草案、也是一摊新工作量，和"唤醒词验收 + 现场演示"是竞争关系，待 owner 拍先做哪个。**
+本轮没动它。

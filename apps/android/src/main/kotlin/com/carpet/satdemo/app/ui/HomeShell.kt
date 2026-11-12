@@ -19,22 +19,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,14 +50,16 @@ import com.carpet.satdemo.app.VoiceTone
 import com.carpet.satdemo.core.ai.ReplySource
 import com.carpet.satdemo.core.ai.Turn
 import com.carpet.satdemo.core.ai.TurnFrom
-import com.carpet.satdemo.core.ai.TurnScene
-import com.carpet.satdemo.core.ai.screenSceneOf
-import com.carpet.satdemo.core.devices.DeviceKind
 import com.carpet.satdemo.core.devices.DeviceLink
 import com.carpet.satdemo.core.protocol.DialogOrigin
 import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.runtime.DemoRuntime
-import com.carpet.satdemo.core.screen.ScreenLinkServer
+import com.carpet.satdemo.app.ui.viewmodel.AssistantUiState
+import com.carpet.satdemo.app.ui.viewmodel.DockUiState
+import com.carpet.satdemo.app.ui.viewmodel.AskBarUiState
+import com.carpet.satdemo.app.ui.viewmodel.HomeUiState
+import com.carpet.satdemo.app.ui.viewmodel.HomeViewModel
+import com.carpet.satdemo.app.ui.viewmodel.homeVm
 
 /**
  * 首页（V1.10 按算出来的层级重排）。
@@ -78,11 +75,15 @@ import com.carpet.satdemo.core.screen.ScreenLinkServer
 @Composable
 fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = Modifier) {
     val reduce = LocalReduceMotion.current
-    val scene by app.scene.collectAsState()
     val scope = CardScope(app, status)
+    val vm = homeVm(app)
+    val state by vm.uiState.collectAsState()
     var editing by rememberSaveable { mutableStateOf(false) }
     var satOpen by rememberSaveable { mutableStateOf(false) }
     var moreCards by rememberSaveable { mutableStateOf(false) }
+
+    // 首帧 status==Loading：先不画。这一帧两张卡都没有内容，画出来就是一闪白
+    val ready = state as? HomeUiState.Ready ?: return
 
     Column(
         modifier = modifier
@@ -92,10 +93,14 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
             .padding(top = Grid.x12, bottom = Grid.x24),
         verticalArrangement = Arrangement.spacedBy(Grid.Group),
     ) {
-        HomeRail(app, status)
-        AssistantHero(app)
-        DockGroup(app, status)
-        SatelliteStrip(app, status, open = satOpen, onToggle = { satOpen = !satOpen })
+        HomeRail(app, status, ready.guardOn)
+        AssistantHero(app, vm, ready.assistant)
+        // ② AI 主理人之下是**当下上下文**：圆屏自己报上来的那一页，对应的卡提到卡片流最前面。
+        // 屏在车辆页 = 车里有人正在看它，那一张就是现在最要紧的事
+        val pinned = contextKey(status.screenPage)
+        if (pinned != null) ContextPin(scope, pinned)
+        DockStatusCard(status, ready.dock, onManage = { vm.openDeviceCenter() })
+        SatelliteStrip(app, status, open = satOpen, onToggle = { satOpen = !satOpen }, cancelLine = ready.cancelLine)
         // 那两张卡默认收着。兜底条上那句"展开完整链路卡"必须真能点开，否则它是一句谎
         AnimatedVisibility(visible = satOpen, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             Column(verticalArrangement = Arrangement.spacedBy(Grid.Card)) {
@@ -107,12 +112,11 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
         SceneSwitcher(app)
         // 过境卡由上面那条兜底栏给，卡片流里不能再出现第二次。
         // 一上来摊十张同权重的卡就是"乱"的本体，所以默认只出前两张
-        val stream = app.orderedCards(scene).filterNot { it == "pass" }
-        CardStream(if (moreCards) stream else stream.take(2), scope)
+        CardStream(if (moreCards) ready.stream else ready.stream.take(2), scope)
         // 展开与编辑合成一行。之前是上下两条同样式的蓝字（"展开其余 5 张卡"、"编辑卡片流"），
         // 加上场景切换器那句"更多场景（2）"，首屏底部一共三条 builder 口径的链接 ——
         // 那是我们自己排卡片用的工具，车主不需要每次开 App 都看见
-        if (stream.size > 2) {
+        if (ready.stream.size > 2) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -129,7 +133,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                     modifier = Modifier.size(14.dp),
                 )
                 Text(
-                    if (moreCards) "收起" else "展开另外 ${stream.size - 2} 项",
+                    if (moreCards) "收起" else "展开另外 ${ready.stream.size - 2} 项",
                     style = Type.Caption,
                     color = Ink.Sat,
                 )
@@ -153,7 +157,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
                 }
             }
         }
-        if (editing) CardManager(app, app.managedCards(scene))
+        if (editing) CardManager(app, ready.managed, ready.hidden)
     }
 }
 
@@ -166,7 +170,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
  * 而"还没连上"其实是个中性事实，只有"正在等一个已知会来的东西"才配得上 Wait。
  */
 @Composable
-private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
+private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status, guardOn: Boolean) {
     val sat = st.snapshot?.sat
     val left = sat?.nextPassInS
     val dockTone = when {
@@ -196,7 +200,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
                 },
                 satTone,
             ),
-            RailItem("守护", if (app.guardPinned) "在跑" else "未开", if (app.guardPinned) Tone.Ok else Tone.Neutral),
+            RailItem("守护", if (guardOn) "在跑" else "未开", if (guardOn) Tone.Ok else Tone.Neutral),
         ),
     )
     // SOS 不在这条里。它原来钉在这行的右端，理由是"不滚动就能按到"—— 判断对，位置错：
@@ -217,35 +221,18 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status) {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AssistantHero(app: AppRuntime) {
+private fun AssistantHero(app: AppRuntime, vm: HomeViewModel, s: AssistantUiState) {
     val reduce = LocalReduceMotion.current
-    val chat = app.chat.collectAsState().value
-    val thinking by app.aiThinking.collectAsState()
-    val endpoint by app.aiEndpoint.collectAsState()
-    val granted by app.aiGranted.collectAsState()
-    val aiError by app.aiError.collectAsState()
-    val probing by app.aiProbing.collectAsState()
-    val voiceEngine by app.voiceEngine.collectAsState()
-    val voiceSource by app.voiceSource.collectAsState()
-    val voiceEngines by app.voiceEngines.collectAsState()
-    val voiceChoice by app.voiceChoice.collectAsState()
-    val voiceTone by app.voiceTone.collectAsState()
-    val answerDevice by app.answerDevice.collectAsState()
-    val voiceFaces by app.voiceFaces.collectAsState()
-    val faceChoice by app.voiceFaceChoice.collectAsState()
-    val previewing by app.voicePreviewing.collectAsState()
-    val voiceIssue by app.voiceIssue.collectAsState()
-    val listening by app.listening.collectAsState()
-    val transcribing by app.transcribing.collectAsState()
     var draft by rememberSaveable { mutableStateOf("") }
     var configuring by rememberSaveable { mutableStateOf(false) }
     var voiceAdvanced by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
+    val listenState by vm.listenState.collectAsState()
 
     // 这张卡不给图标：它的标题行右边有一枚 48dp 的齿轮，标题被那行撑到垂直居中，
     // 左边再挂一枚 20dp 的小图标就只对齐到行的顶边 —— 截图里"AI 助手"比图标低半行，就是这半行的错位。
     // 首屏这张本来就是主角，不需要图标再告诉用户它是谁
-    InkCard(level = Level.Raised, tone = if (endpoint.configured) Tone.Sat else Tone.Neutral) {
+    InkCard(level = Level.Raised, tone = if (s.endpoint.configured) Tone.Sat else Tone.Neutral) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
@@ -254,7 +241,7 @@ private fun AssistantHero(app: AppRuntime) {
             Text("AI 助手", style = Type.Title, modifier = Modifier.weight(1f))
             // 未接模型时不再把"本机规则 · 未接模型"打在标题上：那是工程状态，不是给车主看的信息，
             // 而且它挂在首屏最显眼那一行，等于每次打开 App 先看见一句"这个功能还没做完"
-            if (endpoint.configured) Text(endpoint.model, style = Type.Caption, color = Ink.TextLow)
+            if (s.endpoint.configured) Text(s.endpoint.model, style = Type.Caption, color = Ink.TextLow)
             IconButton(onClick = { configuring = !configuring }) {
                 Icon(MIcons.settings, contentDescription = "AI 助手设置", tint = Ink.TextLow, modifier = Modifier.size(18.dp))
             }
@@ -262,7 +249,7 @@ private fun AssistantHero(app: AppRuntime) {
 
         // 模型没答上来的**具体原因**要摆出来，而不是让车主对着"未接模型"猜。
         // 地址写错（/responses、多一层 /v1）、密钥失效、网络到不了 —— 三种下一步完全不同
-        aiError?.let { err ->
+        s.error?.let { err ->
             Text(
                 "AI 这次没答上来：$err",
                 style = Type.Caption,
@@ -271,24 +258,24 @@ private fun AssistantHero(app: AppRuntime) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (probing) Text("正在问 AI…", style = Type.Caption, color = Ink.Wait)
+        if (s.probing) Text("正在问 AI…", style = Type.Caption, color = Ink.Wait)
 
         // 只显示最近 3 条，但**这几行不能是死字**：想翻更早的就点一下。
         // 上一版这句只是陈述"共 N 条"，用户既看不到其余的，也没有地方可点
-        val shown = if (historyOpen) chat else chat.takeLast(3)
-        shown.forEach { line -> Bubble(app, line) }
+        val shown = if (historyOpen) s.chat else s.chat.takeLast(3)
+        shown.forEach { line -> Bubble(app, line, s.endpoint.configured) }
         // 发出去之后屏上必须立刻有东西：这条回答还在路上。
         // 没有它，用户只能再点一次发送 —— 而这里明确不排队，多点的那次会被挡回来，两边都以为自己错了
-        AnimatedVisibility(visible = thinking, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
+        AnimatedVisibility(visible = s.thinking, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             ThinkingBubble()
         }
-        if (chat.size > 3) {
-            GhostAction(if (historyOpen) "只看最近几句" else "看更早的 ${chat.size - 3} 句") {
+        if (s.chat.size > 3) {
+            GhostAction(if (historyOpen) "只看最近几句" else "看更早的 ${s.chat.size - 3} 句") {
                 historyOpen = !historyOpen
             }
         }
         // 只有真接通了才说这句。它是一条能力，不是一句故障报告
-        if (app.screenDialog && chat.isEmpty()) {
+        if (s.screenDialog && s.chat.isEmpty()) {
             Text("圆屏上说的话也会出现在这里", style = Type.Caption, color = Ink.Ok)
         }
 
@@ -296,15 +283,15 @@ private fun AssistantHero(app: AppRuntime) {
             value = draft,
             onValueChange = { draft = it },
             placeholder = "问一句",
-            onSubmit = { if (draft.isNotBlank()) { app.askAi(draft); draft = "" } },
+            onSubmit = { if (draft.isNotBlank()) { vm.ask(draft); draft = "" } },
             trailing = {
-                IconButton(onClick = { if (draft.isNotBlank()) { app.askAi(draft); draft = "" } }) {
+                IconButton(onClick = { if (draft.isNotBlank()) { vm.ask(draft); draft = "" } }) {
                     Icon(MIcons.send, contentDescription = "发送", tint = Ink.Sat)
                 }
                 VoiceMicButton(
                     app = app,
-                    listening = listening,
-                    transcribing = transcribing,
+                    listening = listenState.first,
+                    transcribing = listenState.second,
                 )
             },
         )
@@ -321,7 +308,7 @@ private fun AssistantHero(app: AppRuntime) {
             listOf("有信号吗", "下次过境是什么时候", "额度还剩多少", "圆屏怎么配对", "车在哪").forEach { q ->
                 // 走同一枚 [Chip]：这里原来是手写的一枚 33dp 高的方块，而它恰恰是首页最该被点中的东西。
                 // 复用原语顺带解决了两件事 —— 触摸区到 48dp，按压态和场景切换器那几枚保持一致
-                Chip(q, selected = false) { app.askAi(q) }
+                Chip(q, selected = false) { vm.ask(q) }
             }
         }
 
@@ -329,21 +316,21 @@ private fun AssistantHero(app: AppRuntime) {
             Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
                 // 端点在出包时就定了（V1.18），这里不再有地址/密钥/模型名三格：
                 // 产品界面不该出现要用户抄一长串字符的东西。自检在工程模式里，给现场排障用
-                ValueRow("它能做什么", granted.label)
+                ValueRow("它能做什么", s.granted.label)
                 // 车主只关心两件事：谁在念、在哪念。三档声音差别很大，但不需要名词解释谁是谁
                 ValueRow(
                     "答句声音",
-                    when (voiceSource) {
+                    when (s.source) {
                         "azure" -> "晓伊 · 手机和圆屏同一个声音"
                         "edge" -> "晓伊 · 手机和圆屏同一个声音"
                         "baidu" -> "备用网络声音（晓伊没连上时用）"
-                        else -> voiceEngine ?: "手机自带语音"
+                        else -> s.engine ?: "手机自带语音"
                     },
                 )
-                voiceIssue?.let { issue ->
+                s.voiceIssue?.let { issue ->
                     Text(issue, style = Type.Caption, color = Ink.Wait, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 }
-                if (app.screenDialog && app.screenProtocol in 1..2) {
+                if (s.screenDialog && s.screenProtocol in 1..2) {
                     Text(
                         "这块屏还不会自己出声，声音先放在手机上；屏升级之后会自动跟过去",
                         style = Type.Caption,
@@ -358,7 +345,7 @@ private fun AssistantHero(app: AppRuntime) {
                     verticalArrangement = Arrangement.spacedBy(Grid.x8),
                 ) {
                     VoiceTone.all.forEach { t ->
-                        Chip(t.label, selected = t.id == voiceTone.id) { app.setVoiceTone(t) }
+                        Chip(t.label, selected = t.id == s.tone.id) { vm.setTone(t) }
                     }
                 }
                 // 手机起头的那轮在哪念由这里定；屏上起头的轮次只有屏念，不受这项影响
@@ -369,11 +356,11 @@ private fun AssistantHero(app: AppRuntime) {
                     verticalArrangement = Arrangement.spacedBy(Grid.x8),
                 ) {
                     ScreenVoice.ScreenDevice.entries.forEach { d ->
-                        Chip(d.label, selected = d == answerDevice) { app.setAnswerDevice(d) }
+                        Chip(d.label, selected = d == s.answerDevice) { vm.setAnswerDevice(d) }
                     }
                 }
-                GhostAction(if (previewing) "正在念…" else "试听一句") {
-                    if (!previewing) app.previewVoice()
+                GhostAction(if (s.previewing) "正在念…" else "试听一句") {
+                    if (!s.previewing) vm.previewVoice()
                 }
                 // 换引擎、换人声是现场调理的活，不是日常动作：点开才出现，不点就只是一行字
                 GhostAction(if (voiceAdvanced) "收起换声音" else "换一个声音") { voiceAdvanced = !voiceAdvanced }
@@ -383,41 +370,41 @@ private fun AssistantHero(app: AppRuntime) {
                     exit = Motion.expandOut(reduce),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
-                        if (voiceEngines.size > 1) {
+                        if (s.engines.size > 1) {
                             Text("手机里的语音引擎", style = Type.Caption, color = Ink.TextLow)
                             FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),
                                 verticalArrangement = Arrangement.spacedBy(Grid.x8),
                             ) {
-                                voiceEngines.forEach { e ->
-                                    Chip(e.label, selected = e.id == voiceChoice) { app.setVoiceEngine(e.id) }
+                                s.engines.forEach { e ->
+                                    Chip(e.label, selected = e.id == s.engineChoice) { vm.setEngine(e.id) }
                                 }
-                                Chip("系统默认", selected = voiceChoice == null) { app.setVoiceEngine(null) }
+                                Chip("系统默认", selected = s.engineChoice == null) { vm.setEngine(null) }
                             }
                         } else {
                             Text(
-                                "手机上只找到 ${voiceEngines.firstOrNull()?.label ?: "一个语音"}；想换个声音可以装华为或讯飞的中文语音",
+                                "手机上只找到 ${s.engines.firstOrNull()?.label ?: "一个语音"}；想换个声音可以装华为或讯飞的中文语音",
                                 style = Type.Caption,
                                 color = Ink.TextLow,
                             )
                         }
-                        if (voiceFaces.size > 1) {
+                        if (s.faces.size > 1) {
                             Text("这个引擎里的其他声音", style = Type.Caption, color = Ink.TextLow)
                             FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(Grid.x8),
                                 verticalArrangement = Arrangement.spacedBy(Grid.x8),
                             ) {
-                                voiceFaces.take(8).forEach { f ->
-                                    Chip(f.label, selected = f.name == faceChoice) { app.setVoiceFace(f.name) }
+                                s.faces.take(8).forEach { f ->
+                                    Chip(f.label, selected = f.name == s.faceChoice) { vm.setFace(f.name) }
                                 }
-                                Chip("默认", selected = faceChoice == null) { app.setVoiceFace(null) }
+                                Chip("默认", selected = s.faceChoice == null) { vm.setFace(null) }
                             }
                         }
                     }
                 }
-                GhostAction("看它现在能做什么") { app.setTab(3) }
+                GhostAction("看它现在能做什么") { vm.openSkills() }
             }
         }
     }
@@ -438,29 +425,24 @@ private fun AssistantHero(app: AppRuntime) {
 @Composable
 internal fun SceneAsk(
     app: AppRuntime,
-    scene: TurnScene,
-    page: ScreenPage?,
+    s: AskBarUiState,
+    screenOnThisPage: Boolean,
     placeholder: String,
     prompts: List<String>,
+    onAsk: (String) -> Unit,
 ) {
-    val chat by app.chat.collectAsState()
-    val thinking by app.aiThinking.collectAsState()
     val reduce = LocalReduceMotion.current
     var draft by rememberSaveable { mutableStateOf("") }
-    val mine = chat.filter { it.scene == scene }
-    // thinking 那颗灯是全局的（只说明"有一条还在路上"）。这一页要不要跟着亮，
-    // 看的是**这一页最后一句是不是还没答上**——不然在首页问一句，四个 Tab 一起闪
-    val waiting = thinking && mine.lastOrNull()?.from == TurnFrom.Me
-    val ask = { q: String -> if (q.isNotBlank()) { app.askAi(q, scene = scene); draft = "" } }
+    val ask = { q: String -> if (q.isNotBlank()) { onAsk(q); draft = "" } }
 
     InkCard(level = Level.Group) {
         // **和首页那张同一个上下序**：先看见这一页已经说过的话，再看见输入框，最后一排快捷问句。
         // 之前把输入框摆在最上面，四个 Tab 之间"对话在上、输入在下"这一条就断了 —— 那是"乱"的一种
-        mine.takeLast(2).forEach { Bubble(app, it) }
-        AnimatedVisibility(visible = waiting, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
+        s.turns.forEach { Bubble(app, it, s.modelConfigured) }
+        AnimatedVisibility(visible = s.waiting, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
             ThinkingBubble()
         }
-        if (screenSceneOf(page) == scene) {
+        if (screenOnThisPage) {
             Text("圆屏此刻就在这一页 · 它说的话落在这串里", style = Type.Caption, color = Ink.Ok)
         }
         InkField(
@@ -629,11 +611,8 @@ internal fun ThinkingBubble(modifier: Modifier = Modifier) {
 
 /** 一条对话。左右对齐就够，不做头像、不做气泡尾巴 —— 那两个都会把一屏能看的条数压掉一条 */
 @Composable
-internal fun Bubble(app: AppRuntime, line: Turn) {
+internal fun Bubble(app: AppRuntime, line: Turn, modelConfigured: Boolean) {
     val mine = line.from == TurnFrom.Me
-    // 端点配没配决定「规则兜底」该怎么说：配了就是模型没答上来（有事可查），
-    // 没配才是还没接。两句话的下一步完全不同，不能共用一个「未接模型」
-    val endpoint by app.aiEndpoint.collectAsState()
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
@@ -674,7 +653,7 @@ internal fun Bubble(app: AppRuntime, line: Turn) {
                         modifier = Modifier.size(14.dp),
                     )
                     Text(
-                        sourceLabel(line, endpoint.configured),
+                        sourceLabel(line, modelConfigured),
                         style = Type.Caption,
                         color = if (line.ours) Ink.TextLow else Ink.Wait,
                     )
@@ -710,26 +689,54 @@ private fun sourceLabel(line: Turn, modelConfigured: Boolean): String = when {
 }
 
 /**
- * 圆屏配对。**从"常驻首屏的七行表单"收成一件事 + 一个动作。**
- *
- * 上一版这块摊开了接入点、开关、说明、白名单、输入框、加入按钮、两条折叠行 ——
- * 一次性配置动作占了首屏四分之一，把真正天天看的对话和状态全推到第二屏。
- * 现在默认只说清"连上了没、连的是哪台"，配对表单点开的才是表单；
- * **但入口仍然在首屏，不用跳去「我的」开开关**（这是原来那条理由，它是对的）。
+ * 屏报上来的那一页 → 该置顶的那张卡。**这是三层架构里"当下上下文"那条的落点**：
+ * 圆屏在车辆页，说明车那边此刻有人在看它，车辆域就上浮到首页卡片流最前面；
+ * 屏在亲子页同理。屏没报页（null / face / clock 这些不属于任何一个域）就什么都不置顶 ——
+ * 硬猜一个"大概在车里"比不猜更糟。
+ */
+private fun contextKey(page: ScreenPage?): String? = when (page) {
+    ScreenPage.vehicle -> "vehicle.status"
+    ScreenPage.kids -> "fence"
+    else -> null
+}
+
+/**
+ * 上下文置顶卡：把屏此刻正在看的那一张卡提前画出来。**还是同一张 [RenderCard]**，
+ * 不另做实现 —— 置顶是排版的权力，不是另写一遍状态的理由（§5.2 最后一条）。
  */
 @Composable
-private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
-    val flags by app.flags.collectAsState()
-    val screens = app.devices.collectAsState().value.filter { it.kind == DeviceKind.DisplayScreen }
-    val allowed = app.allowedScreens()
-    val screenLine by app.screenLine.collectAsState()
-    var draft by rememberSaveable { mutableStateOf("") }
-    var open by rememberSaveable { mutableStateOf(false) }
-    val online = st.clients > 0
+private fun ContextPin(scope: CardScope, key: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
+        Text(
+            "圆屏此刻在看" + Cards.registry.title(key),
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
+        RenderCard(key, scope)
+    }
+}
 
-    // 这张卡不给图标（和首屏那张 AI 助手同一个理由）：镜像是一枚圆，它要在卡里**居中**，
-    // 而图标列会把整个内容列右移 32dp —— 圆就歪在页面上，比不画这个圆更难看
+/**
+ * 圆屏在首页只剩**状态**，配对表单整个搬到「我的 → 设备与底座」。
+ *
+ * 三层架构里终端层是"呈现发生在哪"，不是首页的一块常驻表单。上一版这块摊开了镜像圆、
+ * 白名单、编号输入框、折叠说明 —— 一次性配置动作占了首屏四分之一。
+ * 现在首页只回答"屏连着没、此刻显示什么"，要动配置的去设备中心。
+ * **但镜像是真镜像**：连着的时候它仍是手机推给屏的那一帧，只是不再配一整卡的操作。
+ */
+@Composable
+private fun DockStatusCard(st: DemoRuntime.Status, s: DockUiState, onManage: () -> Unit) {
+    val online = st.clients > 0
+    // 圆屏从无到有连上的那一下给触觉确认（UX #27）：演示时人的注意力在路上，
+    // "连上了"这件事靠震一下感知，不必回头盯屏幕
+    val hadOnline = remember { mutableStateOf(false) }
+    val confirmHaptic = rememberConfirmHaptic()
+    LaunchedEffect(online) {
+        if (online && !hadOnline.value) confirmHaptic()
+        hadOnline.value = online
+    }
     InkCard(
+        icon = MIcons.dock,
         tone = when {
             st.serverError != null -> Tone.Alert
             online -> Tone.Ok
@@ -737,140 +744,40 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
         },
     ) {
         CardTitle("圆屏", trailing = if (online) "${st.clients} 台在线" else "未连接")
-        // 这块圆不是装饰：它就是手机这一秒推给屏的那一帧。
-        // 上一版这里只有"1 台在线"四个字 —— 连上了也不知道连上了什么、屏上正在显示什么
-        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            ScreenMirror(
+        if (online) {
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                ScreenMirror(
+                    snap = st.snapshot,
+                    online = st.serverError == null,
+                    page = st.screenPage,
+                    line = s.screenLine,
+                )
+            }
+            MirrorCaption(
                 snap = st.snapshot,
-                online = online && st.serverError == null,
+                online = online,
+                serverError = st.serverError,
                 page = st.screenPage,
-                line = screenLine,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
             )
-        }
-        MirrorCaption(
-            snap = st.snapshot,
-            online = online,
-            serverError = st.serverError,
-            page = st.screenPage,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-        )
-        // 连上了不再补一句"连上了"：上面那行镜像说明已经说了同一件事，第三句是噪音。
-        // 这一行只留两种活：没连上时给做法，连上时叫出是哪一台（叫不出名字就整行不写）
-        val onlineNames = screens.filter { it.link is DeviceLink.Online }
-            .joinToString("、") { it.title }
-        if (st.serverError == null && (onlineNames.isNotBlank() || !online)) {
+            val onlineNames = s.screens.filter { it.link is DeviceLink.Online }
+                .joinToString("、") { it.title }
+            if (onlineNames.isNotBlank()) Text(onlineNames, style = Type.Body, color = Ink.TextMid)
+        } else {
+            // 没连上只说该做的那一步：来过没握上手是编号/开关的事，一条 TCP 都没到过是网络的事。
+            // 具体怎么配（热点、路由器、AP 隔离）整段说明归设备中心管，首屏不再背这一段
             Text(
                 when {
-                    online -> onlineNames
-                    // 屏到过门口但一直没握手成功：说明包进得来，多半是编号或开关的事
-                    st.attempts > 0 -> "圆屏来过 ${st.attempts} 次但没握上手，检查下面开关和白名单里的编号"
-                    // 一条 TCP 都没到过手机：屏不在这张网里，App 改什么都不会好
-                    else -> "还没有圆屏连进来。确认手机开着热点（2.4GHz）、圆屏连的就是这个热点；圆屏开机后屏上什么都不用填"
+                    st.serverError != null -> "接入服务起不来：${st.serverError}"
+                    st.attempts > 0 -> "圆屏来过 ${st.attempts} 次但没握上手，去设备中心检查编号和开关"
+                    else -> "还没有圆屏连进来。配对方法在「我的 → 设备与底座」；连上后下滑换场景、点那张脸就能对话"
                 },
                 style = Type.Body,
                 color = Ink.TextMid,
+                modifier = Modifier.announceChange(),
             )
         }
-        // **接入点不藏在展开区里**（V1.18）。同一个路由器下接不上，唯一要动手的就是把这一行
-        // 抄到屏上；藏起来等于让用户先去猜它藏在哪。服务器本来就监听所有网卡，
-        // 同一个 Wi-Fi 下这条路是通的 —— 缺的只是"屏不知道手机分到了哪个地址"
-        if (st.serverError != null || st.localIp != null) {
-            RowLine(
-                "接入点",
-                st.serverError?.let { "起不来：$it" } ?: "ws://${st.localIp}:${ScreenLinkServer.PORT}",
-                tone = if (st.serverError != null) Tone.Alert else Tone.Neutral,
-                mono = true,
-            )
-        }
-        if (open) {
-            HairLine()
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = Grid.x4),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("允许圆屏接入", style = Type.Body, modifier = Modifier.weight(1f))
-                Switch(checked = flags.acceptScreens, onCheckedChange = { app.setFlag(flags.copy(acceptScreens = it)) })
-            }
-            if (allowed.isNotEmpty()) {
-                HairLine()
-                Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
-                    SectionHead("白名单", "点一下移出，并立刻断开")
-                    Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-                    ) {
-                        allowed.forEach { id ->
-                            // 台账里那台的链接状态才是"现在通不通"；只认白名单会把"填过号但从没来过"画成绿的
-                            val link = screens.firstOrNull { it.title == id }?.link
-                            Box(
-                                modifier = Modifier
-                                    .clickable { app.revokeScreen(id) }
-                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Badge(
-                                    id,
-                                    when (link) {
-                                        is DeviceLink.Online -> Tone.Ok
-                                        is DeviceLink.Degraded -> Tone.Wait
-                                        is DeviceLink.Connecting -> Tone.Wait
-                                        is DeviceLink.Offline -> Tone.Alert
-                                        else -> Tone.Neutral
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Grid.x8),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                Box(modifier = Modifier.weight(1f)) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        label = { Text("圆屏编号", style = Type.Caption) },
-                        singleLine = true,
-                        textStyle = Type.Body,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Ink.Sat,
-                            unfocusedBorderColor = Ink.Track,
-                            focusedTextColor = Ink.TextHigh,
-                            unfocusedTextColor = Ink.TextHigh,
-                        ),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { if (app.pairScreen(draft)) draft = "" }),
-                    )
-                }
-                Button(
-                    onClick = { if (app.pairScreen(draft)) draft = "" },
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink.Sat, contentColor = Ink.Deep),
-                ) { Text("加入") }
-            }
-            CollapsableNote(
-                "配对怎么做",
-                "两种接法，选一种：\n" +
-                    "① 常用：手机开 2.4GHz 热点，圆屏出厂就拨 ws://192.168.43.1:8443（手机在热点里的固定地址），屏上什么都不用填。\n" +
-                    "② 同一个路由器：手机和圆屏连同一个 Wi-Fi 也行 —— 服务器监听所有网卡，只是圆屏出厂不知道手机被路由分到了哪个地址，所以第一次要在屏上「设置→WI-FI→接入点」把上面那行的地址原样打进去（之后屏自己记住，不用再填）。\n" +
-                    "拨不通先看两点：路由器有没有开「AP 隔离」（开了两台设备互相看不见，换 ① 或关掉它）；手机上是不是同时开着热点（那样接入点那行可能报的是热点地址，屏走路由器时用不上）。",
-            )
-        }
-        // **同一个动作在两种状态下同一个权重**：上一版未连接时它是一整条蓝色大按钮，
-        // 连上之后退化成左下角一行小蓝字"配对新的圆屏"。加第二块屏仍然是这张卡唯一的主动作，
-        // 不该因为"已经有一台了"就把它藏到角落 —— 用户想找的时候反而找不到
-        if (open) {
-            GhostAction("收起") { open = false }
-        } else {
-            Button(
-                onClick = { open = true },
-                colors = ButtonDefaults.buttonColors(containerColor = Ink.Sat, contentColor = Ink.Deep),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (online) "再加一块屏" else "配对圆屏") }
-        }
+        GhostAction("去设备中心管理") { onManage() }
     }
 }
 
@@ -880,7 +787,13 @@ private fun DockGroup(app: AppRuntime, st: DemoRuntime.Status) {
  * 这里不重复实现，否则手机和圆屏会各自解释一遍同一个状态（§5.2 最后一条）。
  */
 @Composable
-private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolean, onToggle: () -> Unit) {
+private fun SatelliteStrip(
+    app: AppRuntime,
+    st: DemoRuntime.Status,
+    open: Boolean,
+    onToggle: () -> Unit,
+    cancelLine: String?,
+) {
     val reduce = LocalReduceMotion.current
     val sat = st.snapshot?.sat
     val phase = sat?.phase?.let { phaseLabel(it) } ?: "—"
@@ -926,6 +839,8 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
                         else -> "距下次过顶"
                     },
                     style = Type.Body,
+                    // 相位突变（尤其"终端离线"和"开窗"）是这一卡唯一的新闻，得能被读出来
+                    modifier = Modifier.announceChange(),
                 )
                 Box(
                     modifier = Modifier
@@ -953,7 +868,6 @@ private fun SatelliteStrip(app: AppRuntime, st: DemoRuntime.Status, open: Boolea
         }
         // 这里不放 SOS：那一颗在底部导航栏正中（[SosDial]），同一页两个入口只会让人按错一个。
         // 撤销那条回显留在原地 —— 它讲的是"刚才按的那下有没有生效"，属于这张卡的账
-        val cancel by app.cancelLine.collectAsState()
-        cancel?.let { Text(it, style = Type.Caption, color = Ink.Wait) }
+        cancelLine?.let { Text(it, style = Type.Caption, color = Ink.Wait) }
     }
 }

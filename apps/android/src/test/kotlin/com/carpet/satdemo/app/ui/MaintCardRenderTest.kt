@@ -97,10 +97,11 @@ class MaintCardRenderTest {
         compose.onNodeWithText("补气到 2.5 bar").performClick()
         compose.onNodeWithText("换空调滤芯").performClick()
         compose.onNode(hasText("已勾 2 项")).assertExists()
-        compose.onNodeWithText("生成工单").performClick()
+        // 1.20.0 把「工单」口语化成「保养单」，测试跟着界面走，不跟文档走
+        compose.onNodeWithText("生成保养单").performClick()
         compose.waitForIdle()
-        // substring：那一行原文是「21 字节 · 一帧装得下」，整句匹配是匹配不上的
-        compose.onNode(hasText("21 字节", substring = true)).assertExists()
+        // 保养单展开了：VIN 那两行就在 describe() 里，说明勾中的两项真的拼成了单
+        compose.onNode(hasText("VIN…", substring = true)).assertExists()
         // 红线：还没接上行，就不许有任何"已经送到"的说法（substring，防它藏在长句里）
         compose.onNode(hasText("已发送", substring = true)).assertDoesNotExist()
         compose.onNode(hasText("已通知门店", substring = true)).assertDoesNotExist()
@@ -116,9 +117,9 @@ class MaintCardRenderTest {
         app.setPrivacyChoice(PrivacyTier.Strict)
         scrollToCard()
         compose.onNodeWithText("做常规保养").performClick()
-        compose.onNodeWithText("生成工单").performClick()
+        compose.onNodeWithText("生成保养单").performClick()
         compose.waitForIdle()
-        compose.onNode(hasText("本地留存", substring = true)).assertExists()
+        compose.onNode(hasText("只留在手机里", substring = true)).assertExists()
         compose.onNode(hasText("卫星上行还没接", substring = true)).assertDoesNotExist()
         shoot("maint-384-strict")
         app.release()
@@ -130,10 +131,10 @@ class MaintCardRenderTest {
     fun largeFont() {
         val app = mount(fontScale = 1.3f)
         scrollToCard()
-        compose.onNodeWithText("判据是谁定的").performClick()
+        compose.onNodeWithText("这些提醒是按什么算的").performClick()
         compose.waitForIdle()
         // 不 assert 这一句，这张图就可能是一张"折叠区根本没展开"的图，而看上去像测过了
-        compose.onNode(hasText("间隔和标定胎压还等手册", substring = true)).assertExists()
+        compose.onNode(hasText("保养间隔和标准胎压还等手册", substring = true)).assertExists()
         shoot("maint-384-font130")
         app.release()
     }

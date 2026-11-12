@@ -2,6 +2,7 @@ package com.carpet.satdemo.app.ui
 
 import com.carpet.satdemo.core.protocol.UiEmotion
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -73,14 +74,85 @@ class PixelAvatarRenderTest {
         val live = avatarPixels(poseFor(UiEmotion.thinking))
         val dim = avatarPixels(poseFor(UiEmotion.thinking), dim = true)
         // 数"颜色种类"是假判据：本体那四档石板蓝本身就带色相，dim 一样数得过它。
-        // 真正的红线是七档模式色一支都不许出现，所以直接拿模式色表来比
-        val mode = SCHEME.values.flatMap { (glow, accent) -> glow.toList() + accent }
-            .map { it and 0xFFFFFF }.toSet()
-        val leaked = dim.filter { it != 0 }.map { it and 0xFFFFFF }.filter { mode.contains(it) }.distinct()
+        // 真正的红线是状态色一支都不许出现，所以直接拿状态色表来比
+        val leaked = dim.filter { it != 0 }.map { it }.filter { SCHEME.contains(it) }.distinct()
         assertTrue("未接入还在用状态色：" + leaked.map { Integer.toHexString(it) }, leaked.isEmpty())
         assertTrue("dim 和 live 一模一样，dim 参数没起作用", live.toList() != dim.toList())
         // 反过来也得成立：亮着的时候确实在用状态色，不然上面那条空断言永远绿
-        val used = live.filter { it != 0 }.map { it and 0xFFFFFF }.filter { mode.contains(it) }.distinct()
+        val used = live.filter { it != 0 }.filter { SCHEME.contains(it) }.distinct()
         assertTrue("live 那版也没在用状态色，说明色表和渲染脱钩了", used.isNotEmpty())
+    }
+
+    /** 状态色表和渲染必须同源：搬角色时漏掉一支辉光色，dim 就会把语义色漏出去（V1.10.9 那条红线的守卫） */
+    @Test
+    fun `状态色表覆盖所有非结构像素`() {
+        val struct = STRUCT
+        val unknown = MuseAvatarData.PALETTE
+            .filter { it != 0 }
+            .filter { !struct.contains(it) }
+            .filter { !SCHEME.contains(it) }
+            .distinct()
+        assertTrue("调色板里有既不是结构色、也不在状态色表里的颜色：" +
+            unknown.map { Integer.toHexString(it) }, unknown.isEmpty())
+        // dim 灰档不能和已有色撞车，不然 SAD 派生时 remap 会指到语义色上
+        val clash = MuseAvatarData.GREYS.filter { MuseAvatarData.PALETTE.contains(it) }
+        assertTrue("dim 灰档撞了已有调色板色：" + clash.map { Integer.toHexString(it) }, clash.isEmpty())
+    }
+
+    /** 只用来看一眼：这台机器打不开 PNG，ASCII 是唯一的"眼睛" */
+    @Test
+    fun `ASCII 对照`() {
+        val dir = File("build/screenshots").apply { mkdirs() }
+        val structTags = mapOf(
+            0xFFFFFFFF.toInt() to 'o', // 高光
+            0xFF100C08.toInt() to '#', // 硬描边
+            0xFF392820.toInt() to 'C', // 斑点/暗结构
+            0xFF391C18.toInt() to 'c',
+            0xFF6A5541.toInt() to 'm',
+            0xFFAC997B.toInt() to '~', // 毛绒中调
+            0xFF8B7562.toInt() to '=',
+            0xFFCDBE9C.toInt() to ':',
+            0xFFE6D6BD.toInt() to '+', // 皮毛亮
+            0xFFF6DEBD.toInt() to '+',
+            0xFFFFEEDE.toInt() to ' ', // 脸板
+            0xFFFFEED5.toInt() to ' ',
+            0xFFEECAA4.toInt() to '-',
+        )
+        val sb = StringBuilder()
+        for (e in order) {
+            val px = avatarPixels(poseFor(e))
+            sb.append("=== $e\n")
+            for (y in 0 until 64) {
+                for (x in 0 until 64) {
+                    val c = px[y * 64 + x]
+                    sb.append(
+                        when {
+                            c == 0 -> '.'
+                            structTags[c] != null -> structTags.getValue(c)
+                            SCHEME.contains(c and 0xFFFFFF) -> '*'
+                            else -> '?'
+                        }
+                    )
+                }
+                sb.append('\n')
+            }
+        }
+        File(dir, "avatar-ascii.txt").writeText(sb.toString())
+    }
+
+    /** 七档情绪对上去的必须都是上游那几档真实姿态，不能是随手编的 */
+    @Test
+    fun `每档情绪都落在合法的上游姿态上`() {
+        val legal = setOf(
+            MuseAvatarData.IDLE, MuseAvatarData.LISTENING, MuseAvatarData.THINKING,
+            MuseAvatarData.WORKING, MuseAvatarData.SPEAKING, MuseAvatarData.HAPPY,
+            MuseAvatarData.OFF, MuseAvatarData.ERROR, MuseAvatarData.BOOT,
+            MuseAvatarData.OFF_DIMMED, // sad 是 OFF 的辉光灰化派生档，唯一一个 App 侧合成的姿势
+        )
+        for (e in order + listOf<UiEmotion?>(null)) {
+            val grid = poseFor(e)
+            assertEquals("$e 的姿势不是 64×64 网格", 64 * 64, grid.size)
+            assertTrue("$e 对上去的姿势不在上游 9 档里", legal.any { it === grid })
+        }
     }
 }

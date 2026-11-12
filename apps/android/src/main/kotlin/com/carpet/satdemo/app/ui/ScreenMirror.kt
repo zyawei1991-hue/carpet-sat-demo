@@ -448,6 +448,8 @@ private fun pageRows(page: ScreenPage): List<Pair<String, Field>> = when (page) 
     ScreenPage.avatar -> listOf("答句" to Field.DIALOG, "情绪" to Field.EMOTION)
     ScreenPage.clock -> listOf("钟面" to Field.CARD)
     ScreenPage.gallery -> listOf("图片" to Field.NONE)
+    // photo 页（右滑氛围层·相册轮播）：推图通道没落地前和 gallery 同一句话
+    ScreenPage.photo -> listOf("相册" to Field.NONE)
     else -> emptyList()
 }
 
@@ -457,6 +459,7 @@ private fun pageTitle(page: ScreenPage): String = when (page) {
     ScreenPage.avatar -> "数字分身"
     ScreenPage.clock -> "时钟"
     ScreenPage.gallery -> "图片播放"
+    ScreenPage.photo -> "相册"
     else -> ""
 }
 
@@ -713,6 +716,7 @@ fun screenPageLabel(page: ScreenPage): String = when (page) {
     ScreenPage.avatar -> "数字分身"
     ScreenPage.clock -> "时钟"
     ScreenPage.gallery -> "图片"
+    ScreenPage.photo -> "相册"
 }
 
 @Composable
