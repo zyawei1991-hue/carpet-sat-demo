@@ -7095,10 +7095,10 @@ index 0000000..b77731c
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..fee251d
+index 0000000..a225096
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1145 @@
+@@ -0,0 +1,1147 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -7129,6 +7129,7 @@ index 0000000..fee251d
 +#include "esp_log.h"
 +#include "muse_ui.h"
 +#include "muse_pixel.h"
++#include "muse_settings.h"
 +
 +static const char *TAG = "carpet_page";
 +
@@ -7823,9 +7824,10 @@ index 0000000..fee251d
 +                              : s_amb_pg == PG_GALLERY ? PG_PHOTO : PG_CLOCK;
 +            nav_to(next);
 +            ESP_LOGI(TAG, "右滑 → 氛围轮换到 %s", PAGE_NAMES[next]);
-+        } else {                            /* 右滑 → 氛围 */
-+            nav_to(s_amb_pg);
-+            ESP_LOGI(TAG, "右滑 → 氛围（%s）", PAGE_NAMES[s_amb_pg]);
++        } else {                            /* 右滑 → 氛围（默认页由设置选，B §5） */
++            const int8_t def = muse_settings_album_default() ? PG_PHOTO : PG_CLOCK;
++            nav_to(def);
++            ESP_LOGI(TAG, "右滑 → 氛围（%s）", PAGE_NAMES[def]);
 +        }
 +        break;
 +    case G_SWIPE_Y:
@@ -8654,7 +8656,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..9584d71 100644
+index 7c579bb..f37aeeb 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,26 @@
@@ -8858,7 +8860,7 @@ index 7c579bb..9584d71 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +992,283 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,299 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -9017,6 +9019,22 @@ index 7c579bb..9584d71 100644
 +        }
 +        return true;
 +    }
++    /* `>amb`：回读右滑氛围的默认页；`>amb clock|photo` 改它（B §5，和设置页「默认氛围用相册」
++     * 那一格同一个 NVS key album_def）。串口注不了设置页的点击，用这一条设好默认页再 >gest right 截图证。 */
++    if (!strncmp(line, "amb", 3) && (line[3] == '\0' || line[3] == ' ')) {
++        const char *arg = line + 3;
++        while (*arg == ' ') arg++;
++        if (!strcmp(arg, "clock"))      muse_settings_set_album_default(false);
++        else if (!strcmp(arg, "photo")) muse_settings_set_album_default(true);
++        else if (arg[0]) {
++            printf("@amb 只认 clock / photo\n");
++            fflush(stdout);
++            return true;
++        }
++        printf("@amb default=%s\n", muse_settings_album_default() ? "photo" : "clock");
++        fflush(stdout);
++        return true;
++    }
 +    /* 接入点地址：不带参数=回读现在拨的是哪条、来源是 NVS 还是出厂；
 +     * 带一条 ws://…=存进 NVS 并**立刻重拨**；`clear`=抹掉那一格、回到出厂那条。
 +     * 为什么给串口这一条：1.75 寸圆屏上用屏上键盘敲一个 IP 是罚人 —— 现场接电脑的时候
@@ -9142,7 +9160,7 @@ index 7c579bb..9584d71 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1303,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1319,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -9155,7 +9173,7 @@ index 7c579bb..9584d71 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1411,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1427,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -9338,15 +9356,16 @@ index 238ee4f..205198c 100644
 +esp_err_t muse_pmu_diag_regs(uint8_t *out, unsigned n);
 +#endif
 diff --git a/esp32/components/muse/muse_settings.c b/esp32/components/muse/muse_settings.c
-index fd499cd..000efd9 100644
+index fd499cd..0bfdc24 100644
 --- a/esp32/components/muse/muse_settings.c
 +++ b/esp32/components/muse/muse_settings.c
-@@ -41,11 +41,14 @@ static struct {
+@@ -41,11 +41,15 @@ static struct {
      uint16_t sleep_s;
      bool wifi_on;
      bool ble_on;
 +    bool stay_online;
 +    bool wake_on;
++    bool album_default;
      char ssid[MUSE_SSID_MAX + 1];
      char pass[MUSE_PASS_MAX + 1];
      char host[MUSE_HOST_MAX + 1];
@@ -9356,7 +9375,7 @@ index fd499cd..000efd9 100644
  } s = {
      .volume = CONFIG_MUSE_DEFAULT_VOLUME,
      .speaker_on = true,
-@@ -53,6 +56,9 @@ static struct {
+@@ -53,6 +57,9 @@ static struct {
      .brightness = 100,
      .sleep_s = 120,
      .wifi_on = true,
@@ -9366,7 +9385,7 @@ index fd499cd..000efd9 100644
      .host = DEFAULT_HOST,
  };
  
-@@ -136,18 +142,27 @@ esp_err_t muse_settings_init(void)
+@@ -136,18 +143,30 @@ esp_err_t muse_settings_init(void)
      if (nvs_get_u8(s_nvs, "ble_on", &b) == ESP_OK) {
          s.ble_on = b;
      }
@@ -9375,6 +9394,9 @@ index fd499cd..000efd9 100644
 +    }
 +    if (nvs_get_u8(s_nvs, "wake_on", &b) == ESP_OK) {
 +        s.wake_on = b;
++    }
++    if (nvs_get_u8(s_nvs, "album_def", &b) == ESP_OK) {
++        s.album_default = b;
 +    }
      load_str("ssid", s.ssid, sizeof(s.ssid));
      load_str("pass", s.pass, sizeof(s.pass));
@@ -9396,7 +9418,7 @@ index fd499cd..000efd9 100644
      return ESP_OK;
  }
  
-@@ -208,6 +223,29 @@ size_t muse_settings_hatch_token_len(void)
+@@ -208,6 +227,29 @@ size_t muse_settings_hatch_token_len(void)
      return n;
  }
  
@@ -9426,7 +9448,7 @@ index fd499cd..000efd9 100644
  void muse_settings_set_volume(int pct)
  {
      s.volume = clampi(pct, 0, 100);
-@@ -258,6 +296,32 @@ void muse_settings_set_ble_on(bool on)
+@@ -258,6 +300,44 @@ void muse_settings_set_ble_on(bool on)
      notify(MUSE_SETTING_BLE);
  }
  
@@ -9456,11 +9478,23 @@ index fd499cd..000efd9 100644
 +    notify(MUSE_SETTING_WAKE);
 +}
 +
++bool muse_settings_album_default(void)
++{
++    return s.album_default;
++}
++
++void muse_settings_set_album_default(bool on)
++{
++    s.album_default = on;
++    save_u8("album_def", on);
++    notify(MUSE_SETTING_AMB_DEFAULT);
++}
++
  void muse_settings_set_wifi(const char *ssid, const char *pass)
  {
      if (muse_link_wifi_set(ssid ? ssid : "", ssid && ssid[0] && pass ? pass : "")) {
 diff --git a/esp32/components/muse/muse_settings.h b/esp32/components/muse/muse_settings.h
-index 5788e5b..69e52de 100644
+index 5788e5b..88f24b3 100644
 --- a/esp32/components/muse/muse_settings.h
 +++ b/esp32/components/muse/muse_settings.h
 @@ -33,6 +33,10 @@
@@ -9474,16 +9508,17 @@ index 5788e5b..69e52de 100644
  
  #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
  
-@@ -46,6 +50,8 @@ typedef enum {
+@@ -46,6 +50,9 @@ typedef enum {
      MUSE_SETTING_BLE,
      MUSE_SETTING_HATCH,
      MUSE_SETTING_VOICE_NOTES,
 +    MUSE_SETTING_STAY_ONLINE,   /* keep Wi-Fi associated through the screen's nap */
 +    MUSE_SETTING_WAKE,          /* listen for the wake word instead of needing a press */
++    MUSE_SETTING_AMB_DEFAULT,   /* right-swipe atmosphere default: clock vs album (B §5) */
  } muse_setting_t;
  
  typedef void (*muse_setting_cb_t)(muse_setting_t what);
-@@ -69,6 +75,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
+@@ -69,6 +76,11 @@ void muse_settings_hatch_host(char out[MUSE_HOST_MAX + 1]);
  void muse_settings_hatch_vm(char out[MUSE_VM_MAX + 1]);
  void muse_settings_hatch_token(char out[MUSE_TOKEN_MAX + 1]);
  size_t muse_settings_hatch_token_len(void);
@@ -9495,7 +9530,7 @@ index 5788e5b..69e52de 100644
  
  void muse_settings_set_volume(int pct);
  void muse_settings_set_speaker_on(bool on);
-@@ -77,6 +88,20 @@ void muse_settings_set_brightness(int pct);
+@@ -77,6 +89,24 @@ void muse_settings_set_brightness(int pct);
  void muse_settings_set_sleep_s(int secs);
  void muse_settings_set_wifi_on(bool on);
  void muse_settings_set_ble_on(bool on);
@@ -9513,11 +9548,15 @@ index 5788e5b..69e52de 100644
 + * 和 stay_online 一样是被读的那一方（采集循环每块读一次），没有硬件要跟着动。 */
 +bool muse_settings_wake_on(void);
 +void muse_settings_set_wake_on(bool on);
++/* 右滑氛围的默认页（B §5）：false=时钟，true=相册。carpet_page 右滑进氛围那一格读它，
++ * 没有硬件要跟着动；进了氛围再右滑仍在几页间轮换，这一格只定"从脸右滑第一下去哪"。 */
++bool muse_settings_album_default(void);
++void muse_settings_set_album_default(bool on);
  /* A network name is remembered first among the saved ones and joined now;
   * an empty ssid forgets every saved network. */
  void muse_settings_set_wifi(const char *ssid, const char *pass);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..987fd8e 100644
+index 20c46d3..5d45ee1 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -9928,7 +9967,7 @@ index 20c46d3..987fd8e 100644
      set_text(l, buf);
  }
  
-@@ -1288,6 +1472,28 @@ static void on_bright(lv_event_t *e)
+@@ -1288,6 +1472,33 @@ static void on_bright(lv_event_t *e)
      }
  }
  
@@ -9936,6 +9975,11 @@ index 20c46d3..987fd8e 100644
 +static void on_wake_sw(lv_event_t *e)
 +{
 +    muse_settings_set_wake_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
++}
++
++static void on_amb_sw(lv_event_t *e)
++{
++    muse_settings_set_album_default(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 +}
 +
 +/* 「对着屏说话」那一格。**不新开一个 muse_settings 键**：开关本体是 carpet_mic 的
@@ -9957,7 +10001,7 @@ index 20c46d3..987fd8e 100644
  static void build_sound_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -1309,6 +1515,27 @@ static void build_sound_page(lv_obj_t *tile)
+@@ -1309,6 +1520,31 @@ static void build_sound_page(lv_obj_t *tile)
          s_vol_sl = slider(list, "Volume", 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
      }
      s_gain_sl = slider(list, "Mic gain", 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
@@ -9981,11 +10025,15 @@ index 20c46d3..987fd8e 100644
 +        snprintf(wake_note, sizeof(wake_note), "唤醒词没起来：model 分区里没有模型。");
 +    }
 +    note(list, wake_note);
++    /* 默认氛围（B §5）：右滑第一下去时钟还是相册，在这一格选。不新开页，和上面两格同页。
++     * 进了氛围再右滑仍在 clock/gallery/photo 间轮换，这一格只定从脸右滑的默认落点。 */
++    switch_row(list, "默认氛围用相册", muse_settings_album_default(), on_amb_sw);
++    note(list, "右滑进氛围：关=时钟，开=相册。进了氛围再右滑仍会轮换。");
 +#endif
  
      lv_obj_t *meter = lv_obj_create(list);
      lv_obj_remove_style_all(meter);
-@@ -1378,17 +1605,27 @@ static void on_sleep_now(lv_event_t *e)
+@@ -1378,17 +1614,27 @@ static void on_sleep_now(lv_event_t *e)
      muse_state_set_asleep(true);
  }
  
@@ -10013,7 +10061,7 @@ index 20c46d3..987fd8e 100644
      button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
      note(list, "Tap the screen or press either button to wake.");
  }
-@@ -1431,16 +1668,25 @@ static void build_battery_page(lv_obj_t *tile)
+@@ -1431,16 +1677,25 @@ static void build_battery_page(lv_obj_t *tile)
      s_battery = page(tile, "BATTERY", true, &list);
      s_batt_shown_us = 0;
      s_batt_status = note(list, "");
@@ -10048,7 +10096,7 @@ index 20c46d3..987fd8e 100644
                 "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
  }
  
-@@ -1468,14 +1714,14 @@ static void tick_battery(void)
+@@ -1468,14 +1723,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -10067,7 +10115,7 @@ index 20c46d3..987fd8e 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1742,10 @@ static void tick_battery(void)
+@@ -1496,10 +1751,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -10080,7 +10128,7 @@ index 20c46d3..987fd8e 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1762,7 @@ static void tick_battery(void)
+@@ -1516,7 +1771,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -10089,7 +10137,7 @@ index 20c46d3..987fd8e 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1789,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1798,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -10107,7 +10155,7 @@ index 20c46d3..987fd8e 100644
      }
      note(list, text);
  }
-@@ -1658,13 +1905,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+@@ -1658,13 +1914,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
  
  #if LV_USE_SNAPSHOT
  static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
@@ -10138,7 +10186,7 @@ index 20c46d3..987fd8e 100644
              return true;
          }
      }
-@@ -1688,6 +1951,22 @@ static void bench_open_pending(void)
+@@ -1688,6 +1960,22 @@ static void bench_open_pending(void)
              PAGES[i]->build(s_tile);
          }
          show(*PAGES[i]->obj);
