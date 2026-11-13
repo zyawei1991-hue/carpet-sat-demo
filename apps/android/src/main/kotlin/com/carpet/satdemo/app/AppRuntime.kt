@@ -164,13 +164,22 @@ class AppRuntime(private val host: Application) {
     private val _scene = MutableStateFlow(Scene.Vehicle)
     val scene: StateFlow<Scene> = _scene
 
-    /** 底部导航停在第几页。也放在这里，是为了转屏之后回到原来那一页 */
-    private val _tab = MutableStateFlow(0)
-    val tab: StateFlow<Int> = _tab
+    /**
+     * 底部导航停在哪一页。放在这里而不是 Composable 里，是为了转屏之后回到原来那一页。
+     * **导航收敛（原任务 #7）**：页面间跳转只许走 [openTab]，不许散写 `setTab(3)` ——
+     * 底栏重排一次，魔法数字就会把"去设备中心"送错页。
+     */
+    enum class Tab { Home, Vehicle, Family, Me }
 
-    fun setTab(i: Int) {
-        _tab.value = i
+    private val _tab = MutableStateFlow(Tab.Home)
+    val tab: StateFlow<Tab> = _tab
+
+    fun setTab(t: Tab) {
+        _tab.value = t
     }
+
+    /** 页面间跳转的唯一口。新加一个"去某某页"的入口，从这里过，别直接写枚举名 */
+    fun openTab(t: Tab) = setTab(t)
 
     /** 首页卡片流的隐藏项与排序（§5.1「可排序、可隐藏」） */
     private val _hidden = MutableStateFlow<Set<String>>(emptySet())

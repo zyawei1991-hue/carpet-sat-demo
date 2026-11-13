@@ -16,8 +16,10 @@ import com.carpet.satdemo.core.protocol.UiState
 import com.carpet.satdemo.core.screen.CardPolicy
 import com.carpet.satdemo.core.screen.ScreenLinkServer
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -65,8 +67,15 @@ class ScreenCommandTest {
                 ?: throw AssertionError("1Hz 那一帧没带 ui —— 策略没跑，屏只会画总览")
         }
 
-        fun cmd(c: CommandType, dir: Int? = null): Boolean =
-            runtime.handleScreenCommand(c, dir?.let { JsonObject(mapOf("dir" to JsonPrimitive(it))) })
+        fun cmd(c: CommandType, dir: Int? = null, args: String? = null): Boolean =
+            runtime.handleScreenCommand(
+                c,
+                when {
+                    args != null -> Json.parseToJsonElement(args).jsonObject
+                    dir != null -> JsonObject(mapOf("dir" to JsonPrimitive(dir)))
+                    else -> null
+                },
+            )
 
         /** 屏报页。null = 这一帧压根没带 args.page */
         fun page(name: String?): Boolean = runtime.handleScreenCommand(
@@ -142,13 +151,40 @@ class ScreenCommandTest {
     }
 
     @Test
-    fun `契约里有但不该由屏发的那条算没接住`() {
+    fun `契约里有但还没实现的那条算没接住`() {
         val h = Harness()
         h.ui()
-        for (c in listOf(CommandType.track_pull, CommandType.set_demo_mode, CommandType.set_fence, CommandType.reboot_ui)) {
-            assertFalse(h.cmd(c), "$c 这一档还没实现，得让调用方看得见地记一行，而不是当成功")
-        }
+        // 轨迹批量面还没给展示端读（screen-link.md 批量面），track_pull 仍然没人处理
+        assertFalse(h.cmd(CommandType.track_pull), "track_pull 这一档还没实现，得让调用方看得见地记一行，而不是当成功")
         assertFalse(h.runtime.handleScreenCommand(null), "帧里没有 command 体 = 没接住，不许当成功")
+    }
+
+    /**
+     * **圆屏上滑层 P2 的两条设置动作**（ROUND-SCREEN-GESTURES §4）：屏上改的开关
+     * 和手机 Tab4 那两枚是**同一个状态**，屏改完这一拍的状态里就该看得到 ——
+     * 这正是"两边读一份事实"的验收：谁都不许各自留一份副本。
+     */
+    @Test
+    fun `屏改演示模式和围栏写进同一份引擎状态`() {
+        val h = Harness()
+        h.ui()
+
+        assertTrue(h.cmd(CommandType.set_demo_mode, args = """{"on":true}"""), "set_demo_mode 该被接住")
+        assertTrue(h.runtime.status.value.snapshot!!.demoMode, "屏开了演示模式，同一拍的状态里就该是真的")
+
+        assertTrue(h.cmd(CommandType.set_demo_mode, args = """{"on":false}"""))
+        assertFalse(h.runtime.status.value.snapshot!!.demoMode, "屏关掉演示模式，App 设置页那一枚也得跟着弹回")
+
+        // 缺 on 的帧当没发：屏拼错参数时手机记一行日志，状态不许被翻
+        assertFalse(h.cmd(CommandType.set_demo_mode), "缺 on 不许当成功")
+
+        assertTrue(h.cmd(CommandType.set_fence, args = """{"on":true,"name":"家"}"""), "set_fence 该被接住")
+        assertTrue(h.runtime.status.value.snapshot!!.fence.active, "屏开了围栏，下一拍 App 卡片就该画出来")
+
+        assertTrue(h.cmd(CommandType.set_fence, args = """{"on":false}"""))
+        assertFalse(h.runtime.status.value.snapshot!!.fence.active, "屏关掉围栏，App 卡片同步")
+
+        assertFalse(h.cmd(CommandType.set_fence), "缺 on 不许当成功")
     }
 
     /**

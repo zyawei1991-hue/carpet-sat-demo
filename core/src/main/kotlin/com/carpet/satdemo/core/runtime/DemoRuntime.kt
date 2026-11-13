@@ -57,6 +57,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -663,6 +664,19 @@ class DemoRuntime(
         }
         CommandType.page_report -> reportScreenPage(args?.stringOf("page"))
         CommandType.mic_chunk -> ingestMicChunk(args)
+        // 圆屏上滑层 P2 的两条设置动作（ROUND-SCREEN-GESTURES §4）：读写和手机 Tab4
+        // 同一份引擎状态，屏上改完 App 那边下一拍跟着变 —— 这就是状态归属清理要的"一份事实"
+        CommandType.set_demo_mode -> screenSetDemoMode(args)
+        CommandType.set_fence -> screenSetFence(args)
+        CommandType.track_pull -> {
+            // 轨迹数据还没给展示端读（screen-link.md 批量面），占位命令记一行别静默
+            log("track_pull 收到 · 轨迹批量面还没实现，这条没人处理")
+            false
+        }
+        CommandType.reboot_ui -> {
+            log("reboot_ui 收到 · 屏自恢复归屏侧管，手机这边无事可做")
+            true
+        }
         else -> false
     }
 
@@ -727,11 +741,47 @@ class DemoRuntime(
         return true
     }
 
+    /** 圆屏上滑层改演示模式开关（ROUND-SCREEN-GESTURES §4）：和 Tab4 那枚开关写同一个引擎状态 */
+    private fun screenSetDemoMode(args: JsonObject?): Boolean {
+        val on = args?.boolOf("on") ?: run {
+            log("set_demo_mode 缺 on，这条扔掉")
+            return false
+        }
+        setDemoMode(on)
+        log("屏${if (on) "打开" else "关掉"}演示模式 · App 设置页同步")
+        publishState(engine.snapshot(), clockMs())
+        return true
+    }
+
+    /** 圆屏上滑层改围栏：给了圆心半径就由引擎按定位算越界，和 App 那枚开关写同一个状态 */
+    private fun screenSetFence(args: JsonObject?): Boolean {
+        val on = args?.boolOf("on") ?: run {
+            log("set_fence 缺 on，这条扔掉")
+            return false
+        }
+        val lat = args.doubleOf("lat")
+        val lon = args.doubleOf("lon")
+        val radius = args.doubleOf("radius_m")
+        setFence(on, args.stringOf("name"), lat, lon, radius ?: 0.0)
+        log("屏${if (on) "开启" else "关闭"}围栏${args.stringOf("name")?.let { " · $it" } ?: ""} · App 卡片同步")
+        publishState(engine.snapshot(), clockMs())
+        return true
+    }
+
     /** args 里取一个整数。屏发歪了（缺键、null、不是数字）一律当没发，由调用方拿缺省 */
     private fun JsonObject.intOf(key: String): Int? = this[key]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
 
     /** args 里取一个字符串。同上：缺键或不是标量就当没发，交给调用方判 */
     private fun JsonObject.stringOf(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
+
+    /** args 里取一个布尔。屏发歪了当没发；字符串 "true"/"1" 也收，固件那边序列化口径不统一 */
+    private fun JsonObject.boolOf(key: String): Boolean? = when (val v = this[key]?.jsonPrimitive) {
+        null -> null
+        else -> v.booleanOrNull ?: v.contentOrNull?.let { it == "true" || it == "1" }
+    }
+
+    /** args 里取一个小数。围栏圆心/半径用 */
+    private fun JsonObject.doubleOf(key: String): Double? = this[key]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
 
     /** 切卡请求。SOS 正在走的时候顶回去：那种时候屏上唯一该说的话是倒计时 */
     private fun stepCard(dir: Int): Boolean {

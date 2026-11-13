@@ -182,8 +182,8 @@ class HomeViewModel(private val app: AppRuntime) : ViewModel() {
 
     fun revokeScreen(id: String) = app.revokeScreen(id)
 
-    fun openSkills() = app.setTab(3)
+    fun openSkills() = app.openTab(AppRuntime.Tab.Me)
 
     /** 首页圆屏卡进来的：设备与底座中心在「我的」（Tab 3），配对表单整个归它管 */
-    fun openDeviceCenter() = app.setTab(3)
+    fun openDeviceCenter() = app.openTab(AppRuntime.Tab.Me)
 }

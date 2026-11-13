@@ -90,10 +90,10 @@ fun CarpetRoot(app: AppRuntime) {
                 label = "tab",
             ) { t ->
                 when (t) {
-                    0 -> HomeShell(app, status)
-                    1 -> VehicleTab(app, status)
-                    2 -> FamilyTab(app, status)
-                    else -> MeTab(app, status, onEngineer = { app.setFlag(flags.copy(engineering = true)) })
+                    AppRuntime.Tab.Home -> HomeShell(app, status)
+                    AppRuntime.Tab.Vehicle -> VehicleTab(app, status)
+                    AppRuntime.Tab.Family -> FamilyTab(app, status)
+                    AppRuntime.Tab.Me -> MeTab(app, status, onEngineer = { app.setFlag(flags.copy(engineering = true)) })
                 }
             }
         }
@@ -111,7 +111,7 @@ fun CarpetRoot(app: AppRuntime) {
  * 不会像原来那样把最要紧的东西挤成竖排。
  */
 @Composable
-private fun BottomBar(app: AppRuntime, tab: Int) {
+private fun BottomBar(app: AppRuntime, tab: AppRuntime.Tab) {
     // targetSdk 34 在 Android 14 上是强制 edge-to-edge 的：这一格不补 systemBars，手势条就压在 SOS 和标签上。
     // Material 的 Scaffold 只替内容侧算 insets，bottomBar 得自己接。
     // 背板套在最外、insets 加在背板之内：底色要一直铺到手势条那一条，不然底部露出一截别的颜色
@@ -129,9 +129,10 @@ private fun BottomBar(app: AppRuntime, tab: Int) {
                 if (i == 2) {
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) { SosDial(app) }
                 }
+                val page = AppRuntime.Tab.entries[i]
                 NavigationBarItem(
-                    selected = i == tab,
-                    onClick = { app.setTab(i) },
+                    selected = page == tab,
+                    onClick = { app.setTab(page) },
                     modifier = Modifier.weight(1f),
                     icon = { Icon(t.icon, contentDescription = t.label, modifier = Modifier.size(22.dp)) },
                     label = { Text(t.label, style = Type.Caption) },

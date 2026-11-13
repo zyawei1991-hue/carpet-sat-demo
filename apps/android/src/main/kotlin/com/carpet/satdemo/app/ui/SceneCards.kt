@@ -139,7 +139,7 @@ fun VehicleFindCard(s: CardScope) {
 @Composable
 fun VehicleServiceCard(s: CardScope) {
     val maint = s.app.maint
-    val scene by s.app.scene.collectAsState()
+    val scene by s.scene.collectAsState()
     val selected by maint.selected.collectAsState()
     val mine = run {
         val all = maint.suggest(s.board())
@@ -221,8 +221,8 @@ private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestio
     )
     // 两句实话：车架号得接上 OBD 才读得到；上行还没接，所以这张单现在只在手机里
     if (!maint.vinReal) Text("车架号是编的：接上 OBD 盒子才读得到后 6 位", style = Type.Caption, color = Ink.Wait)
-    val base by s.app.scene.collectAsState()
-    val choice by s.app.privacyChoice.collectAsState()
+    val base by s.scene.collectAsState()
+    val choice by s.privacyChoice.collectAsState()
     Text(
         if (maint.canSendOut(base.profile.basePrivacy, choice)) {
             "卫星发送还没接通，这张单现在只在手机里；可以先复制出来核对"
@@ -533,8 +533,8 @@ fun SubscriptionCard(s: CardScope) {
  */
 @Composable
 fun PrivacyCard(s: CardScope) {
-    val picked = s.app.privacyChoice.collectAsState().value
-    val base = s.app.scene.collectAsState().value.profile.basePrivacy
+    val picked = s.privacyChoice.collectAsState().value
+    val base = s.scene.collectAsState().value.profile.basePrivacy
     val eff = PrivacyTier.effective(base, picked)
     InkCard(icon = MIcons.privacy, mock = s.mock(Capability.Account)) {
         CardTitle("隐私中心", trailing = "取更严的那个")
@@ -599,10 +599,10 @@ private fun TierRow(label: String, tier: PrivacyTier, onPick: ((PrivacyTier) -> 
 @Composable
 fun DeviceManagerCard(s: CardScope) {
     val st = s.status
-    val list = s.app.devices.collectAsState().value
+    val list = s.devices.collectAsState().value
     val now = System.currentTimeMillis()
     val allowed = s.app.allowedScreens()
-    val acceptScreens by s.app.flags.collectAsState()
+    val acceptScreens by s.flags.collectAsState()
     var draft by rememberSaveable { mutableStateOf("") }
     InkCard(icon = MIcons.terminal) {
         CardTitle("设备与底座", trailing = if (st.running) "守护运行中" else "守护已停")

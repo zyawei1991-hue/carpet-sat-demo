@@ -52,7 +52,7 @@ class HomeScreenRenderTest {
         shoot("tab0-home")
 
         for (t in 1..3) {
-            app.setTab(t)
+            app.setTab(AppRuntime.Tab.entries[t])
             compose.waitForIdle()
             shoot("tab$t")
         }
@@ -104,7 +104,7 @@ class HomeScreenRenderTest {
         compose.setContent { CarpetTheme { CarpetRoot(app) } }
         compose.waitForIdle()
         shoot("$prefix-home")
-        app.setTab(3)
+        app.setTab(AppRuntime.Tab.Me)
         compose.waitForIdle()
         shoot("$prefix-me")
     }
@@ -124,7 +124,7 @@ class HomeScreenRenderTest {
         compose.setContent { CarpetTheme { CarpetRoot(app) } }
         compose.waitForIdle()
         shoot("deep-home")
-        app.setTab(3)
+        app.setTab(AppRuntime.Tab.Me)
         compose.waitForIdle()
         shoot("deep-me")
     }

@@ -2,8 +2,10 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.runtime.Composable
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.core.vehicle.ReadingBoard
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * 一件事有没有真数据源。§5.3 硬要求 #3 的三档说法：
@@ -151,6 +153,18 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
  */
 class CardScope(val app: AppRuntime, val status: DemoRuntime.Status) {
     val snap get() = status.snapshot
+
+    /** 当前场景。卡片读它不走 `app.scene` 直读：状态入口收拢在这一个类里 */
+    val scene: StateFlow<Scene> = app.scene
+
+    /** 家长设置的隐私档。生效档 = 这个和场景底座档取更严（[PrivacyTier.effective]） */
+    val privacyChoice: StateFlow<PrivacyTier> = app.privacyChoice
+
+    /** 设备台账。设备中心那张卡读它，切场景/切 Tab 都不会让一台设备消失 */
+    val devices: StateFlow<List<Device>> = app.devices
+
+    /** 全局开关位。设备中心那张卡的「允许圆屏接入」读它 */
+    val flags: StateFlow<AppRuntime.Flags> = app.flags
 
     fun avail(c: Capability): Availability = app.availability(c)
 

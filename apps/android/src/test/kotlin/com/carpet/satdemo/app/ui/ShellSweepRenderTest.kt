@@ -59,7 +59,7 @@ class ShellSweepRenderTest {
         compose.activity.resources.updateConfiguration(cfg, null)
     }
 
-    private fun shootTab(name: String, tab: Int, fontScale: Float? = null) {
+    private fun shootTab(name: String, tab: AppRuntime.Tab, fontScale: Float? = null) {
         val app = boot()
         app.setTab(tab)
         if (fontScale != null) setFontScale(fontScale)
@@ -88,60 +88,60 @@ class ShellSweepRenderTest {
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun homeFirstScreen() = shootTab("shell-home-384", 0)
+    fun homeFirstScreen() = shootTab("shell-home-384", AppRuntime.Tab.entries[0])
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun vehicleFirstScreen() = shootTab("shell-vehicle-384", 1)
+    fun vehicleFirstScreen() = shootTab("shell-vehicle-384", AppRuntime.Tab.entries[1])
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun familyFirstScreen() = shootTab("shell-family-384", 2)
+    fun familyFirstScreen() = shootTab("shell-family-384", AppRuntime.Tab.entries[2])
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun meFirstScreen() = shootTab("shell-me-384", 3)
+    fun meFirstScreen() = shootTab("shell-me-384", AppRuntime.Tab.entries[3])
 
     /** 整页：滚动内容全铺开，看每一组的顺序与留白，不是只看第一眼 */
     @Test
     @Config(qualifiers = "w384dp-h2600dp-xhdpi")
-    fun homeWholePage() = shootTab("shell-home-384-deep", 0)
+    fun homeWholePage() = shootTab("shell-home-384-deep", AppRuntime.Tab.entries[0])
 
     @Test
     @Config(qualifiers = "w384dp-h2600dp-xhdpi")
-    fun vehicleWholePage() = shootTab("shell-vehicle-384-deep", 1)
+    fun vehicleWholePage() = shootTab("shell-vehicle-384-deep", AppRuntime.Tab.entries[1])
 
     @Test
     @Config(qualifiers = "w384dp-h2600dp-xhdpi")
-    fun familyWholePage() = shootTab("shell-family-384-deep", 2)
+    fun familyWholePage() = shootTab("shell-family-384-deep", AppRuntime.Tab.entries[2])
 
     @Test
     @Config(qualifiers = "w384dp-h2600dp-xhdpi")
-    fun meWholePage() = shootTab("shell-me-384-deep", 3)
+    fun meWholePage() = shootTab("shell-me-384-deep", AppRuntime.Tab.entries[3])
 
     /** 系统字号调大那一档：真机上"每个页面都乱"最常见的一个来源就是这个 */
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun homeFirstScreenFont130() = shootTab("shell-home-384-font130", 0, fontScale = 1.3f)
+    fun homeFirstScreenFont130() = shootTab("shell-home-384-font130", AppRuntime.Tab.entries[0], fontScale = 1.3f)
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun vehicleFirstScreenFont130() = shootTab("shell-vehicle-384-font130", 1, fontScale = 1.3f)
+    fun vehicleFirstScreenFont130() = shootTab("shell-vehicle-384-font130", AppRuntime.Tab.entries[1], fontScale = 1.3f)
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun familyFirstScreenFont130() = shootTab("shell-family-384-font130", 2, fontScale = 1.3f)
+    fun familyFirstScreenFont130() = shootTab("shell-family-384-font130", AppRuntime.Tab.entries[2], fontScale = 1.3f)
 
     @Test
     @Config(qualifiers = "w384dp-h836dp-xhdpi")
-    fun meFirstScreenFont130() = shootTab("shell-me-384-font130", 3, fontScale = 1.3f)
+    fun meFirstScreenFont130() = shootTab("shell-me-384-font130", AppRuntime.Tab.entries[3], fontScale = 1.3f)
 
     /** 窄屏下限：分屏与老机型 */
     @Test
     @Config(qualifiers = "w360dp-h836dp-xhdpi")
-    fun homeNarrowest() = shootTab("shell-home-360", 0)
+    fun homeNarrowest() = shootTab("shell-home-360", AppRuntime.Tab.entries[0])
 
     @Test
     @Config(qualifiers = "w360dp-h836dp-xhdpi")
-    fun meNarrowest() = shootTab("shell-me-360", 3)
+    fun meNarrowest() = shootTab("shell-me-360", AppRuntime.Tab.entries[3])
 }
