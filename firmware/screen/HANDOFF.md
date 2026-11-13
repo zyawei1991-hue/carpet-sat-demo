@@ -3043,3 +3043,78 @@ owner 的硬约束是**演示现场不用电脑** —— 换一块板、或者 N
 `git apply: OK (34 sections)` / `byte-compare: 32/34 identical`。差的两个仍是 `carpet_mic.c/.h`，
 **这轮改过内容所以逐行数过**：工作树 CRLF **485 / 114** 行，字节差 21332−20847=**485**、7649−7535=**114**，
 正好等于行数 ⇒ 纯行尾。`:core:test` 实跑 **329 条 / 红 1 条** = photo 漂移（`缺的是 [photo]`），无新红。
+
+### 19. 四方向导航以 B 为准重做：五格十字 + 手势引擎（owner 拍「以 B 为准，重做」）
+
+**为什么重做**：远端两份滑动规范打架。A（`protocol/screen-link.md` 卡片手势：左右滑 card_next、
+上下滑定开/定关明细、长按 card_auto、单击 poke）方向语义**作废**，但它那套**已称过的判定引擎**
+（阈值 60px、抬手判为横滑/竖滑/单击/长按、indev 单点跟踪）留作地基；B（`docs/ROUND-SCREEN-GESTURES.md`，
+11-12 v1）方向语义为准。同一条裁决把 photo 漂移判成**补页不撤回**（#30，`4281e96`），本轮 `:core:test` 那条红已消。
+**注**：`4281e96` 落的是**中间版**（三格 face/settings/scene，`gesture_settle` 里还是 A 的 card_next/poke）；
+本轮把补丁补到**完整 B 版**（五格十字 + 四方向），下面称到的就是这一版（逐文件比过 HEAD↔工作树：
+`carpet_page.c/.h`、`muse_ui.c/.h`、字库五处实质改动，不是只清行尾）。
+
+**B 的四方向 + 五格十字**（`muse_ui.c`：脸(1,1)中、设置(2,1)右、功能(1,2)下、场景环(1,0)上、氛围(0,1)左；`DOT_COUNT 3→5`）：
+- 下拉(dy>0) → 场景环（ring 格，picker）
+- 上滑(dy<0) → 功能层（func 格，当前场景 `s_scene_pg`）
+- 左滑(dx<0) → 设置（settings 格）
+- 右滑(dx>0) → 氛围（amb 格，`s_amb_pg`=clock；已在氛围格再右滑轮换 clock→gallery→photo）
+- 单击空处 → 回脸（只从格 2/3/4；脸/设置那两格点击归 Muse）
+- 长按 → 不动（B 没派动作；这屏没有圆形 SOS 钮）
+
+互斥（B §2.1）：SOS!=「正常」四手势全冻结；对话中(dialog 非空)保留上下、忽略左右；熄屏全无效。
+carpet 模式 tileview 永不自滚（`s_swipe_enabled=false`），四方向归手势引擎 `muse_ui_goto_tile(t)`→`lv_tileview_set_tile`。
+物理方向与 B 一致：左滑露右=设置、右滑露左=氛围、下拉露上=场景环、上滑露下=功能。
+
+**改了什么（屏侧，相对 4281e96）**：
+- `muse_ui.c/.h`：三格→五格十字；`muse_ui_show_carpet()`→`muse_ui_goto_tile(int page)`（0脸1设置2功能3场景环4氛围）；
+  `off_screen` 改用 `lv_tileview_get_tile_active()!=s_face`（脸在(1,1)，scroll_x 恒>0，旧判据会永远当成"露着设置"）；
+  建完 `set_tile` 到脸（(0,0)空着，播种滚动方向那句不跑）。
+- `carpet_page.c/.h`：`carpet_page_build(tile)`→`build(func,ring,amb)` 三格；新增 `tile_for_page`
+  （picker→3 / vehicle,kids,avatar→2 / clock,gallery,photo→4）、`sync_tile`、`s_scene_pg`/`s_amb_pg`；
+  `gesture_settle` 换成 B 四方向 + 右滑轮换 + 单击回脸 + 长按不动 + 三道互斥；`hits_control` 带 root 参、
+  `active_tile_obj()` 只查现在露着那格；`drag_timer` 熄屏闸 + 按下日志改 `格=N 页=X`。
+  契约锁死的 `PAGE_NAMES[8]`/`PICKER_CELLS`/`PAGE_DEFS`/rows 一字未动。
+- `gesture_log.py`：`RX_PRESS` 跟 B 的按下日志（`按下 (x,y) 格=N 页=X`，不再是 `按下卡面…当前卡=`）。
+- `carpet_mic.c/.h`：工作树 CRLF→LF 归一（**内容不变**，消掉补丁校验 32/34 老坑；行尾不影响 C 编译，已刷固件不受影响）。
+- `carpet_font.ttf`：重跑子集（改文案必须重跑），261,748 B。
+
+#### 称到了（COM8 本轮我占；串口注入 `>gest` 合成手势，不是真玻璃）
+
+编译 `Project build complete.` / `WEXIT=0`；app-flash `Wrote 3411968 bytes (2268520 compressed) … Hash of data verified.` / `WEXIT=0`。
+四方向从脸逐个注入（reset 模式，每次 `>gest` 前回脸；`>carpet` 回读 nav；阈值 60px、合成位移 ±80）：
+- `>gest down`：`抬手 dx=0 dy=80 held=121ms → 判为竖滑（阈值 60px）` / `下拉 → 场景环` → `@carpet nav=picker`
+- `>gest up`：`抬手 dx=0 dy=-80 held=135ms → 判为竖滑` / `上滑 → 功能层（vehicle）` → `nav=vehicle`
+- `>gest left`：`抬手 dx=-80 dy=0 held=139ms → 判为横滑` / `左滑 → 设置` → `nav=picker`
+  （设置不是契约页，report_name 兜底回 picker；无歧义判据是「左滑 → 设置」那行日志本身）
+- `>gest right`：`抬手 dx=80 dy=0 held=155ms → 判为横滑` / `右滑 → 氛围（clock）` → `nav=clock`
+- `>gest tap`：`抬手 dx=0 dy=0 held=145ms → 判为单击`，从脸不动 → `nav=face`
+- `>gest hold`：`抬手 dx=0 dy=0 held=920ms → 判为长按` / `长按：B 未派动作，不动` → `nav=face`
+
+`gesture_log.py report` 对这份采集端到端跑通：`按下 6 次 / 抬手 6 次`、`横滑 2 / 竖滑 2 / 长按 1 / 单击 1`、
+`command 发出去 0 条，链路没通被挡 11 条`（11 条 `send page_report: ESP_FAIL` ⇒ linked=0）。
+补丁重打 **598,092 B / 34 段**；`verify_carpet_patch.py` 全新 scratch（`patchcheck-b36`）：
+`baseline copies restored: 18` / `git apply: OK (34 sections)` / `byte-compare: 34/34 identical`（CRLF 归一后不再差那两个）。
+`:core:test` **强制真跑**（`--rerun-tasks --no-build-cache`）：`4 actionable tasks: 4 executed`、
+**329 条 / 红 0 / skip 0**，SchemaDriftTest 13 条全绿（XML 内部时间戳 13:23:44，不是缓存的 11:33）。
+**坑记一笔**：先跑 `cleanTest test` 回 `FROM-CACHE`、XML 内部时间戳仍是旧的 11:33 —— 补丁是测试**运行时**读的
+（`Paths.get`），不是 Gradle 声明的输入，缓存键没变 ⇒ 拿的是旧补丁结果。`cleanTest` 只删输出不破缓存，
+必须 `--rerun-tasks --no-build-cache` 才真跑。判据看 XML **内部 timestamp**，不看文件 mtime（缓存恢复也刷新 mtime）。
+
+#### 没称到（卡在哪）
+
+- **真玻璃触摸**：串口只能注 `>gest` 合成手势，注不了真实手指（同 §18.7）。判定引擎 + 四方向分支串口实跑称到；
+  手指→`drag_timer` 这根线是代码证据。**要 owner 在屏上真划四方向各一次**。
+- **右滑轮换（clock→gallery→photo）**：bench 每次前回脸（`s_bench_nav`），只称到从脸右滑进 clock；
+  氛围格里**再右滑**轮换那段是代码证据，没称到（采集里 6 次按下全是 `格=0 页=face`）。要非 reset 路径或真玻璃连划。
+- **单击空处回脸（从格 2/3/4）**：bench 从脸出发单击是 no-op；从功能/场景/氛围格单击回脸那段代码证据，没称到。
+- **互斥闸**（SOS!=正常冻结、对话中忽略左右、熄屏全无效）：代码证据，没在真状态上称过。
+- **page_report 发到手机**：要 linked=1。本轮 `wifi=down`（`scan complete, 0 APs`／存的 Mate 60 不在空中），
+  11 条 `send page_report: ESP_FAIL`、`reported=0`。nav 回读是屏侧本地，**不等于手机收到 page_report**。见 #8。
+
+#### 待 owner 拍的（不阻塞本轮同步）
+
+- P0 点 Avatar 进对话（voice-task 线程安全钩子）
+- 场景环 carousel 重画 / 换装动画
+- 每场景功能层标签（讲故事/成长记录/管额度/静音 还没有对应指令 ⇒ 还没接上）
+- 氛围默认页设置

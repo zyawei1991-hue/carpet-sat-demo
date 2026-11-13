@@ -16,8 +16,8 @@ import sys
 import time
 
 # 固件里 drag_timer / gesture_settle 打的那两行（改日志文案要连着这里一起改，
-# 不然 report 会报"一行都没抓到"）
-RX_PRESS = re.compile(r"按下卡面 \((-?\d+),(-?\d+)\) 当前卡=(\S+)")
+# 不然 report 会报"一行都没抓到"）。B 方案后按下那行报的是格号+页名，不再是卡名。
+RX_PRESS = re.compile(r"按下 \((-?\d+),(-?\d+)\) 格=(\d+) 页=(\S+)")
 RX_RELEASE = re.compile(r"抬手 dx=(-?\d+) dy=(-?\d+) held=(\d+)ms → 判为(\S+?)（阈值 (\d+)px）")
 # carpet_link.c 真打的是 "sent <cmd>" / "send <cmd>: <esp_err>"。
 # 早先这里写的 command{…} 只在注释里出现过，照那个正则永远数出 0 条。
