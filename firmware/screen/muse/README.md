@@ -30,9 +30,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 36 个文件、6686 行新增 / 95 行删，其中一份是 261,748 字节的字库
-  （`muse-carpet.patch`，11,496 行 / 621,914 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13（换装道具 + 场景环动效 + 一次划动一屏这一版）实读的。
+- 我们的全部改动 = 36 个文件、6716 行新增 / 95 行删，其中一份是 261,748 字节的字库
+  （`muse-carpet.patch`，11,526 行 / 623,665 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13（换装道具重画 + 场景环动效 + 一次划动一屏这一版）实读的。
   这一轮（11-13 下午）在唤醒词那版之上又加了三件 owner 当面拍的交互：**A** 导航圆点从全底部
   一排改成四方位（上=场景环 / 下=功能 / 右=设置 / 左=氛围，脸=中心 Avatar 不单独占点，`muse_ui.c`）；
   **B** 所有「返回」一律回 Avatar/脸页，不再层级回退（`carpet_page.c` 的 `nav_back()`）；
@@ -98,7 +98,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_pixel.h         |   4 +   (11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
-  esp32/avatar/muse_pixel.c                  | 215 +   (11-13 B §3 新入列，**在 components/muse 之外**：`muse_pixel_set_scene()` 实现 + `update_palette()` 里给绒毛 `C_BD..C_BH` 混场景色、按帧 `k=1-expf(-dt*7)` 约 0.5 s 过渡，脸 `C_SKIN*` 不动。**11-13 换装道具这一版再加 190 行**：12 个道具色 `C_BELT..C_TIE` + `s_costume_pop` 浮现 ramp（每次换场景清零、`1-expf(-dt*8)` 约 0.4 s 涨到 1）+ `cpx/c_disc/c_ellipse` 三个 ordered-dither 画笔 + `draw_vehicle/draw_kids/draw_suit/draw_costume`。车=安全带斜挎胸前 + 方向盘捧腹前（两者上下错开，盘不盖带，owner 要两个元素都看得见）；亲子=左爪呼吸玩偶 + 右旁滑滑梯；对话=正装外套 + 白衬衫 V + 领带 + 口袋巾。道具随 pop 用 dither 浮现再下滑入位，脸一律不动（「还是它换了装扮」）。**重打 patch 的路径清单必须含 `esp32/avatar/muse_pixel.c`**，漏了它声明进补丁、实现却没进 ⇒ 对端机器 undefined reference)
+  esp32/avatar/muse_pixel.c                  | 245 +   (11-13 B §3 新入列，**在 components/muse 之外**：`muse_pixel_set_scene()` 实现 + `update_palette()` 里给绒毛 `C_BD..C_BH` 混场景色、按帧 `k=1-expf(-dt*7)` 约 0.5 s 过渡，脸 `C_SKIN*` 不动。**11-13 换装道具这一版再加 220 行**：12 个道具色 `C_BELT..C_TIE` + `s_costume_pop` 浮现 ramp（每次换场景清零、`1-expf(-dt*8)` 约 0.4 s 涨到 1）+ `cpx/c_disc/c_ellipse` 三个 ordered-dither 画笔 + `draw_vehicle/draw_kids/draw_suit/draw_costume`。车=安全带斜挎上胸（末端金属扣止于左肋）+ 方向盘捧下腹前（细缘 + 三辐 + 圆毂，带与盘留出空隙不糊成一团）；亲子=左爪呼吸玩偶 + 右旁滑滑梯；对话=正装外套（两臂染袖色、袖口露绒毛爪）+ 白衬衫 V + 亮翻领 + 打结尖角领带 + 口袋巾。道具随 pop 用 dither 浮现再下滑入位，脸一律不动（「还是它换了装扮」）。**11-13 owner 回退「这个安全带和方向盘、还有数字分身这个穿正装的你自己看看对吗」这一版重画**：旧版带尾糊进盘缘成一团黑「6」、盘是粗缘全十字像「圆圈加十字」还压在脚上；正装裸绒毛臂像马甲、领带是平头红条（无结无尖）、翻领和外套同色看不见。重画 `draw_vehicle`（带止左肋 + 扣、盘细缘三辐圆毂落下腹、两者留空隙）+ `draw_suit`（臂内染外套色保留缝线 + 绒毛爪尖、领带结 + 带身 + 尖角、`C_SUITL` 调亮当翻领、宽衬衫 V）。重画后两张 466×466 截图实看：带与盘是两个分得开的物件，正装有袖有爪、领带有结有尖、翻领读得出。**重打 patch 的路径清单必须含 `esp32/avatar/muse_pixel.c`**，漏了它声明进补丁、实现却没进 ⇒ 对端机器 undefined reference)
   esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
   esp32/components/muse/muse_settings.c      |  82 + /   2 -   (11-13 B §5：NVS 再多一条 `album_def`（u8，缺键=时钟）+ `album_default` 那两个函数；11-12 唤醒词：NVS 再多一条 `wake_on`（u8，**缺键=默认开** —— owner 要的就是免按键，默认关等于没做）+ 那两个函数 + 开机日志尾部 `wake %s`；11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
@@ -372,6 +372,17 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     **没称到**：设置页那格开关在「声音」页折叠线以下，串口注不了滚动，截图只拍到页上半
     （开关本体是代码证据 + `>amb` 与它同一个 NVS key 的实跑）。#33 同轮复称：carpet 构建下说话键不再出
     英文「SET UP MUSE FIRST」（talk33.png 实看为 NO WI-FI + 脸；英文串只在非 carpet 的 `#else` 分支、本构建编译不进）。
+  - **11-13（换装道具重画，owner「这个安全带和方向盘、还有数字分身这个穿正装的你自己看看对吗」）**：
+    只改 `avatar/muse_pixel.c`（`draw_vehicle`/`draw_suit` + `C_SUITL` 调亮，215→245 行）。旧版车载带尾糊进盘缘
+    成一团黑「6」、盘粗缘全十字像「圆圈加十字」还压脚；正装裸臂像马甲、领带平头红条（无结无尖）、翻领和外套同色看不见。
+    重画：带止左肋 + 金属扣、盘细缘 + 三辐 + 圆毂落下腹、两者留空隙；正装臂内染袖色保留缝线 + 绒毛爪尖、
+    领带结 + 带身 + 尖角、亮翻领 + 宽衬衫 V。重打 patch：36 文件 / **6716+ / 95- / 11,526 行 / 623,665 字节**，
+    字库仍 261,748 字节。`verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` /
+    `git apply: OK (36 sections)` / **`byte-compare: 36/36 identical`**。**已编已刷已称**
+    （`Project build complete` / WEXIT=0 / `Hash of data verified.`，只 `app-flash`，分区没动）：
+    串口 `选场景 车/亲子/对话 → 换装 scene=1/2/3` 三条 + 四方向单击无回归；face-1.png（带与盘两个分得开的物件）、
+    face-3.png（有袖有爪、领带有结有尖、翻领读得出）两张 466×466 实看。
+    **没称到**：手指真划/真点（串口注不了触摸）；换装浮现的中间帧（快照 3~4 s 抓不到 0.4 s 过程，靠代码证）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash

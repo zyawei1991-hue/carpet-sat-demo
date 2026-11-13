@@ -1,5 +1,5 @@
 diff --git a/esp32/avatar/muse_pixel.c b/esp32/avatar/muse_pixel.c
-index de2542f..6deece1 100644
+index de2542f..cfa835a 100644
 --- a/esp32/avatar/muse_pixel.c
 +++ b/esp32/avatar/muse_pixel.c
 @@ -44,6 +44,19 @@ enum {
@@ -35,7 +35,7 @@ index de2542f..6deece1 100644
 +    [C_SLIDE] = 0xffb84d,
 +    [C_SLIDE2] = 0x7fb0ff,
 +    [C_SUIT] = 0x262a33,
-+    [C_SUITL] = 0x3d4452,
++    [C_SUITL] = 0x5b6579,
 +    [C_SHIRT] = 0xeef2f8,
 +    [C_TIE] = 0xc23a52,
  };
@@ -105,7 +105,7 @@ index de2542f..6deece1 100644
      rgb_t acc = s_scheme[4];
      pal[C_G0] = s_scheme[0];
      pal[C_G1] = s_scheme[1];
-@@ -827,6 +891,154 @@ static void draw_alert(int x, int y)
+@@ -827,6 +891,184 @@ static void draw_alert(int x, int y)
      stamp(BANG, 6, x - 2, y, C_ACC, C_ACC);
  }
  
@@ -144,18 +144,19 @@ index de2542f..6deece1 100644
 +    }
 +}
 +
-+/* 车载：右肩→左胸的安全带斜挎胸前（只落在绒毛上），方向盘捧在下方腹前（缘+毂+三辐+两爪）。
-+ * 两者上下错开：安全带在胸、方向盘在腹，不然盘会把带子整条盖住（owner 要两个元素都看得见）。 */
++/* 车载：安全带斜挎上胸（右肩→左肋，末端一个金属扣），方向盘捧在下腹前。
++ * 带子止于左肋、盘落在下方，两者留出空隙，绝不糊成一团（owner：两个元素都要看得清）。
++ * 盘＝细轮缘＋三辐（左/右/下）＋圆毂，不是「圆圈加十字」。 */
 +static void draw_vehicle(const avatar_t *j, float ca, int slide)
 +{
-+    int sx = iround(j->cx + j->a * 0.60f), sy = iround(j->fy + j->fb + 1.0f);
-+    int hx = iround(j->cx - j->a * 0.50f), hy = iround(j->cy + j->b * 0.40f);
++    int sx = iround(j->cx + j->a * 0.52f), sy = iround(j->fy + j->fb + 1.0f);
++    int hx = iround(j->cx - j->a * 0.55f), hy = iround(j->cy + j->b * 0.28f);
 +    int steps = abs(hx - sx);
 +    if (steps < 1) steps = 1;
 +    for (int i = 0; i <= steps; i++) {
 +        int x = sx + (hx - sx) * i / steps;
 +        int y = sy + (hy - sy) * i / steps;
-+        for (int w = -1; w <= 1; w++) {
++        for (int w = 0; w <= 1; w++) {
 +            if ((unsigned)(y + w) < H && (unsigned)x < W && s_mask[(y + w) * W + x] == M_BODY) {
 +                cpx(x, y + w, C_BELT, ca);
 +            }
@@ -167,18 +168,17 @@ index de2542f..6deece1 100644
 +        }
 +    }
 +
-+    int wx = iround(j->cx), wy = iround(j->cy + j->b * 0.58f) + slide, R = 7;
-+    for (int y = wy - R - 1; y <= wy + R + 1; y++) {
-+        for (int x = wx - R - 1; x <= wx + R + 1; x++) {
++    int wx = iround(j->cx), wy = iround(j->cy + j->b * 0.66f) + slide, R = 5;
++    for (int y = wy - R; y <= wy + R; y++) {
++        for (int x = wx - R; x <= wx + R; x++) {
 +            int dx = x - wx, dy = y - wy, d2 = dx * dx + dy * dy;
-+            if (d2 >= (R - 1) * (R - 1) && d2 <= (R + 1) * (R + 1)) cpx(x, y, C_WHEEL, ca);
++            if (d2 >= (R - 1) * (R - 1) && d2 <= R * R) cpx(x, y, C_WHEEL, ca);   /* 细缘 */
 +        }
 +    }
-+    for (int x = wx - R + 1; x <= wx + R - 1; x++) cpx(x, wy, C_WHEEL2, ca);
-+    for (int y = wy; y <= wy + R - 1; y++) cpx(wx, y, C_WHEEL2, ca);
-+    c_disc((float)wx, (float)wy, 2.2f, C_WHEEL2, ca);
-+    c_disc((float)(wx - R), (float)wy, 1.6f, C_BL, ca);   /* 搭在缘上的两只爪 */
-+    c_disc((float)(wx + R), (float)wy, 1.6f, C_BL, ca);
++    for (int x = wx - R + 1; x <= wx - 2; x++) cpx(x, wy, C_WHEEL2, ca);          /* 左辐 */
++    for (int x = wx + 2; x <= wx + R - 1; x++) cpx(x, wy, C_WHEEL2, ca);          /* 右辐 */
++    for (int y = wy + 2; y <= wy + R - 1; y++) cpx(wx, y, C_WHEEL2, ca);          /* 下辐 */
++    c_disc((float)wx, (float)wy, 1.6f, C_WHEEL2, ca);                            /* 毂 */
 +}
 +
 +/* 亲子：左爪一只轻轻呼吸的小熊玩偶，右旁一架滑滑梯（梯+平台+斜滑道+支柱）。 */
@@ -217,7 +217,8 @@ index de2542f..6deece1 100644
 +    }
 +}
 +
-+/* 分身：躯干绒毛变西装外套 + 白衬衫 V + 领带 + 口袋巾，脸/爪/脚仍是绒毛。 */
++/* 分身：躯干＋两臂绒毛变西装（外套＋袖），白衬衫 V＋亮翻领＋打结尖角领带＋口袋巾；
++ * 脸和爪尖仍是绒毛。袖＝臂内部染外套色、保留轮廓/缝线，末端露一只绒毛爪。 */
 +static void draw_suit(const avatar_t *j, float ca)
 +{
 +    int cx = iround(j->cx);
@@ -225,20 +226,49 @@ index de2542f..6deece1 100644
 +    int x0 = iround(j->cx - j->a), x1 = iround(j->cx + j->a);
 +    int span = ybot - ytop;
 +    if (span < 6) return;
++    static const int8_t N4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
++
++    /* 袖子：臂内部染外套色，边缘/缝线（邻接非臂）保留；记下每侧最低臂像素当爪尖。 */
++    int pawlx = -1, pawly = -1, pawrx = -1, pawry = -1;
++    for (int y = ytop - 10; y <= ybot; y++) {
++        if ((unsigned)y >= H) continue;
++        for (int x = x0 - 6; x <= x1 + 6; x++) {
++            if ((unsigned)x >= W || s_mask[y * W + x] != M_ARM) continue;
++            bool edge = false;
++            for (int k = 0; k < 4; k++) {
++                int xx = x + N4[k][0], yy = y + N4[k][1];
++                uint8_t n = ((unsigned)xx < W && (unsigned)yy < H) ? s_mask[yy * W + xx] : M_NONE;
++                if (n != M_ARM) { edge = true; break; }
++            }
++            if (!edge) cpx(x, y, C_SUIT, ca);
++            if (x < cx) { if (y > pawly) { pawly = y; pawlx = x; } }
++            else        { if (y > pawry) { pawry = y; pawrx = x; } }
++        }
++    }
++
 +    for (int y = ytop; y <= ybot; y++) {
 +        int rel = y - ytop;
-+        int sw = rel < 9 ? 5 - (rel * 4) / 9 : 0;
++        int sw = rel < 10 ? 6 - (rel * 6) / 10 : 0;   /* 衬衫 V：领口宽、往下收 */
 +        for (int x = x0; x <= x1; x++) {
 +            if (s_mask[y * W + x] != M_BODY) continue;
 +            int adx = abs(x - cx);
-+            bool tie = (adx <= 1 && rel >= 1 && rel <= span - 3) || (adx <= 2 && rel <= 1);
-+            bool shirt = !tie && rel < 9 && adx <= sw;
-+            bool lapel = !tie && !shirt && rel < 10 && adx <= sw + 2;
++            bool tie =
++                (rel >= 1 && rel <= 3 && adx <= (rel <= 1 ? 1 : 2)) ||   /* 结 */
++                (rel >= 4 && rel <= span - 5 && adx <= 1) ||             /* 带身 */
++                (rel >= span - 4 && rel <= span - 3 && adx <= 2) ||      /* 下摆放宽 */
++                (rel == span - 2 && adx <= 1) ||                         /* 尖角 */
++                (rel == span - 1 && adx == 0);
++            bool shirt = !tie && adx <= sw;
++            bool lapel = !tie && !shirt && rel < 11 && adx <= sw + 2;
 +            uint8_t c = tie ? C_TIE : shirt ? C_SHIRT : lapel ? C_SUITL : C_SUIT;
 +            cpx(x, y, c, ca);
 +        }
 +    }
-+    cpx(cx - 6, ytop + 5, C_SHIRT, ca);
++
++    if (pawly >= 0) c_disc((float)pawlx, (float)pawly, 1.5f, C_BL, ca);   /* 袖口露出的爪 */
++    if (pawry >= 0) c_disc((float)pawrx, (float)pawry, 1.5f, C_BL, ca);
++
++    cpx(cx - 6, ytop + 5, C_SHIRT, ca);   /* 左胸口袋巾 */
 +    cpx(cx - 5, ytop + 5, C_SHIRT, ca);
 +    cpx(cx - 6, ytop + 6, C_SHIRT, ca);
 +}
@@ -260,7 +290,7 @@ index de2542f..6deece1 100644
  /* ---------------------------------------------------------------------------
   * Frame
   * ------------------------------------------------------------------------- */
-@@ -1066,6 +1278,9 @@ void muse_pixel_render(const muse_pose_t *p)
+@@ -1066,6 +1308,9 @@ void muse_pixel_render(const muse_pose_t *p)
  
      draw_mouth(iround(j.fx), iround(eye_y + 3), mouth, mouth_open);
  
