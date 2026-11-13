@@ -765,14 +765,18 @@ class AppRuntime(private val host: Application) {
         if (wav.size < 32 * 1024 * 2 / 5) return
         _transcribing.value = true
         scope.launch(Dispatchers.IO) {
-            val text = SiliconFlowAsr.transcribe(wav)
+            val r = SiliconFlowAsr.transcribe(wav)
             _transcribing.value = false
-            if (text.isNullOrBlank()) {
-                say("没听清：转写失败或这句话是空的")
-            } else {
-                runtime.log("语音输入：「$text」")
-                withContext(Dispatchers.Main) { askAi(text, scene = scene) }
+            when (r) {
+                is SiliconFlowAsr.AsrResult.Text -> {
+                    runtime.log("语音输入：「${r.text}」")
+                    withContext(Dispatchers.Main) { askAi(r.text, scene = scene) }
+                }
+                is SiliconFlowAsr.AsrResult.Rejected ->
+                    runtime.log("转写服务拒绝（HTTP ${r.status}）：${r.bodyHead}")
+                else -> {}
             }
+            withContext(Dispatchers.Main) { say(asrFailLine(r)) }
         }
     }
 
@@ -1013,28 +1017,44 @@ class AppRuntime(private val host: Application) {
         // turn_id 用屏起的那个（m- 前缀），重编号会坏掉问答配对；转写失败只出一句人话，不留半句
         runtime.onMicSegment = { seg ->
             scope.launch(Dispatchers.IO) {
-                val text = SiliconFlowAsr.transcribe(MicUplink.pcmToWav(seg.pcm))
-                if (text.isNullOrBlank()) {
-                    withContext(Dispatchers.Main) { say("屏上那句话没转出来：没听清或转写失败") }
-                } else {
-                    withContext(Dispatchers.Main) { say("屏上说了：「$text」") }
-                    dialog.onScreenFrame(
-                        ScreenMessage(
-                            t = MsgType.dialog,
-                            seq = 0,
-                            ts = System.currentTimeMillis(),
-                            dialog = DialogPayload(
-                                turnId = seg.turnId,
-                                dir = DialogDir.up,
-                                text = text,
-                                source = DialogSource.asr,
-                                origin = DialogOrigin.screen,
+                // 和手机按键那条同一条闸（屏侧交接 §0.9）：key 没配就直接说，别让它冒充"没听清"
+                if (!SiliconFlowAsr.configured) {
+                    withContext(Dispatchers.Main) {
+                        say("语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包")
+                    }
+                    return@launch
+                }
+                val r = SiliconFlowAsr.transcribe(MicUplink.pcmToWav(seg.pcm))
+                when (r) {
+                    is SiliconFlowAsr.AsrResult.Text -> {
+                        withContext(Dispatchers.Main) { say("屏上说了：「${r.text}」") }
+                        dialog.onScreenFrame(
+                            ScreenMessage(
+                                t = MsgType.dialog,
+                                seq = 0,
+                                ts = System.currentTimeMillis(),
+                                dialog = DialogPayload(
+                                    turnId = seg.turnId,
+                                    dir = DialogDir.up,
+                                    text = r.text,
+                                    source = DialogSource.asr,
+                                    origin = DialogOrigin.screen,
+                                ),
                             ),
-                        ),
-                    )
+                        )
+                    }
+                    // 拆成四种可分辨的话（屏侧交接 §0.7 第 2 条）；Rejected 另打日志但不带 key
+                    is SiliconFlowAsr.AsrResult.Rejected ->
+                        runtime.log("转写服务拒绝（HTTP ${r.status}）：${r.bodyHead}")
+                    else -> {}
+                }
+                if (r !is SiliconFlowAsr.AsrResult.Text) {
+                    withContext(Dispatchers.Main) { say(asrFailLine(r)) }
                 }
             }
         }
+        // 拼段失败（缺号/越界/采样率）也要屏上可见，不能只留日志（§0.7 第 4 条）
+        runtime.onMicReject = { reason -> say("屏上那段语音没拼齐：$reason") }
         runtime.onCancelResult = { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
         runtime.onCommand = { msg ->
             // 屏上按出来的呼救和手机上按的是同一件事，那首页就不许留着上一条"撤销中"
@@ -1049,6 +1069,18 @@ class AppRuntime(private val host: Application) {
         voice.release()
         runtime.shutdown()
         scope.cancel()
+    }
+
+    /**
+     * 转写失败的那句人话（屏侧交接 §0.7 第 2 条：四种因各一句，
+     * 只有"没听清"才让用户重说；"没配 key"那句和手机按键那条一致）。
+     */
+    private fun asrFailLine(r: SiliconFlowAsr.AsrResult): String = when (r) {
+        is SiliconFlowAsr.AsrResult.NoKey -> "语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包"
+        is SiliconFlowAsr.AsrResult.Network -> "转写连不上网：检查手机蜂窝或 Wi-Fi"
+        is SiliconFlowAsr.AsrResult.Rejected -> "转写服务拒绝（HTTP ${r.status}）"
+        is SiliconFlowAsr.AsrResult.Empty -> "没听清：这句话是空的"
+        is SiliconFlowAsr.AsrResult.Text -> ""
     }
 
     companion object {

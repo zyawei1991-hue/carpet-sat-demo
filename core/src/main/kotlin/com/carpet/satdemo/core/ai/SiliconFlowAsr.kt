@@ -25,14 +25,31 @@ object SiliconFlowAsr {
     val configured: Boolean get() = apiKey.isNotBlank()
 
     /**
+     * 转写的四种可分辨结局（屏侧交接 §0.7/§0.9：四种因共用一句"没听清"，
+     * owner 现场就分不清该配 key、该开网、还是该重说一遍）。
+     * [Rejected] 只带 status 和 body 前 200 字 —— **绝不带 key、不带 Authorization 头**。
+     */
+    sealed class AsrResult {
+        data class Text(val text: String) : AsrResult()
+        /** 没配 key（调用方通常前置 `configured` 拦住，这里兜底） */
+        data object NoKey : AsrResult()
+        /** 连不上 / 超时 / 抛异常 */
+        data object Network : AsrResult()
+        /** 服务不认（非 200），status 和 body 前 200 字给日志 */
+        data class Rejected(val status: Int, val bodyHead: String) : AsrResult()
+        /** 200 但转写文本空白 —— 只有这一种才该让用户重说一遍 */
+        data object Empty : AsrResult()
+    }
+
+    /**
      * 转写一段 WAV。
      *
      * @param wav 完整的 WAV 字节（16k 单声道 PCM 录出来的，参数已写进 RIFF 头）
      * @param timeoutMs 总时限；SenseVoiceSmall 对 10s 音频很快，给长一点是怕冷启动
-     * @return 转写文本；没配 key / 连不上 / 服务不认 / 空文本 一律 null
      */
-    fun transcribe(wav: ByteArray, timeoutMs: Long = 20_000): String? {
-        if (!configured || wav.isEmpty()) return null
+    fun transcribe(wav: ByteArray, timeoutMs: Long = 20_000): AsrResult {
+        if (!configured) return AsrResult.NoKey
+        if (wav.isEmpty()) return AsrResult.Empty
 
         val boundary = "----CarpetSat" + System.currentTimeMillis().toString(16)
         val head = buildString {
@@ -62,15 +79,22 @@ object SiliconFlowAsr {
                 out.write(wav)
                 out.write(tail)
             }
-            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                // 错误响应体读 errorStream（getInputStream 对非 2xx 直接抛）
+                val body = runCatching {
+                    conn.errorStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+                }.getOrElse { "" }
+                return AsrResult.Rejected(conn.responseCode, body.take(200))
+            }
             val body = conn.inputStream.use { input ->
                 val buf = ByteArrayOutputStream()
                 input.copyTo(buf)
-                buf.toString("UTF-8")
+                buf.toString(Charsets.UTF_8)
             }
-            extractText(body)?.takeIf { it.isNotBlank() }
+            extractText(body)?.takeIf { it.isNotBlank() }?.let { AsrResult.Text(it) }
+                ?: AsrResult.Empty
         } catch (e: Exception) {
-            null
+            AsrResult.Network
         } finally {
             conn?.disconnect()
         }

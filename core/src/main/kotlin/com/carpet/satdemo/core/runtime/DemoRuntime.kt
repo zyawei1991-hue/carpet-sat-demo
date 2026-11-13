@@ -511,8 +511,8 @@ class DemoRuntime(
                 forSeq,
                 forEventId,
                 error,
-                // v4 上行申报：App 先发版，屏看到 4 才开 mic_chunk 上行
-                protocols = listOf(ScreenCodec.CONTRACT_VERSION, 4),
+                // v4 上行申报：CONTRACT_VERSION 已是 4（屏侧交接 §0.4），[4,4] 重复一个数
+                protocols = listOf(ScreenCodec.CONTRACT_VERSION),
             ),
         )
         if (screenId != null) server.sendTo(screenId, msg) else push(listOf(msg))
@@ -692,6 +692,12 @@ class DemoRuntime(
     /** 拼齐一段上行语音。宿主拿它封 WAV → 转写 → `dialog{dir:"up"}` 走对话那条线 */
     var onMicSegment: (MicUplink.Segment) -> Unit = {}
 
+    /**
+     * 上行语音拼段失败（缺号/越界/采样率/超帧）。只打日志的话 owner 在屏上看到的就是
+     * "没反应"（屏侧交接 §0.7 第 4 条）—— 接了它才有可见反馈。
+     */
+    var onMicReject: (reason: String) -> Unit = {}
+
     private fun ingestMicChunk(args: JsonObject?): Boolean {
         val turnId = args?.stringOf("turn_id")
         val b64 = args?.stringOf("b64")
@@ -715,6 +721,7 @@ class DemoRuntime(
             }
             is MicUplink.Collector.Result.Reject -> {
                 log("上行语音作废：${r.reason}")
+                onMicReject(r.reason)
                 false
             }
         }

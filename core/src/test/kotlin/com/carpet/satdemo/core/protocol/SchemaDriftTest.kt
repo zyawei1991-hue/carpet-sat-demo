@@ -66,6 +66,9 @@ class SchemaDriftTest {
     fun `schema 说的 required 在 Kotlin 侧真的没有默认值`() {
         val root = schema()
         val blocks = listOf(
+            // 根也在内（屏侧交接 §0.4）：根 required 曾列着不上线的 `v`，
+            // 固件拿它当判据导致半个月 armed=0 —— 这条检查就是防下一个"v"
+            emptyList<String>() to ScreenMessage.serializer().descriptor,
             listOf("state") to StatePayload.serializer().descriptor,
             // ui 一旦带上来就必须说清画哪张卡；整个 ui 缺失是另一回事（那边允许，屏画总览）
             listOf("state", "ui") to UiState.serializer().descriptor,

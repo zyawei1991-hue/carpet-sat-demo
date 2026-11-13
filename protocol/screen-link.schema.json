@@ -4,7 +4,7 @@
   "$comment": "App(手机) <-> 展示端(微雪 1.75-B) 之间的唯一消息格式，单一事实来源。Android 侧照此生成数据类，固件侧照此手写 cJSON 解析。改字段必须升 v 并同步两端，禁止只改一端。传输细节见 screen-link.md。",
   "title": "ScreenLinkMessage",
   "type": "object",
-  "required": ["v", "t", "seq"],
+  "required": ["t", "seq"],
   "properties": {
     "v": {
       "type": "integer",
