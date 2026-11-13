@@ -7382,10 +7382,10 @@ index 0000000..b77731c
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..8ec535d
+index 0000000..0daf893
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1206 @@
+@@ -0,0 +1,1234 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -8161,22 +8161,38 @@ index 0000000..8ec535d
 +    switch (g) {
 +    case G_SWIPE_X:
 +        if (talking) { ESP_LOGI(TAG, "对话中，左右滑忽略"); return; }
-+        if (dx < 0) {                       /* 左滑 → 设置 */
++        if (s_tile != 0) {
++            /* owner 2026-11-14：Avatar 是中心枢纽。在任何外页横滑都先回中心脸，
++             * 不再按绝对方向跳到对侧外页（那会跳过中心）。唯一例外：氛围页右滑
++             * 仍是时钟/相册/照片轮换（留在氛围、不穿中心）。 */
++            if (dx > 0 && s_tile == 4) {
++                const int8_t next = s_amb_pg == PG_CLOCK ? PG_GALLERY
++                                  : s_amb_pg == PG_GALLERY ? PG_PHOTO : PG_CLOCK;
++                nav_to(next);
++                ESP_LOGI(TAG, "氛围页右滑 → 轮换到 %s", PAGE_NAMES[next]);
++            } else {
++                nav_to(PG_FACE);
++                ESP_LOGI(TAG, "外页横滑 → 回中心 Avatar");
++            }
++            break;
++        }
++        if (dx < 0) {                       /* 中心脸：左滑 → 设置 */
 +            muse_ui_goto_tile(1);
 +            sync_tile(1);
 +            ESP_LOGI(TAG, "左滑 → 设置");
-+        } else if (s_tile == 4) {           /* 右滑且已在氛围 → 轮换 */
-+            const int8_t next = s_amb_pg == PG_CLOCK ? PG_GALLERY
-+                              : s_amb_pg == PG_GALLERY ? PG_PHOTO : PG_CLOCK;
-+            nav_to(next);
-+            ESP_LOGI(TAG, "右滑 → 氛围轮换到 %s", PAGE_NAMES[next]);
-+        } else {                            /* 右滑 → 氛围（默认页由设置选，B §5） */
++        } else {                            /* 中心脸：右滑 → 氛围（默认页由设置选，B §5） */
 +            const int8_t def = muse_settings_album_default() ? PG_PHOTO : PG_CLOCK;
 +            nav_to(def);
 +            ESP_LOGI(TAG, "右滑 → 氛围（%s）", PAGE_NAMES[def]);
 +        }
 +        break;
 +    case G_SWIPE_Y:
++        if (s_tile != 0) {
++            /* 外页竖滑也先回中心脸，不跳到对侧外页（owner 2026-11-14）。 */
++            nav_to(PG_FACE);
++            ESP_LOGI(TAG, "外页竖滑 → 回中心 Avatar");
++            break;
++        }
 +        if (dy > 0) { nav_to(PG_PICKER);   ESP_LOGI(TAG, "下拉 → 场景环"); }
 +        else        { nav_to(s_scene_pg);  ESP_LOGI(TAG, "上滑 → 功能层（%s）", PAGE_NAMES[s_scene_pg]); }
 +        break;
@@ -8253,7 +8269,7 @@ index 0000000..8ec535d
 +    }
 +}
 +
-+void carpet_page_gesture_bench(int dx, int dy, int hold_ms)
++static void bench_gesture(int dx, int dy, int hold_ms, bool reset_face)
 +{
 +    /* 起点挑在空玻璃上：竖划走 x=40（列从 x=83 起），横划走 y=30（标题带之上），
 +     * 两个点都在 233 半径的圆里，也都躲开了条目卡和「返回」。 */
@@ -8264,10 +8280,22 @@ index 0000000..8ec535d
 +    s_bench_hold = (uint32_t)(hold_ms > 0 ? hold_ms : 120);
 +    s_bench_until = lv_tick_get() + s_bench_hold;   /* 真值在按下那一拍重算 */
 +    s_bench_down = false;
-+    s_bench_nav = true;
++    /* reset_face=true：tick 先回脸再判（中心四方向扇出）；false：从当前格判
++     * （外页划动回中心，owner 2026-11-14 那条修复要在外页起判才称得到）。 */
++    s_bench_nav = reset_face;
 +    s_bench = true;   /* 最后立这个记号：drag_timer 只认它 */
-+    printf("@gest 造 dx=%d dy=%d hold=%dms（>carpet 看页，日志看判为哪一条）\n",
-+           dx, dy, hold_ms > 0 ? hold_ms : 120);
++    printf("@gest 造 dx=%d dy=%d hold=%dms reset=%d（>carpet 看页，日志看判为哪一条）\n",
++           dx, dy, hold_ms > 0 ? hold_ms : 120, (int)reset_face);
++}
++
++void carpet_page_gesture_bench(int dx, int dy, int hold_ms)
++{
++    bench_gesture(dx, dy, hold_ms, true);
++}
++
++void carpet_page_gesture_bench_from(int dx, int dy, int hold_ms)
++{
++    bench_gesture(dx, dy, hold_ms, false);
 +}
 +
 +/* `>scene=<n>` 台架口：和点一张场景卡同一条路（设当前场景 + 换装 + 回脸），
@@ -8594,10 +8622,10 @@ index 0000000..8ec535d
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_page.h b/esp32/components/muse/carpet/carpet_page.h
 new file mode 100644
-index 0000000..e51f4e6
+index 0000000..4ec0f02
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,63 @@
 +/*
 + * 场景页（L1 选场景 / L2 场景 / L3 功能详情）住在 muse_ui.c 建的那格 tile 里。
 + *
@@ -8650,6 +8678,11 @@ index 0000000..e51f4e6
 + * 可以从串口任务调：它只写几个整数，翻页和判定都在 LVGL 任务里做。
 + */
 +void carpet_page_gesture_bench(int dx, int dy, int hold_ms);
++
++/* `>gestfrom` 台架口：和上面同一条判定路，但**不先回脸**——从当前露着的那一格起判。
++ * 为的是称 owner 2026-11-14 那条「外页划动回中心」：先 >gestfrom 到外页，再 >gestfrom
++ * 划一下，看是不是回中心脸（而不是跳到对侧外页）。 */
++void carpet_page_gesture_bench_from(int dx, int dy, int hold_ms);
 +
 +/* `>scene=<n>` 台架口：选定第 n 个场景（1 车 / 2 亲子 / 3 对话）+ 头像换装 + 回脸，
 + * 和点一张场景卡同一条路。串口任务只写一个整数，落地在 LVGL 任务里。 */
@@ -9002,7 +9035,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..f37aeeb 100644
+index 7c579bb..6622def 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,26 @@
@@ -9206,7 +9239,7 @@ index 7c579bb..f37aeeb 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +992,299 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,317 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -9347,6 +9380,24 @@ index 7c579bb..f37aeeb 100644
 +        else if (!strcmp(rest, "hold"))  carpet_page_gesture_bench(0, 0, 900);
 +        else {
 +            printf("@gest 只认 left / right / up / down / tap / hold\n");
++            fflush(stdout);
++            return true;
++        }
++        fflush(stdout);
++        return true;
++    }
++    /* `>gestfrom <dir>`：和 >gest 同一条判定路，但不先回脸——从当前格起判。
++     * 称「外页划动回中心」（owner 2026-11-14）：先 >gestfrom 到外页，再 >gestfrom 划一下。 */
++    if (!strncmp(line, "gestfrom", 8) && (line[8] == '\0' || line[8] == ' ')) {
++        const char *rest = line + 8;
++        while (*rest == ' ') rest++;
++        if (!strcmp(rest, "left"))       carpet_page_gesture_bench_from(-80, 0, 120);
++        else if (!strcmp(rest, "right")) carpet_page_gesture_bench_from(80, 0, 120);
++        else if (!strcmp(rest, "up"))    carpet_page_gesture_bench_from(0, -80, 120);
++        else if (!strcmp(rest, "down"))  carpet_page_gesture_bench_from(0, 80, 120);
++        else if (!strcmp(rest, "tap"))   carpet_page_gesture_bench_from(0, 0, 120);
++        else {
++            printf("@gestfrom 只认 left / right / up / down / tap（从当前格判，不回脸）\n");
 +            fflush(stdout);
 +            return true;
 +        }
@@ -9506,7 +9557,7 @@ index 7c579bb..f37aeeb 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1319,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1337,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -9519,7 +9570,7 @@ index 7c579bb..f37aeeb 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1427,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1445,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }

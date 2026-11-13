@@ -30,9 +30,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 36 个文件、6755 行新增 / 95 行删，其中一份是 261,748 字节的字库
-  （`muse-carpet.patch`，11,565 行 / 625,728 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13（车载 avatar 坐进红色小车这一版）实读的。
+- 我们的全部改动 = 36 个文件、6806 行新增 / 95 行删，其中一份是 261,748 字节的字库
+  （`muse-carpet.patch`，11,616 行 / 628,394 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-14（外页划动回中心 Avatar 这一版）实读的。
   这一轮（11-13 下午）在唤醒词那版之上又加了三件 owner 当面拍的交互：**A** 导航圆点从全底部
   一排改成四方位（上=场景环 / 下=功能 / 右=设置 / 左=氛围，脸=中心 Avatar 不单独占点，`muse_ui.c`）；
   **B** 所有「返回」一律回 Avatar/脸页，不再层级回退（`carpet_page.c` 的 `nav_back()`）；
@@ -65,6 +65,13 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   四方向无回归；`>scene=1|2|3` 三张换装截图 + picker 三卡截图实看，坐进红色小车（挡风玻璃+安全带）/ 玩偶+滑滑梯 / 正装都看得见。
   **没称到**：格间瞬切「不飞穿」与入场动效的中间帧——快照一张要 3~4 s，抓不到 300 ms 的过程，靠 `LV_ANIM_OFF`
   语义（瞬切无中间帧）+ 串口单落点证明，动效靠代码证；要肉眼确认得 owner 在真屏上划一下。
+  **D 外页划动回中心（11-14 owner 拍：「AVATAR 应该是最中间一页…无论在最左边、右边、上面、下面划都会直接跳过中间的 avatar 页到另一个方向的页面」）**：
+  真因是 `gesture_settle` 的方向→落点是**绝对映射**（左滑永远去设置格、右滑永远去氛围格…），不看当前在哪一格，
+  于是从卫星格朝里划会跳到对侧卫星格、飞过中心脸。改成**中心枢纽（hub-and-spoke）**：只有中心脸那一格按四方向发散
+  （左→设置 / 右→氛围 / 下拉→场景环 / 上→功能层），**任何外格划动一律先回中心 Avatar**（横滑竖滑都回），
+  唯一例外是氛围格右滑仍轮换 clock→gallery→photo（留在氛围、不跳中心）。判定引擎（阈值 60px、抬手判横/竖/点/长按）
+  一字未动，只改落点表。台架加 `>gestfrom`（`s_bench_nav=false`，从当前露着那格起判、不先回脸），
+  好把「外格→中心」这段单独称出来（旧 `>gest` 每次手势前硬回脸，只能称从脸出发那段）。
   字库从 154,528 涨到 261,748 字节是这轮之前补词表时重跑的，不是这轮加的。
   比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
   `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
@@ -89,12 +96,12 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_mic.c | 516 +   (新，11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口)
   esp32/components/muse/carpet/carpet_mic.h | 120 +   (新，那十个入口（含 11-13 下午 P0 的 `talk_request/talk_take`）+ `carpet_mic_mode_t` 三档)
-  esp32/components/muse/carpet/carpet_page.c | 1206 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次)
-  esp32/components/muse/carpet/carpet_page.h |  58 +   (新；11-13 B §3 +`carpet_page_scene_bench()` 台架口)
+  esp32/components/muse/carpet/carpet_page.c | 1234 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次；**11-14 外页划动回中心这一版再加 28 行**：`gesture_settle` 的 `G_SWIPE_X/G_SWIPE_Y` 从绝对方向→落点改成中心枢纽 —— `s_tile!=0`（任何外格）横滑/竖滑一律 `nav_to(PG_FACE)` 回中心，只有脸格（`s_tile==0`）按四方向发散；唯一例外氛围格右滑仍轮换 clock→gallery→photo；判定引擎未动。台架 `bench_gesture(dx,dy,hold,reset_face)` 抽出公共体，`carpet_page_gesture_bench` 传 true（每次前回脸）、新增 `carpet_page_gesture_bench_from` 传 false（从当前格起判）)
+  esp32/components/muse/carpet/carpet_page.h |  63 +   (新；11-13 B §3 +`carpet_page_scene_bench()` 台架口；11-14 +`carpet_page_gesture_bench_from()` 声明 —— 和 `carpet_page_gesture_bench()` 同一条判定路但不先回脸，从当前露着那格起判，为称「外格划动回中心」)
   esp32/components/muse/carpet/carpet_wake.c | 229 +   (新，11-12 语音唤醒词：只用 esp-sr 的 **WakeNet**，不上 AFE/AEC/MultiNet。`esp_srmodel_init("model")` → filter(ESP_WN_PREFIX) → `create(name, DET_MODE_90)`；喂的是 `idle_capture()` 那**唯一**的 20 ms/320 样本块，内部用累加器重切成引擎要的 512 样本/32 ms（**绝不新开第二个麦克风读者**，§16 那条坑）。`init()` 校验 chunk∈(0,1024]、单声道、16000 Hz，不对就 destroy 退出 —— 块长错了引擎会**静默永不命中**。三道不检测：设置关 / `carpet_audio_live()` 在念 / 一轮还没完（`s_inhibit`），命中后 62 块≈2 s 不应期。`>wake` 回读三行 `@wake`：ready/词/blocks/hits/dropped + detect 平均与最坏耗时 + 内部与 PSRAM 余量。**一个只有实读模型才发现的坑**：`esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段原文，四个候选里只有「你好小安」那份写的是拼音 `nihaoxiaoan` ⇒ 屏上会教人念拼音，已加一行 strcmp 译回中文)
   esp32/components/muse/carpet/carpet_wake.h |  67 +   (新，那七个入口：init / ready / feed / take / inhibit / word / dump)
   esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 410 + /   6 -   (11-13 B §5：+`>amb [clock|photo]` 读/改默认氛围（和设置页同一个 NVS key）；11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
+  esp32/components/muse/muse_input.c         | 428 + /   6 -   (11-14 外页划动回中心：+`>gestfrom [left|right|up|down|tap]` 台架口，照 `>gest` 那条但调 `carpet_page_gesture_bench_from()`（不先回脸、从当前格起判），printf 多印 `reset=%d`；11-13 B §5：+`>amb [clock|photo]` 读/改默认氛围（和设置页同一个 NVS key）；11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_pixel.h         |   4 +   (11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
@@ -406,6 +413,21 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     face-2.png（玩偶 + 滑滑梯）、face-3.png（正装）三张 466×466 实看，另两场景无回归。
     **没称到**：手指真划/真点、换装浮现中间帧（同上，靠代码证）；轮子是深色描在真黑 AMOLED 上对比偏弱，
     靠轮毂亮心 + 车身底沿托出，要 owner 真屏看一眼认不认得出是车。
+  - **11-14（外页划动回中心 Avatar，owner「AVATAR 应该是最中间一页…无论在最左边、右边、上面、下面划都会直接跳过中间的 avatar 页到另一个方向的页面」）**：
+    真因是 `carpet_page.c` 的 `gesture_settle` 用**绝对**方向→落点映射（不看当前格），从卫星格朝里划就跳到对侧卫星格、
+    飞过中心脸。改成中心枢纽：只有脸格（`s_tile==0`）按四方向发散，任何外格横滑/竖滑一律 `nav_to(PG_FACE)` 回中心；
+    唯一保留的例外是氛围格右滑仍轮换 clock→gallery→photo（留在氛围不跳中心）。判定引擎（60px 阈值、抬手判横/竖/点/长按）
+    未动，只改落点。`carpet_page.c` 1206→1234、`carpet_page.h` 58→63（+`carpet_page_gesture_bench_from()` 声明）、
+    `muse_input.c` 410→428（+`>gestfrom` 台架口，`s_bench_nav=false` 从当前格起判不先回脸）。
+    重打 patch：36 文件 / **6806+ / 95- / 11,616 行 / 628,394 字节**，字库仍 261,748 字节。
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` / `git apply: OK (36 sections)` /
+    **`byte-compare: 36/36 identical`**。**已编已刷已称**（`Project build complete` / WEXIT=0 /
+    `Hash of data verified.`，只 `app-flash`，分区没动）：`>gestfrom` 21 步全过 —— 中心脸四方向发散无回归
+    （左→设置 / 右→氛围 clock / 下拉→场景环 / 上→功能层 vehicle）；每个外格朝里划都回中心
+    （设置格右滑→「外页横滑 → 回中心 Avatar」nav=face、氛围格左滑→face、场景环格上滑→「外页竖滑 → 回中心 Avatar」nav=face、
+    功能格下滑→face），朝外划也回 face；氛围格右滑轮换 gallery→photo→clock 留在氛围不跳中心；无「控件上」误触。
+    **没称到**：手指真划（串口注不了触摸，`>gestfrom` 走的是和真手指同一条判定路，为代码 + 合成手势证）；
+    要 owner 在真屏上从四个外格各朝里划一次肉眼确认回中心。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
