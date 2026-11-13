@@ -38,17 +38,21 @@ extern "C" {
 
 /** v4 只做一件事：屏可以往手机推 `command{cmd:"mic_chunk"}`（「对着屏说话」）。
  *  它**不是** SCREEN_LINK_CONTRACT_MAX 的下一档，而是单独申报的一个能力位：
- *  - 帧上的 `v` 不变（还是 3），下行一个字节没动；
+ *  - 屏自己出站的帧 `v` 不变（还是 3），下行一个字节没动；
  *  - hello.protocols 里多这一个数，让会读的手机知道"这块屏有耳朵"；
- *  - 反过来手机在 `ack.protocols` 里带 4，屏**才有一半**许可：光这一格不够。
- *  为什么 2026-11-11 夜里把这一句改硬：装机那版 App 已经在 `protocols` 里报了 4
- *  （`core/.../DemoRuntime.kt:513`，提交 `5247681`），可它的 `CommandType` 里没有 mic_chunk，
- *  入站解不开的处理是 `conn.close(1000,"bad contract")` —— 也就是说"报了 4"和"收得下"
- *  在那一版上是两回事，而拿它当许可的固件会把一台本来好使的手机当场踢下线。
- *  现在屏侧要两个都点头：**这一帧 envelope 的 `v` >= 4**（= App 真把 `CONTRACT_VERSION` 抬上来了，
- *  按发布顺序那一步只会在补完解码之后发生）**且** `protocols ∋ 4`。
- *  闸在 carpet_mic（三道：本地开关 + 对面这一轮的申报 + 本会话的熔断），
- *  组件只负责把 `v` 和 `ack` 一起交给它（`on_ack(ack, v)`），自己不做这套判断。 */
+ *  - 反过来手机在 `ack.protocols` 里带 4，就是屏侧上行的**全部**许可。
+ *
+ *  【2026-11-13：这里原来还要求"这一帧 envelope 的 `v` >= 4"，那条判据是错的，已删。】
+ *  真机称到的是：ack 外层**没有 `v` 这个键**。App 的 `ScreenMessage.v` 带默认值，
+ *  而它的 Json 配了 `encodeDefaults = false`（`core/.../protocol/ScreenLink.kt:69-73`），
+ *  所以出站帧一个 `v` 字节都不写；屏这边 `num_or(root,"v",1)` 于是永远读到兜底 1。
+ *  契约自己就写着这一条（`protocol/screen-link.schema.json` 里 `v` 的 description、
+ *  `ScreenLink.kt:20`）。要求 v>=4 = 要求一个按设计不上线的字段，
+ *  结果是**任何版本**的 App 都被挡在门外，按键和唤醒词两条路一起报「对着屏说话还没开」。
+ *  当天装机那版报的是 `protocols=[4,4]`（`CONTRACT_VERSION` 已是 4 ⇒ 按发布顺序
+ *  `mic_chunk` 解码应已补完；屏还没称到"上行被对面收下"这一步，所以不写成已验证）。
+ *  残留保护只剩 carpet_mic 那道熔断：发过上行后 5 秒内掉线 ⇒ 本会话不再试。
+ *  组件仍然把 `v` 一起交给 `on_ack(ack, v)`，但只当证据打印，不当判据。 */
 #define SCREEN_LINK_MIC_UP 4
 
 /** 一条 state 帧在 1Hz 下最大约 1.2KB；v3 的音频帧是这里最紧的一条：

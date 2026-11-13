@@ -2797,3 +2797,123 @@ org.opentest4j.AssertionFailedError: 屏侧 PAGE_NAMES 和 ScreenPage 对不上�
 
 **对现场的影响：没有。** 板上跑的是 7 页那份固件，能编能刷能演示；
 这条红拦的是"契约描述了一个屏画不出来的页"，不影响链路、上行、唤醒词。
+
+### 18.6 「按键和唤醒词都说『对着屏说话还没开』」= **我自己写了一道不可能满足的闸**；App agent 是对的
+
+owner 原话：「圆屏无论是按键还是唤醒词都提示对着屏说话还没开，我和 app 侧 agent 沟通他说
+不需要 APP 侧改动，我不太懂，你俩用远端仓库沟通一下」。
+**结论先写：App 侧一行代码都不用改。错在屏侧，是我 11-11 深夜自己加的那道闸。**
+交接已写进 `docs/APP-CHANGES-2026-11-11.md` §0（那一节现在覆盖全文旧结论）。
+
+#### 真机称到的（板子 WS175B-A3F7 + 演示那台 Mate 60，原文）
+
+```
+@mic mode=auto armed=0 phone_v4=0 rejected=0 dead=0 linked=1
+I (7257) carpet: ack：整份契约 v=1、protocols=[4,4] ⇒ 上行不开
+```
+
+四道门里三道开着：本地开关 `mode=auto`、没熔断 `rejected=0`、地基没坏 `dead=0`、链路通 `linked=1`。
+唯一关着的是"对面申报"那一格 —— **而对面明明报了 `protocols=[4,4]`**。
+所以问题不在 App，在屏怎么读这份 ack。这一步把责任方向定死了，没有猜。
+
+#### 真因：`v >= 4` 要的是一个**按设计永远不上线**的字段
+
+11-11 深夜那道闸写的是 `bool open = says4 && v >= 4;`，`v` 来自 `num_or(root,"v",1)`。而 App 那棵树：
+
+- `ScreenMessage(val v: Int = ScreenCodec.CONTRACT_VERSION, …)` —— `v` 带默认值；
+- `ScreenLink.kt:69-73` `Json { encodeDefaults = false; ignoreUnknownKeys = true }`
+  ⇒ **出站帧一个 `v` 字节都不写**；
+- 契约自己写着两遍：`ScreenLink.kt:20` 的注释、`protocol/screen-link.schema.json` 里根 `v` 的
+  description（「出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断…」）。
+
+⇒ 屏读到的 `v=1` **不是对面报了 1，是"这个键不存在"的兜底值**。`v >= 4` 对**任何版本**的 App
+都不可能成立，于是按键和唤醒词两条路（读的是同一个 `carpet_mic_armed()`）一起报那句话。
+
+而 `protocols=[4,4]` 恰好证明**我当初要的那把钥匙 App 早就转了**：这个数组是
+`listOf(ScreenCodec.CONTRACT_VERSION, 4)`，第一个数是 4 ⇒ 装机那版 `CONTRACT_VERSION` 已是 4
+（= 1.26.0，§18.5 合并的那份）。旧交接里「钥匙是 `CONTRACT_VERSION → 4`」和「屏认外层 `v`」
+**两句都作废**：前一句人家已完成，后一句本身是错的。
+
+**这一条是怎么错的，值得记下来**：11-11 那晚我防的是"报了 4 但解不了 mic_chunk"的那一版 App
+（当时装机版确实是），于是想找一个"整份契约真走到 v4"的证据。我挑了 envelope 的 `v` ——
+**但没去读契约里关于这个字段的那两句话**。挑判据的时候只想着"它能不能区分版本"，
+没问"它到底会不会出现在线上"。教训：**拿一个字段当闸之前，先确认它真的会被发出来**；
+契约里写了"不写"的字段，比没有这个字段更危险，因为读出来是个看着像真值的兜底数。
+
+#### 改了什么（屏侧，两处）
+
+1. `carpet/carpet_link.c` 的 `on_ack`：`bool open = says4;`（删掉 `&& v >= 4`）。
+   `v` 仍然**无条件打印**，但只当证据：
+   `ack：protocols=[%s]（envelope v=%d，契约规定它不上线，不作判据）⇒ 上行%s`。
+   印它是为了让下一个人一眼看出"这个字段没上线"，别再去拿它当许可。
+   残留保护只剩 carpet_mic 那道**熔断**（发过上行后 5 秒内掉线 ⇒ 本会话不再试，
+   `>micup force` 或重启清）⇒ 万一真装上"报 4 但解不了"的 App，代价是这一轮不出声，
+   **不会**再出现场链路抖。
+2. 同文件 `url_restart_task` 的栈 **2048 → 6144 字**（见下一段）。
+   另把 `screen_link.h` 里 `SCREEN_LINK_MIC_UP` 那段、`carpet_mic.h` 第 3 条里
+   同样被推翻的"两个都点头" wording 改掉了；`screen_link.h`/`.c` 两份（本仓库 + Muse 树）
+   `cmp` 过 **SAME**（那个组件是 `cp -r` 部署的，不进 patch，两份必须逐字节一样）。
+
+#### 顺带称到并修掉的第二个 bug：`>url` 在链路通着的时候必崩
+
+set 和 clear 都复现（`diag-ack.txt` / `diag-urlclear.txt`）：
+
+```
+***ERROR*** A stack overflow in task carpet_url has been detected.
+rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)
+```
+
+真因：2048 字是 11-10 那晚**链路没起**时挑的（走浅分支）；连着的时候同一条调用链上
+多一个 `screen_link_stop()`。参照物：`gate_task` 跑 `url_read()+link_open()` 用的是 4096 字。
+抬到 6144 字后真机称到：
+
+```
+@url clear: ESP_OK
+@url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=1 dialed=1
+I (96157) carpet: carpet_url 这一趟用完还剩 3500 字
+```
+
+6144 − 3500 = **实际用了 2644 字**，比原来那档 2048 多 **596 字** ⇒ 溢出是真因，不是猜的。
+整趟 `reset? False`、`stack overflow` / `RTC_SW_CPU_RST` 各 **0** 次。
+**NVS 卫生**：诊断用的 `>url set` 会写 NVS，当场 `>url clear` 并回读
+`src=factory saved=(none)`（11-12 那次「又连不上」一半就是我留下的拨号地址，§18.1）。
+
+#### 称到了 / 没称到
+
+**称到了**（2026-11-13 上午，真机 + 真装机 App，`app-flash`，分区没动）：
+
+```
+I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开
+@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1
+@wake ready=1 word=你好小安 chunk=512 on=1 inhibit=0 live=0 armed=1
+@wake blocks=4418 hits=0 dropped=0 cool=0 detect avg=2.72 ms worst=6.69 ms
+```
+
+`>url clear` 重启链路之后复称仍是 `armed=1`。**两条路读的是同一个闸，现在都是 1**
+⇒ 「对着屏说话还没开」这句话不会再出现。编译刷机：`Project build complete` / `WEXIT=0` /
+`Hash of data verified.`。
+
+**没称到**：真人那一轮上行（`上行 m-xxxxxx-n：<n>/<n> 帧…`）和它后面的转写/答句。
+**卡在哪**：要 owner 真人对着屏说一句话，屏侧自己造不出来（台架那三个渲染设备在板载麦克风上
+全是数字静音，§18.4）。**"门开了"已验证，"门后那一趟走完"还没验证**，别把后者写成前者。
+
+#### 留给 App 的只有一件契约卫生（不阻塞演示，他们挑）
+
+`protocol/screen-link.schema.json` 根的 `required` 还列着 `['v','t','seq']`，
+但同一文件里 `v` 的 description 说它不上线 —— **契约自己和自己矛盾**。
+`SchemaDriftTest` 那条 required-vs-default 检查只覆盖 `state` 和 `state.ui`，没覆盖根，所以漏了
+（**这就是这个 bug 能活半个月的原因**：四张表对齐的守卫称不到"字段到底上不上线"）。
+两条修法：① 给 `ScreenMessage.v` 加 `@EncodeDefault`（或去掉默认值）让 `v` 真上线；
+② 把 `v` 从根 `required` 去掉，并把守卫扩到根。**屏侧现在两条都不依赖。**
+另：`protocols=[4,4]` 重复了一个数，屏按"集合里有没有 4"读，**无害**，不改也行。
+
+#### 补丁与守卫
+
+`muse-carpet.patch` 重打（README §2 那条命令，**排除 `components/screen_link`**、
+**带上 `esp32/partitions_muse.csv`**）：34 个文件 / **5827+ / 86− / 9,053 行 / 472,717 字节**，
+字库仍 154,528 字节。`verify_carpet_patch.py` 全新 scratch 实跑：
+`baseline copies restored: 18` / `git apply: OK (34 sections)` / `byte-compare: 32/34 identical`。
+差的两个仍是 `carpet_mic.c/.h`，这次**逐行数过**：工作树 CRLF **463 / 102** 行、patch 里 LF，
+字节差 463 / 102 **正好等于行数**，归一化后内容相同 ⇒ 纯行尾，不是漏打
+（`carpet_mic.h` 这轮改过内容，所以不能拿"已知坑"免检）。
+`components/screen_link` 在补丁里只出现在一行 `+` 注释里，**没有它的 diff 头**。

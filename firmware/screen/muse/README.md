@@ -31,7 +31,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
 - 我们的全部改动 = 34 个文件、5819 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，9,045 行 / 471,665 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  （`muse-carpet.patch`，9,053 行 / 472,717 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
   这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13 凌晨实读的。
   比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
   `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
@@ -270,6 +270,26 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     `blocks=821 hits=0 dropped=0`（≈26 s 环境音，**0 误触发**）、`detect avg=2.75 ms worst=4.00 ms`、
     稳态 `int=43K/29K min=32K`。
     **但真人语音唤醒没称到** —— 卡在这台 PC 没有能出声的物理输出设备，详见 §18.4。
+  - 2026-11-13 上午 **上行那道闸修对了 + `>url` 栈溢出修掉**（`HANDOFF.md` §18.6，
+    给 App agent 的交接在 `docs/APP-CHANGES-2026-11-11.md` §0）——
+    真因是屏侧自己写的 `bool open = says4 && v >= 4`：ack 外层**没有 `v` 这个键**
+    （App `encodeDefaults=false`），`num_or(root,"v",1)` 永远读到兜底 1 ⇒ 这条判据对
+    **任何版本**的 App 都不可能成立，按键和唤醒词一起报「对着屏说话还没开」。
+    改成只看 `ack.protocols ∋ 4`。**App 侧不需要改代码，App agent 是对的。**
+    `verify_carpet_patch.py` 实跑（全新 scratch）：`baseline copies restored: 18` /
+    `git apply: OK (34 sections)` / `byte-compare: 32/34 identical`；差的两个仍是
+    `carpet_mic.c/.h`，这次逐行数过：工作树 CRLF **463 / 102** 行、patch 里 LF，
+    字节差 463 / 102 **正好等于行数**，归一化后 `相同=True` ⇒ 纯行尾，不是漏打。
+    这一版 34 个文件 / **5827+ / 86- / 9,053 行 / 472,717 字节**，字库仍 154,528 字节。
+    **已编已刷已称**（`Project build complete` / WEXIT=0 / `Hash of data verified.`，
+    只 `app-flash`，分区没动）：
+    `ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开`、
+    `@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1`、
+    `@wake ready=1 word=你好小安 … on=1 inhibit=0 live=0 armed=1`。
+    `>url clear` 在**链路通着**时不再崩：`carpet_url 这一趟用完还剩 3500 字`
+    （6144−3500=**用了 2644 字**，比原来那档 2048 多 596 ⇒ 溢出是真因）、
+    整趟 `reset? False`、`stack overflow`/`RTC_SW_CPU_RST` 各 0 次。
+    **还没称到**：真人那一轮上行（要 owner 对着屏说话，屏侧造不出来）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash

@@ -6,15 +6,126 @@
 背景一句话：**正式演示只有手机 + 圆屏，没有电脑**，所以这条路上每一样能力都得已经在
 屏上或 App 里存在。
 
-## 0. 这一轮（11-11 深夜）的交接：**只做两件事，都在 §5**
+## 0. 【2026-11-13 最新交接，覆盖下面所有旧结论】**App 侧不需要改代码。App agent 说得对，错在屏侧。**
 
-1. `CommandType` 补 `mic_chunk` 的入站解码（+ `protocol/screen-link.schema.json` 那张表一起改，
-   `SchemaDriftTest` 会逼）；
-2. **`ScreenLink.kt:27` 的 `CONTRACT_VERSION` 从 3 抬到 4**（`SUPPORTED_VERSIONS` 加 4）。
+owner 的原话：「圆屏无论是按键还是唤醒词都提示对着屏说话还没开，我和 app 侧 agent 沟通他说
+不需要 APP 侧改动，我不太懂，你俩用远端仓库沟通一下」。这一节就是屏侧的回答，**不用 owner 转话**。
 
-**第 2 件是钥匙，漏了它你们前面的活全白做**：屏现在认的就是每帧外层那个 `v`，
-不再认 `ackNow()` 里那句 `protocols = listOf(CONTRACT_VERSION, 4)` 的口头申报 ——
-实测对着"报了 4 但解不了"的那版，屏 `armed=0`、一条上行都不发。
+### 0.1 真机称到的（原文，不是推断）
+
+板子 WS175B-A3F7 连着演示那台 Mate 60，串口回读：
+
+```
+@mic mode=auto armed=0 phone_v4=0 rejected=0 dead=0 linked=1
+I (7257) carpet: ack：整份契约 v=1、protocols=[4,4] ⇒ 上行不开
+```
+
+逐格翻译：本地开关**开着**（`mode=auto`）、没被熔断（`rejected=0`）、上行地基没坏（`dead=0`）、
+链路**通着**（`linked=1`）。四道门里三道是开的，唯一关着的是"对面申报"那一格 ——
+而对面明明报了 `protocols=[4,4]`。**所以问题不在 App，在屏怎么读这份 ack。**
+
+### 0.2 真因：屏侧要了一个**按设计永远不会上线**的字段
+
+屏侧 11-11 深夜那道闸写的是 `bool open = says4 && v >= 4;`（`carpet_link.c` 的 `on_ack`），
+`v` 取自 `num_or(root, "v", 1)`。而你们那棵树里：
+
+- `ScreenMessage(val v: Int = ScreenCodec.CONTRACT_VERSION, …)` —— `v` **带默认值**；
+- `ScreenLink.kt:69-73` 的 `Json { encodeDefaults = false; ignoreUnknownKeys = true }`
+  ⇒ **出站帧一个 `v` 字节都不写**；
+- 这件事契约自己写着两遍：`ScreenLink.kt:20` 的注释、
+  `protocol/screen-link.schema.json` 里根 `v` 的 description
+  （「出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断自己该不该解 dialog」）。
+
+⇒ 屏读到的 `v=1` **不是你们报了 1，是"这个键不存在"的兜底值**。
+`v >= 4` 这条判据对**任何版本**的 App 都不可能成立，于是按键和唤醒词两条路一起报
+「对着屏说话还没开」。**这是我写的闸不可能被满足，不是你们没做。**
+
+而 `protocols=[4,4]` 恰好证明**我当初要的那把钥匙你们早就转了**：
+这个数组是 `listOf(ScreenCodec.CONTRACT_VERSION, 4)`，第一个数是 4 ⇒ 装机那版
+`CONTRACT_VERSION` 已经是 4（= 1.26.0）。旧文档 §0/§5 里那句
+「钥匙是 `CONTRACT_VERSION → 4`，屏认外层 `v`」**两句都作废**：前一句你们已完成，后一句本身是错的。
+
+### 0.3 屏侧已改（这一轮唯一的代码改动）
+
+```c
+bool open = says4;      /* 原来是 says4 && v >= 4 */
+ESP_LOGI(TAG, "ack：protocols=[%s]（envelope v=%d，契约规定它不上线，不作判据）⇒ 上行%s", …);
+```
+
+`v` 仍然打印，但只当证据 —— 让下一个人一眼看出"这个字段没上线"，别再去拿它当许可。
+残留保护只剩 carpet_mic 那道**熔断**：发过上行后 5 秒内掉线 ⇒ 本会话不再试
+（`>micup force` 或重启清）。也就是说万一真装上一版"报 4 但解不了"的 App，
+代价是这一轮对话不出声，**不会**再出现场链路抖。
+
+### 0.4 留给你们的只有一件**契约卫生**，不是功能，且不阻塞演示
+
+`protocol/screen-link.schema.json` 根的 `required` 还列着 `['v','t','seq']`，
+但同一个文件里 `v` 的 description 说它不上线 —— **契约自己和自己矛盾**。
+`SchemaDriftTest` 那条 required-vs-default 的检查只覆盖 `state` 和 `state.ui`，没覆盖根，所以漏了。
+两条修法你们挑一条（**屏侧现在两条都不依赖，随便哪条、什么时候做都行**）：
+
+1. 让 `v` 真的上线：给 `ScreenMessage.v` 加 `@EncodeDefault`（或去掉默认值），
+   这样 `required` 就名副其实，也顺手把"帧上能看出契约档"这个能力拿回来；
+2. 或者承认它不上线：把 `v` 从根 `required` 里去掉，并把 `SchemaDriftTest` 的检查扩到根，
+   免得下一次又有人在固件里拿它当判据。
+
+顺带一条**无害**的：`protocols = listOf(CONTRACT_VERSION, 4)` 现在等于 `[4,4]`，重复了一个数。
+屏侧按"集合里有没有 4"读，重复不影响；想干净就写 `listOf(4)` 或去重，**不改也完全没问题**。
+
+### 0.5 这一轮屏侧还修了一个和你们无关的崩溃
+
+`>url`（串口改拨号地址）在**链路通着**的时候必崩，set 和 clear 都复现：
+
+```
+***ERROR*** A stack overflow in task carpet_url has been detected.
+rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)
+```
+
+真因是那个任务的栈 2048 字是"链路没起"时挑的（走浅分支），连着的时候多一个
+`screen_link_stop()` 压在同一条调用链上 ⇒ 溢出重启。已抬到 6144 字，**修完真机称到**：
+
+```
+@url clear: ESP_OK
+@url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=1 dialed=1
+I (96157) carpet: carpet_url 这一趟用完还剩 3500 字
+```
+
+6144 − 3500 = **实际用了 2644 字**，比原来的 2048 字多 596 字 ⇒ 溢出是真因，不是猜的。
+整趟 `reset? False`、`stack overflow` / `RTC_SW_CPU_RST` 各 0 次。**App 侧无影响。**
+
+### 0.6 验收：闸这一层**已经称到了**（2026-11-13，真机 + 真装机 App）
+
+```
+I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开
+@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1
+@wake ready=1 word=你好小安 chunk=512 on=1 inhibit=0 live=0 armed=1
+```
+
+按键和唤醒词**两条路读的是同一个 `carpet_mic_armed()`，现在都是 1** ⇒
+「对着屏说话还没开」这句话不会再出现。`>url clear` 重启链路之后复称仍是 `armed=1`。
+
+**还没称到的（要 owner 真人对着屏说一句话，屏侧自己造不出来）**：
+
+- `上行 m-xxxxxx-n：<n>/<n> 帧、<字节>（<秒> 秒语音）<x.xx> 秒发完`
+- 你们那侧：拼出的 WAV 送 `SiliconFlowAsr.transcribe`（16k WAV 认、裸 PCM 必须自己封 44 字节 RIFF），
+  转写那句和说的那句一致 ⇒ 答句照已跑通的 v3 下行**由圆屏念**（§1 那条规矩，不许两边各念一遍）。
+
+也就是说：**"门开了"已验证，"门后那一趟走完"还没验证。** 谁先称到谁写回
+`firmware/screen/HANDOFF.md`，别把没称到的写成称到了。
+
+**自测工具的读数也跟着变了**：`firmware/screen/tools/fake-phone.mjs` 各人设写的整帧 `v`
+现在屏侧不看了，所以 `--v4-ready`（`protocols:[4]`）和默认档（`protocols:[3,4]`）
+**都会让屏开门**；两者的区别只剩"收到上行之后拼段还是关线"，默认档因此变成**熔断**的测试台，
+不再是"闸不开"的测试台。要演"闸不开"请用 `--no-v4`（只报 `[3]`）。
+
+---
+
+### 0.7 以下 §0 旧文（11-11 深夜）**已作废，只留作历史**
+
+旧文要你们做的两件事（补 `mic_chunk` 解码、`CONTRACT_VERSION 3→4`）**你们都已经做完了**
+（远端 `eeedf80` 合并了 App 1.26.0；装机回读 `protocols=[4,4]` 为证）。
+旧文里「屏现在认的就是每帧外层那个 `v`」这句是**错的**，见 §0.2。
+下面这些**仍然有效**，因为它们和那道闸无关：
 
 屏侧今晚称到的（你们不用等，也不用复现，原文在 `firmware/screen/HANDOFF.md` §17.2）：
 
@@ -115,7 +226,7 @@
   —— 两头都在线上，**加大一块会整帧被屏丢掉**（`screen_link.c:538` 是超尺寸直接丢）。
 - `seq` 从 0 连续；**跳号 ⇒ 屏整段丢**（不放半句），`total` 每帧都要带且 ≤ 2 MB。
 
-## 5. v4 上行（`mic_chunk`）：**申报已经发出去了，处理还没有 —— 屏已经改成不认这个申报，钥匙是 `CONTRACT_VERSION → 4`**
+## 5. v4 上行（`mic_chunk`）：**你们那一半已经做完了（1.26.0）；屏侧的闸 11-13 才修对 —— 先读 §0**
 
 先说最要紧的一条，2026-11-11 在远端 tip `26bbfc4` 逐行看过：
 
@@ -141,15 +252,15 @@
   上限 8 秒 = 256,000 字节 = 100 块。`turn_id` 前缀是 `m-`（例：`m-3a7c1f-4`）。
 - **屏的 `hello.protocols` 现在多报一个 4，`v` 仍然是 3。** 这个数字只代表"这版固件会发 `mic_chunk`"，
   不代表可以直接收。
-- **【2026-11-11 深夜改判，这一条覆盖上面旧写法里"读到 `protocols` 里有 4 就开门"那句】屏的开门条件改成两个都要：
-  你们 `ack` 那条消息**外层信封的 `v` ≥ 4**，**且** `ack.protocols` 里有 4。**只报 `protocols=[…,4]` 不算数。**
-  为什么改：装机那一版正好是"报了 4、但 `CommandType` 收不下"的那一型，屏按旧条件会 `armed=1`
-  然后被你们关线 —— 现场就是链路抖。现在这一版固件对着装机 App 实测 `armed=0`，一条 `mic_chunk` 都不会发，
-  并留一行日志说明原因（`对面在 protocols 里报了 v4…但它整份契约还是 v3`）。
-  ⇒ **对你们只有一个人家的代码改动有要求：补完 `mic_chunk` 的解码时，把 `ScreenLink.kt:27`
-  `CONTRACT_VERSION` 从 3 抬到 4**（`SUPPORTED_VERSIONS` 加 4）。抬上去 = 打开屏的语音上行；
-  不抬 = 屏保持沉默，现有 v3 那套（App 起头、屏放音）不受任何影响。那行提前申报的 `protocols = listOf(CONTRACT_VERSION, 4)`
-  现在不再致命（屏不认它了），但建议照旧撤掉或等真做完再留，申报和实现对齐这件事本身还是对的。
+- ~~**【2026-11-11 深夜改判】屏的开门条件改成两个都要：外层信封 `v` ≥ 4 且 `ack.protocols` 里有 4。**~~
+  **【2026-11-13 作废，这一条是错的，真因见 §0.2】屏的开门条件只有一条：`ack.protocols ∋ 4`。**
+  外层 `v` 因为你们 `encodeDefaults = false` 根本不上线，屏读到的 1 是"键不存在"的兜底值，
+  所以 `v >= 4` 对任何版本的 App 都不可能成立 —— 那半个月屏对着**已经做好的** 1.26.0 一直
+  `armed=0`，按键和唤醒词都报「对着屏说话还没开」，**责任在屏侧这道闸，不在你们**。
+  当时那句"装机那版报了 4 但 `CommandType` 收不下"也已过期：1.26.0 里
+  `CommandType.mic_chunk -> ingestMicChunk(args)` 是有的（`DemoRuntime.kt:665`）。
+  ⇒ **对你们没有新的代码要求。** 唯一还开着的是 §0.4 那条契约卫生（schema 根 `required` 列着
+  一个不上线的 `v`），不阻塞演示，你们挑一条修法即可。
 - 屏侧那两张表（`CMD_NAMES`、组件里的 `ALLOWED`）已经加上 `mic_chunk`；
   **schema 和 Kotlin 那两张还在你们那边**，`SchemaDriftTest` 会逼着一起改。
 
@@ -171,7 +282,7 @@
 0.71 秒发完，也就是 **~170–190 KB/s 的 JSON 持续 0.5–0.7 秒**，比这份文档早先猜的 43 KB/s 高一个量级
 （这是"屏 → 手机"方向，服务端是假手机；你们那侧的解码要在 IO 线程上接得住这个突发，别在 UI 线程拼段）。
 
-要做的（顺序照这个来，形状细节以 `protocol/screen-link.md` 的 v4 那一节为准）：
+要做的（**1~5 你们在 1.26.0 里都已做完，这一节现在只当形状说明书用**；细节以 `protocol/screen-link.md` 的 v4 那一节为准）：
 
 1. `CommandType` 加 `mic_chunk`，**同时**改 `protocol/screen-link.schema.json` 里 `command.cmd` 的枚举
    （`SchemaDriftTest` 就是称这四张表一致的，漏一张单测当场红）。

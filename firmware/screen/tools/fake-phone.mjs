@@ -12,17 +12,22 @@
  *   node fake-phone.mjs --reject             故意不开白名单，验固件收到 "demo lock" 会不会退避
  *   node fake-phone.mjs --drop 20            启动 20 秒后停推 state，验"3 秒变灰 / 10 秒重连"
  *   node fake-phone.mjs --state ./my.json    用一份自定义 state 当模板
- *   node fake-phone.mjs --v4-ready           演"App 已经把 mic_chunk 做完了"那一版：整帧 v=4、真拼段落 WAV
+ *   node fake-phone.mjs --v4-ready           演"App 已经把 mic_chunk 做完了"那一版：真拼段落 WAV
  *   node fake-phone.mjs --mic-close          即使 --v4-ready 也收到 mic_chunk 就关链（专称屏侧熔断）
  *   node fake-phone.mjs --no-v4              ack 只申报 [3]，验屏那边 armed=0、一条上行都不发
  *   node fake-phone.mjs --micdir ./out       上行 WAV 落哪儿（默认脚本旁边的 mic-capture/）
  *
- * 【2026-11-11 晚：默认这一台 = 今天装机那版 App，上行是**关链**的，不是拼段的。】
- * 读 App 那棵树称到的事实（`core/.../runtime/DemoRuntime.kt:513` + `ScreenLink.kt:112`）：
- * 它已经在 ack.protocols 里报了 4，但 CommandType 里没有 mic_chunk，严格枚举收到这一帧
- * 的处理是当场 `close(1000,"bad contract")`。所以默认档就是 v=3 + protocols [3,4] + 收到上行就关。
- * 要称"App 补完之后"那条路得明说 `--v4-ready`（整帧 v 抬到 4 —— 屏那边现在认的就是这个数，
- * 光有 protocols 里那个 4 不算许可）。
+ * 【2026-11-13：屏那道闸**只看 ack.protocols 里有没有 4**，整帧的 `v` 它不看了。】
+ * 原来这里写"屏认整帧 v、光 protocols 里那个 4 不算许可"，那句是错的：真机称到 ack 外层
+ * **没有 `v` 这个键**（App `encodeDefaults=false`，`ScreenMessage.v` 带默认值），
+ * 屏 `num_or(root,"v",1)` 永远读到兜底 1 ⇒ 那条判据对任何 App 版本都不可能成立，
+ * 按键和唤醒词一起报「对着屏说话还没开」。已改成只看 protocols（详见 HANDOFF §18.6）。
+ * **所以各人设的差别现在只剩"收到上行之后拼段还是关链"**：
+ * 默认档 protocols [3,4] ⇒ 屏**会开门**然后被这一台关线 ⇒ 它现在是**熔断**的测试台，
+ * 不再是"闸不开"的测试台；要演"闸不开"请用 `--no-v4`（只报 [3]）。
+ * 各人设写的整帧 `v` 留着只是为了像真 App，屏侧不读它。
+ * 另：默认档"= 今天装机那版 App"这句也过期了 —— 装机那版是 1.26.0，protocols=[4,4]，
+ * `CommandType` 里**有** mic_chunk，会真拼段（相当于 --v4-ready）。
  *
  * 上行音频（契约 v4）这一台是真会处理的：屏松手后把整段按 2560 B/块推过来，
  * 这里按 turn_id 拼块、查缺号、封 RIFF 落成 .wav，再回 dialog{dir:up}+{dir:down}。

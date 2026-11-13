@@ -3492,10 +3492,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..c2dae63
+index 0000000..9690b5c
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1251 @@
+@@ -0,0 +1,1255 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -4175,17 +4175,23 @@ index 0000000..c2dae63
 + * （`ScreenLinkServer.kt:128-131`，`conn.close(1000,"bad contract")`）。
 + * 拿它去覆盖 s_negotiated 换来的是一台好使的屏突然连答句都不画了。
 + *
-+ * 【2026-11-11 晚：光看 `protocols` 里那个 4 不够，必须再看这一帧自己的 `v`。】
-+ * 读 App 那棵树称到的事实：`protocols = listOf(CONTRACT_VERSION, 4)` 这一行
-+ * （`5247681` 那一笔）已经把 4 报出去了，可 `CommandType`（`ScreenLink.kt:112`）里**没有**
-+ * mic_chunk —— 也就是现在装机的这版手机**申报了 4 但解不了 4**，而它解不了的 cmd 是直接关线。
-+ * 那一行写的是"App 先发版，屏看到 4 才开上行"，但发版只发了一半，
-+ * 于是"看到 4"这一条恰好把最危险的那版手机放进了许可里。
-+ * 真正的许可是整份契约走到 v4：按 `protocol/screen-link.md` 那条发布顺序，
-+ * App 补完 mic_chunk 的解码才把 `CONTRACT_VERSION` 从 3 抬到 4，而 `CONTRACT_VERSION`
-+ * 就是每一帧 envelope 的 `v`。所以这里要两个都点头：`v >= 4` **且** `protocols ∋ 4`。
-+ * 只报 4 而 `v` 还是 3 的那些，当场留一行 W —— 现场对着真手机按那个键时，
-+ * 这行就是"为什么屏没反应"的答案，不用猜。
++ * 【2026-11-13：上面那条「还要看 envelope 的 v」被实测推翻，已删。App 侧不需要改。】
++ * 真机原文（owner 的 Mate 60 + 装机 App，`>url` 重连那一刻抓的）：
++ *   `ack：整份契约 v=1、protocols=[4,4] ⇒ 上行不开`
++ * 两个数各自说明一件事：
++ * - `protocols=[4,4]` 正是 `listOf(CONTRACT_VERSION, 4)` 在 `CONTRACT_VERSION=4` 时的样子
++ *   ⇒ **装机那版就是 App 1.26.0，mic_chunk 的解码它有了**，不是旧 APK。
++ * - `v=1` 不是手机报的 1，是 `num_or(root,"v",1)` 在**键不存在**时的兜底。
++ *   App 的 `ScreenMessage.v` 带默认值 + `Json{encodeDefaults=false}`（`ScreenLink.kt:71`）
++ *   ⇒ 等于默认值的字段整个不上线。这不是 bug 而是写进契约的：schema 根 `v` 的描述原文
++ *   「出站帧因为 encodeDefaults=false 根本不写 v，固件不能拿帧上的 v 判断」，
++ *   `ScreenLink.kt:20` 同一句话。所以 `v>=4` 这个条件**对着一个永不传输的字段**，
++ *   任何版本的 App 都满足不了 ⇒ 闸永远关着，这就是「按键和唤醒词都说没开」的真因。
++ * 现在许可只认 `ack.protocols ∋ 4`（契约里手机申报能力的唯一上线信号）。
++ * 残留风险照旧由熔断兜：万一又遇到「报了 4 却解不了」的手机，它关一次线，
++ * `carpet_mic_link_lost()` 就把本会话的上行掐掉，不会每按一次踢一次。
++ * 契约自身那处矛盾（根 `required` 含 `v`，描述却说 `v` 不上线）已写进
++ * `docs/APP-CHANGES-2026-11-11.md` 交给 App 侧定，不拿它当屏侧开闸的条件。
 + */
 +static void on_ack(const cJSON *ack, int v)
 +{
@@ -4204,24 +4210,16 @@ index 0000000..c2dae63
 +            pn += (size_t)w;
 +        }
 +    }
-+    /* 这一行**无条件打**，包括"对面根本没报 protocols"那一种。
-+     * 为什么：现场"按了键、屏说『对着屏说话还没开』"只有两种可能 —— 整份契约没到 4，
-+     * 或者 protocols 里没有 4。旧写法这两种都静默 return，串口上一个字都没有，
-+     * 而 App 那半边的代码不在这棵树里（2026-11-11 夜真机就卡在这儿：链路通了、armed=0，
-+     * 却读不到对面到底申报了什么）。两个数 + 判定一行打出来，现场一眼定位，不用改闸。 */
-+    bool open = says4 && v >= 4;
-+    ESP_LOGI(TAG, "ack：整份契约 v=%d、protocols=[%s] ⇒ 上行%s",
-+             v, plist[0] ? plist : "没报", open ? "开" : "不开");
++    /* 这一行**无条件打**，开/不开都留证据。`v` 仍然印出来，但它是"键不存在"的兜底 1，
++     * 不是判据 —— 印它是为了让下一个人一眼看出"这个字段没上线"，别再去拿它当许可。 */
++    bool open = says4;
++    ESP_LOGI(TAG, "ack：protocols=[%s]（envelope v=%d，契约规定它不上线，不作判据）⇒ 上行%s",
++             plist[0] ? plist : "没报", v, open ? "开" : "不开");
 +    if (open) {
 +        carpet_mic_phone_declared(true);
-+        return;
-+    }
-+    if (says4) {
-+        ESP_LOGW(TAG, "对面在 protocols 里报了 v4（上行），但它整份契约还是 v%d —— 那一版解不了 mic_chunk，"
-+                      "发上去就是关线，上行不开", v);
-+    } else if (v >= 4) {
-+        ESP_LOGW(TAG, "对面整份契约已经到 v%d，但 protocols 里没报 4 —— 按契约它该报，"
-+                      "上行先不开（要它把 4 加回 ack.protocols）", v);
++    } else {
++        ESP_LOGW(TAG, "对面没在 ack.protocols 里报 4 —— 按契约它收不下 mic_chunk，上行不开。"
++                      "本地这一格看 >mic 的 mode=（off 就是屏自己没开）");
 +    }
 +}
 +
@@ -4444,9 +4442,15 @@ index 0000000..c2dae63
 +    }
 +    xSemaphoreGive(s_link_mtx);
 +    /* 这一行量的是"这一趟吃到多深"，留给下一次改这一档用。
-+     * 原来是 4096 字（16 KB），2026-11-10 真机稳态内部 RAM 只剩 10K/4K 的时候，
-+     * `>url` 直接回 `E carpet: url restart task out of memory` —— 地址改了但没重拨，
-+     * 现场看到的表现是"改了没反应"。现在这一档 2048 字（8 KB），余量够不够看这里。 */
++     * 档位变迁：4096 字 → 2026-11-10 内部 RAM 只剩 10K/4K 时降到 2048 字（那一档
++     * `>url` 直接 OOM，地址改了但没重拨）→ **2026-11-13 抬到 6144 字**。
++     * 抬的理由是实测崩了一次：owner 的板连着手机时 `>url set` / `>url clear` 各触发一次
++     * `***ERROR*** A stack overflow in task carpet_url has been detected.` + RTC_SW_CPU_RST 重启。
++     * 2048 字那一档是在**链路没起来**的时候定的（走 else 分支只印一行，栈很浅）；
++     * 链路活着时这条任务要多跑一个 `screen_link_stop()`，比 `gate_task` 还深，
++     * 而 `gate_task` 跑 `url_read()+link_open()` 用的是 4096 字 —— 一半的栈干更多的活，必崩。
++     * 现在关 BLE 之后内部 RAM 最大连续块约 29K，24K 这一档拿得到；拿不到也只是走下面
++     * 那条 OOM 日志（地址存了不重拨），不会崩。余量看下面那行回读。 */
 +    ESP_LOGI(TAG, "carpet_url 这一趟用完还剩 %u 字",
 +             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
@@ -4458,7 +4462,7 @@ index 0000000..c2dae63
 +        ESP_LOGE(TAG, "no link mutex, url change not applied");
 +        return;
 +    }
-+    if (xTaskCreate(url_restart_task, "carpet_url", 2048, NULL, 4, NULL) != pdPASS) {
++    if (xTaskCreate(url_restart_task, "carpet_url", 6144, NULL, 4, NULL) != pdPASS) {
 +        /* 带数字的那一条：现场只有"内存"和"别的"两种死法分得开。 */
 +        ESP_LOGE(TAG, "url restart task out of memory: 内部 RAM %uK 空闲/最大连续 %uK",
 +                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
@@ -5380,10 +5384,10 @@ index 0000000..82e5c65
 +}
 diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
 new file mode 100644
-index 0000000..83bbd4f
+index 0000000..052ab7b
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,102 @@
 +/*
 + * 契约 v4 的上行：「对着屏说话」。
 + *
@@ -5403,9 +5407,13 @@ index 0000000..83bbd4f
 + *    本文件自己的发送任务。
 + * 3. **闸是三道，不是一道**：本地开关（NVS，出厂默认关）＋ 对面手机在 `ack.protocols` 里
 + *    申报过 4 ＋ 这一轮没被判成"这台手机不收上行"。缺任何一道都不发。
-+ *    为什么这么绕：现在装在手机上的那版 App **申报了 4 但解不了 `mic_chunk`**，
++ *    为什么要留第三道：万一装的那版 App **申报了 4 但解不了 `mic_chunk`**，
 + *    它的入站解码失败分支是 `conn.close(1000, "bad contract")` —— 一块乱发的固件会把一台
-+ *    本来好使的手机当场踢下线，那比"屏不能说话"重得多。
++ *    本来好使的手机当场踢下线，那比"屏不能说话"重得多。所以"发过上行后 5 秒内掉线"
++ *    就认定这台手机不收，本会话不再试（`>micup force` 或重启才清）。
++ *    第二道**只看 `ack.protocols`**：2026-11-13 真机称到 ack 外层没有 `v` 这个键
++ *    （App `encodeDefaults=false`，见 screen_link.h 里 SCREEN_LINK_MIC_UP 那段），
++ *    原来那条"还要 envelope v>=4"的判据永远不可能成立，已删。
 + *
 + * 为什么是"松手再发"而不是"边说边发"：转写那一步（硅基流动 SenseVoice，multipart 上传）
 + * 本来就要拿到整段才能开始，流式省不下端到端延迟；换来的是 `total` 在开口前就是已知的，
