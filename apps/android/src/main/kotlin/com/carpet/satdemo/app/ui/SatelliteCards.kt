@@ -186,7 +186,9 @@ fun SosCard(s: CardScope) {
         level == SosLevel.sent -> Tone.Wait
         else -> Tone.Neutral
     }
-    InkCard(icon = MIcons.sos, tone = tone, emphasis = true) {
+    // 不挂图标：Outlined.Sos 是一枚" SOS "字样矢量，20dp 图标列里三个字母挤成一团、
+    // 还会跟下面的强调圆点叠在一起（shell-family-384 实拍）；标题「紧急求助」已经把身份说清了
+    InkCard(tone = tone, emphasis = true) {
         CardTitle("紧急求助", trailing = snap?.sos?.attempts?.let { "已尝试 $it 次" })
         Text(
             when (level) {
