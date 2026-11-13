@@ -129,7 +129,75 @@ I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上�
 
 ---
 
-### 0.7 以下 §0 旧文（11-11 深夜）**已作废，只留作历史**
+### 0.7 【2026-11-13 夜】owner 真人对着屏说了话：**屏侧整条已称通**，「没转出来」卡在你们那一半的"失败分不清"
+
+屏侧串口原文读数（不重置回读，`tools/sercmd_norst.py`）：
+
+```
+@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1
+@mic free_segs=2/2 turns=2 frames=86 bytes=219520 busy_drop=0 cur=0B cap8=8s
+@mic last_turn=m-0b8309-3 send_ms=438 err=-
+@url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=1 dialed=1
+@url wifi=1 ssid=Mate 60 fails=0 err=ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=118 http=0
+```
+
+这几行怎么读（都是数出来的，不是推断）：
+
+- `turns=2` ⇒ owner 真说了两回，不是台架自喂。
+- `frames=86 bytes=219520` ⇒ 85 个满帧（85×2560=217600）+ 1 个 1920 字节的尾帧；
+  219520 / 32000 = **6.86 秒语音**，两回合计。
+- `busy_drop=0` ⇒ 没有一次因为段缓冲忙而丢采集。
+- `err=-` + `send_ms=438` ⇒ 最后那一段 438 ms 发完，发送任务没报任何错。
+- `free_segs=2/2` ⇒ 两段都发完并归还了缓冲，没有卡住的段。
+
+⇒ **「采到 → 组帧 → 发出去」这一整条屏侧已经称到了**，两回都完整交付。
+`errno=118` 那一行是上一次拨号失败留下的历史值（`fails=0`、`linked=1`），不是当前故障。
+
+**顺带排掉一个假线索**：心跳里的 `ws=down raw=down setup=off` **不是这条链路**。
+那三个字段读的是 Muse 官方云（`noise_ctrl_is_connected()` / `noise_tunnel_is_connected()`，
+`esp32/main/app.c:3014–3021`），这个产品不接它，`down` 是对的。
+屏到手机那条链路的状态**只看 `linked=`**。别照着心跳去查"ws 断了"。
+
+那么「没收到文字 / 转写失败」只剩你们那一半。现在的毛病是**四种因共用一句话**：
+`SiliconFlowAsr.transcribe()` 在 `!configured`、非 200、抛异常、文本空白这四种情形
+**一律 `return null`**；而屏上这条路 `AppRuntime.onMicSegment`（:1005–1028）拿到 null
+只说「屏上那句话没转出来：没听清或转写失败」。owner 看到这句话时，
+**没有任何办法知道该去配 key、该去开网、还是该重说一遍**。
+
+要你们做的（都不加页面、不加按钮、不增 APK 体积）：
+
+1. **屏上这条路补一个 `configured` 前置判断**，和手机自己按键那条对齐 ——
+   那条已经有了（`AppRuntime.kt:738`「语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包」）。
+   key 没配就直接说这一句，别让它冒充"没听清"。
+2. **把 null 拆成四种可分辨的结果**（枚举或带原因的回值都行），各给一句不同的话：
+   - 未配 key → 「语音输入没配 key」（同上那句）
+   - 网络 / 超时 → 「转写连不上网：检查手机蜂窝或 Wi-Fi」
+   - 服务拒绝（非 200）→ 「转写服务拒绝（HTTP <status>）」
+   - 200 但文本空 → 「没听清：这句话是空的」（**只有这一句**才是真的"重说一遍"）
+3. **日志打 HTTP status + body 前 200 字**；**绝不许打 key，也不许打 Authorization 头**。
+   现在非 200 那一支什么都不留，现场没法查。
+4. `DemoRuntime.ingestMicChunk` 的 **Reject 分支现在只 `log("上行语音作废：${reason}")`，
+   屏幕上没有任何反馈**。拼段失败（缺号 / 越界 / rate≠16000 / 超 100 帧）时 owner 看到的也是"没反应"。
+   请让它和转写失败一样给一句可见的话。
+
+屏侧这一轮配合加了一个数，帮你们把"采到静音"和"采到了但云端没认出来"分开：
+
+```
+@mic last_turn=m-xxxxxx-n send_ms=… peak=<0..32768> err=-
+```
+
+`peak` 是上一段 PCM 的峰值。开机自检那条静音基线是 **peak 13（约 −79 dBFS）**，
+真人对着屏说话是**几千**。所以下一趟现场：
+**peak 十几 ⇒ 麦克风那一路采到的是数字静音（屏侧的事，我查）；
+peak 几千 ⇒ 声音采到了，问题在转写那一半（你们的事）。**
+一个数就把两侧分开，不用猜，也不用等手机日志。
+
+**还欠着的一趟**：`peak` 是这一轮刚加的，**还没有在真人说话时读到过**。
+谁先称到谁写回 `firmware/screen/HANDOFF.md`，别把没称到的写成称到了。
+
+---
+
+### 0.8 以下 §0 旧文（11-11 深夜）**已作废，只留作历史**
 
 旧文要你们做的两件事（补 `mic_chunk` 解码、`CONTRACT_VERSION 3→4`）**你们都已经做完了**
 （远端 `eeedf80` 合并了 App 1.26.0；装机回读 `protocols=[4,4]` 为证）。

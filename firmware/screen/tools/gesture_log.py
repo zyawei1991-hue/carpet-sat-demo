@@ -15,11 +15,14 @@ import re
 import sys
 import time
 
-# 固件里 swipe_cb 打的那两行（改日志文案要连着这里一起改，不然 report 会报"一行都没抓到"）
+# 固件里 drag_timer / gesture_settle 打的那两行（改日志文案要连着这里一起改，
+# 不然 report 会报"一行都没抓到"）
 RX_PRESS = re.compile(r"按下卡面 \((-?\d+),(-?\d+)\) 当前卡=(\S+)")
 RX_RELEASE = re.compile(r"抬手 dx=(-?\d+) dy=(-?\d+) held=(\d+)ms → 判为(\S+?)（阈值 (\d+)px）")
-RX_CMD = re.compile(r"command\{(\w+)\} → (\S+)")
-RX_DROP = re.compile(r"链路没连上，command\{(\w+)\} 不发")
+# carpet_link.c 真打的是 "sent <cmd>" / "send <cmd>: <esp_err>"。
+# 早先这里写的 command{…} 只在注释里出现过，照那个正则永远数出 0 条。
+RX_CMD = re.compile(r"sent (\w+)")
+RX_DROP = re.compile(r"send (\w+): (\S+)")
 
 HEXDUMP_HINT = """按下（按下卡面）没有配抬手（抬手 …）的次数，就是"手指抬起前触摸流断了"的次数；
 这两个数只在驱动/坐标出问题时才不相等。判定为"单击"里最大的 |位移| 是阈值的**下界**，
