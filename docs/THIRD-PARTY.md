@@ -37,3 +37,14 @@
 ## 小轨形象（`apps/android/.../ui/`、`firmware/screen/muse/avatar/`）
 
 自己重画，不复制上游默认角色的像素。几何与色表约束、禁止事项见 `docs/AVATAR.md`。
+
+---
+
+## 圆屏场景层候选开源项目（2026-11-14，仅评估，尚未引入）
+
+屏侧场景层调研的完整方案见 `docs/SCREEN-SCENE-OPENSOURCE.md`。此条先记账：
+
+- [scott987-cmd/ESP32-Round-Clock](https://github.com/scott987-cmd/ESP32-Round-Clock) — Apache-2.0，同板（微雪 1.75C）手势启动器，若借代码从此处取
+- [waveshareteam/ESP32-S3-Touch-AMOLED-1.75C](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75C) — Apache-2.0，同板官方例程
+- [stack-chan/m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) — MIT，程序化画脸引擎
+- [Pan-wh/esp32-car-dashboard](https://github.com/Pan-wh/esp32-car-dashboard) — **无 license，只参考架构，不搬代码**
