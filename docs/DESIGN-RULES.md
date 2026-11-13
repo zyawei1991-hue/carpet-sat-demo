@@ -52,6 +52,7 @@ taste-skill 用真实浏览器三档宽度自检 slop。我们改成提交前的
 
 出包前对改动页面截图两档检查：
 1. 手机档（Pixel 7 代理，1080×2400）
-2. 圆屏档（410×502 预览或组件目录页）
+2. 圆屏档（410×502）：`RoundScreenRenderTest` 产出 `build/screenshots/round-*.png`，
+   与圆屏侧共用同一组图对齐（见 `ROUND-SCREEN-VISUAL-BASELINE.md`）
 
 发现贴边、失衡、裁切 → 修完再出包，最多三轮（同 taste-skill 的迭代上限）。
