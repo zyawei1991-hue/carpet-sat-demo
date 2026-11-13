@@ -30,15 +30,21 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 34 个文件、6286 行新增 / 95 行删，其中一份是 261,748 字节的字库
-  （`muse-carpet.patch`，11,029 行 / 601,370 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13 下午实读的。
+- 我们的全部改动 = 36 个文件、6378 行新增 / 95 行删，其中一份是 261,748 字节的字库
+  （`muse-carpet.patch`，11,161 行 / 607,186 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13（B §3 场景环这一版）实读的。
   这一轮（11-13 下午）在唤醒词那版之上又加了三件 owner 当面拍的交互：**A** 导航圆点从全底部
   一排改成四方位（上=场景环 / 下=功能 / 右=设置 / 左=氛围，脸=中心 Avatar 不单独占点，`muse_ui.c`）；
   **B** 所有「返回」一律回 Avatar/脸页，不再层级回退（`carpet_page.c` 的 `nav_back()`）；
   **P0** 点 Avatar 进对话 —— B §1 那条"唯一兜底永远有效"，LVGL 任务立记号、采集任务取走，
   和唤醒词命中走同一条 `talk_to_phone(false, true)`，闸一道都不放宽（`carpet_mic.c/.h` 的
   `talk_request/talk_take` + `muse_voice.c` 的取记号块 + `carpet_page.c` 脸格单击分支）。
+  **B §3 场景环 + 换装（11-13 这一版再加）**：下拉那页从五场景宫格改成**三场景横卡**
+  （车·守护 / 家·亲子 / 对话·助手，`carpet_page.c` 的 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写），
+  点一张卡 = 选场景 + 回脸页。**换装**照 B §7「调色不新画」：`muse_pixel_set_scene()`
+  （`avatar/muse_pixel.c` 新增 25 行 + `muse_pixel.h` 声明 4 行）只给身体绒毛 `C_BD..C_BH` 混入场景色
+  （车=蓝 / 家=薄荷 / 对话=紫），脸 `C_SKIN*` 不动，按帧 `k=1-expf(-dt*7)` 混合约 0.5 s 过渡。
+  三张卡标签 车/亲子/对话 都在现有字库子集里，**不用重跑子集脚本**。台架口 `>scene=1|2|3`（`muse_input.c`）。
   字库从 154,528 涨到 261,748 字节是这轮之前补词表时重跑的，不是这轮加的。
   比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
   `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
@@ -63,14 +69,16 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_link.h | 156 +   (新)
   esp32/components/muse/carpet/carpet_mic.c | 516 +   (新，11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口)
   esp32/components/muse/carpet/carpet_mic.h | 120 +   (新，那十个入口（含 11-13 下午 P0 的 `talk_request/talk_take`）+ `carpet_mic_mode_t` 三档)
-  esp32/components/muse/carpet/carpet_page.c | 1098 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点)
-  esp32/components/muse/carpet/carpet_page.h |  46 +   (新)
+  esp32/components/muse/carpet/carpet_page.c | 1145 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话)
+  esp32/components/muse/carpet/carpet_page.h |  58 +   (新；11-13 B §3 +`carpet_page_scene_bench()` 台架口)
   esp32/components/muse/carpet/carpet_wake.c | 229 +   (新，11-12 语音唤醒词：只用 esp-sr 的 **WakeNet**，不上 AFE/AEC/MultiNet。`esp_srmodel_init("model")` → filter(ESP_WN_PREFIX) → `create(name, DET_MODE_90)`；喂的是 `idle_capture()` 那**唯一**的 20 ms/320 样本块，内部用累加器重切成引擎要的 512 样本/32 ms（**绝不新开第二个麦克风读者**，§16 那条坑）。`init()` 校验 chunk∈(0,1024]、单声道、16000 Hz，不对就 destroy 退出 —— 块长错了引擎会**静默永不命中**。三道不检测：设置关 / `carpet_audio_live()` 在念 / 一轮还没完（`s_inhibit`），命中后 62 块≈2 s 不应期。`>wake` 回读三行 `@wake`：ready/词/blocks/hits/dropped + detect 平均与最坏耗时 + 内部与 PSRAM 余量。**一个只有实读模型才发现的坑**：`esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段原文，四个候选里只有「你好小安」那份写的是拼音 `nihaoxiaoan` ⇒ 屏上会教人念拼音，已加一行 strcmp 译回中文)
   esp32/components/muse/carpet/carpet_wake.h |  67 +   (新，那七个入口：init / ready / feed / take / inhibit / word / dump)
   esp32/components/muse/muse_app.c            |   3 +   (11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 355 + /   6 -   (11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
+  esp32/components/muse/muse_input.c         | 394 + /   6 -   (11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
+  esp32/components/muse/muse_pixel.h         |   4 +   (11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
+  esp32/avatar/muse_pixel.c                  |  25 +   (11-13 B §3 新入列，**在 components/muse 之外**：`muse_pixel_set_scene()` 实现 + `update_palette()` 里给绒毛 `C_BD..C_BH` 混场景色、按帧 `k=1-expf(-dt*7)` 约 0.5 s 过渡，脸 `C_SKIN*` 不动。**重打 patch 的路径清单必须含 `esp32/avatar/muse_pixel.c`**，漏了它声明进补丁、实现却没进 ⇒ 对端机器 undefined reference)
   esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
   esp32/components/muse/muse_settings.c      |  66 + /   2 -   (11-12 唤醒词：NVS 再多一条 `wake_on`（u8，**缺键=默认开** —— owner 要的就是免按键，默认关等于没做）+ 那两个函数 + 开机日志尾部 `wake %s`；11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
@@ -84,8 +92,8 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/main/muse_glue.c                     |  54 + /   2 -   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
   esp32/partitions_muse.csv                  |   8 +   (11-12 唤醒词新入列：**只往尾巴上加一行** `model, data, spiffs, 0x822000, 0x300000,`（3 MB）。上面每一行的偏移一个都没动 ⇒ NVS(0x11000) 里的 Wi-Fi、`link_url`、`mic_mode`、`wake_on` 全保住，换这张表不用重新配网（用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对过，不是看着 csv 推的）。**分区名必须就叫 `model`**：esp-sr 的 CMakeLists 用 `partition_table_get_partition_info("--partition-name model")` 找它，找不到就只打印一句提示、不生成 `srmodels.bin`，运行期 `esp_srmodel_init("model")` 返回空 —— 现象是"编译刷机全成功、唤醒词永远不灵"。16 MB flash 到 0x1000000，这张表到 0xB22000，后面还空约 4.8 MB)
   ```
-  这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 18 份被改文件的
-  原样副本，再 `git apply`，34 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 20 份被改文件的
+  原样副本，再 `git apply`，36 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
   验法脚本：`D:/dev/tmp/verify_carpet_patch.py <patch> <muse_root> cdc169d <空目录>`，
   它同时做两件事 —— ① 在 baseline 空仓上 `git apply --check` + 真 apply；
   ② 把 apply 出来的每一份和**工作树**（就是真正编译刷机那份）逐字节比。
@@ -323,19 +331,34 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     "32 KB 吃掉内部 RAM 导致 i2s DMA panic" —— 8192 从来就是 8 KB，**24 KB 差额不存在**，
     那次 panic 与这条栈的因果**从没称过**。详见 `HANDOFF.md` §18.6。
     **还没称到**：真人那一轮上行（要 owner 对着屏说话，屏侧造不出来）。
+  - 2026-11-13 **B §3 场景环 + 换装**（owner「文档中提到的其他方面我看还是没做啊」）——
+    下拉改三场景横卡（车 / 亲子 / 对话）+ 按场景给绒毛调色换装（脸不动，约 0.5 s 过渡）。
+    新增 `avatar/muse_pixel.c`（25 行）+ `muse_pixel.h` 声明（4 行），`carpet_page.c` 1098→1145、
+    `carpet_page.h` 46→58、`muse_input.c` 355→394（`>scene=`）。**路径清单这轮加了 `esp32/avatar/muse_pixel.c`**
+    （它在 components/muse 之外，漏了换装实现就进不了补丁，对端机器会 undefined reference）。
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` / `git apply: OK (36 sections)` /
+    **`byte-compare: 36/36 identical`**（这一轮工作树那两份 `carpet_mic.c/.h` 已是 LF，连历史那个 CRLF 差都没了）。
+    这一版 36 个文件 / 6378+ / 95- / 11,161 行 / 607,186 字节，字库仍 261,748 字节。
+    **已编已刷已称**（`Project build complete` / WEXIT=0 / `Hash of data verified.`，只 `app-flash`，分区没动）：
+    串口 `选场景 亲子 → 换装 scene=2` / `选场景 对话 → 换装 scene=3`，四方向 + 单击回脸无回归；
+    三张 466×466 截图实看：picker.png 三横卡（车蓝环高亮）、face-2.png 薄荷绒毛、face-3.png 紫绒毛，脸都保持奶白。
+    **没称到**：手指真点那张卡（串口注不了触摸，写路径是代码证据 + `>scene=` 实跑同一个 `on_scene_clicked`）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
   git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet
   git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet esp32/main \
-      esp32/partitions_muse.csv \
+      esp32/partitions_muse.csv esp32/avatar/muse_pixel.c \
       > D:/dev/projects/carpet-sat-demo/firmware/screen/muse/muse-carpet.patch
   git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet   # 别让状态多个暂存
   ```
   **`esp32/partitions_muse.csv` 是 11-12 这轮加进路径清单的**：它在 `esp32/` 根下，
   不在原来那三个路径里，漏了它补丁就少一行 `model` 分区 ⇒ 对端机器全片刷也没有模型，
   唤醒词永远 `ready=0`，而编译刷机全都"成功"。
+  **`esp32/avatar/muse_pixel.c` 是 11-13 这轮（B §3 换装）加进路径清单的**：它在 `esp32/avatar/` 下，
+  不在 `esp32/components/muse` 里。漏了它，`muse_pixel.h` 的声明（在 components/muse 里）会进补丁、
+  `muse_pixel_set_scene()` 的实现却没进 ⇒ 对端机器编译直接 undefined reference。和 partitions 那条同一个坑。
   `esp32/components/screen_link/` **不在 patch 里** —— 它就是把本仓库
   `firmware/screen/components/screen_link/` 整目录复制过去，只换一个 `CMakeLists.txt`（原因见 §4），
   复制命令在 §3。
