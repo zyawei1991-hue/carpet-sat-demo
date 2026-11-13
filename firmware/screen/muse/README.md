@@ -31,7 +31,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
 - 我们的全部改动 = 34 个文件、5819 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，9,064 行 / 473,685 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  （`muse-carpet.patch`，9,126 行 / 478,685 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
   这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13 凌晨实读的。
   比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
   `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
@@ -270,6 +270,20 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     `blocks=821 hits=0 dropped=0`（≈26 s 环境音，**0 误触发**）、`detect avg=2.75 ms worst=4.00 ms`、
     稳态 `int=43K/29K min=32K`。
     **但真人语音唤醒没称到** —— 卡在这台 PC 没有能出声的物理输出设备，详见 §18.4。
+  - 2026-11-13 中午 **「对着屏说话」上设置页 + 出厂默认 OFF→AUTO**（`HANDOFF.md` §18.7）——
+    补的是 owner 的硬约束「现场不用电脑」：这一格原来只有串口 `>micup` 能改、出厂还是关，
+    换板或清 NVS 就永久开不回来。「声音」页加一行开关（开=AUTO、关=OFF，**FORCE 故意不上屏**：
+    对着解不了 `mic_chunk` 的旧 App 硬发会被它关连接），读写 `carpet/mic_mode` **同一格**，不新开 NVS 键。
+    新增台架口 `>micup default`：只抹这一个键回出厂档（整片擦 NVS 会抹掉 owner 存的 Wi-Fi，不能那么干）。
+    **两态都用像素验过**（串口截图 466×466，`tools/zh_shot.py`，不走 HTTP）：存 auto 时那格开着、
+    `>micup off` 后重开页关着，「扬声器」不受影响。**出厂默认实测**：抹键 + 冷开机后
+    `@micup now=auto` / `@mic mode=auto`，同次回读 `ssid=Mate 60` 还在 ⇒ 没碰 Wi-Fi。
+    没称到：手指点那一格（串口注不了触摸，写路径是代码证据 + 串口实跑同一个 set_mode）、
+    这一版 linked=1 时的 `armed=1`（热点不在空中，`scan complete, 0 APs found`）。
+    这一版 34 个文件 / **5900+ / 86- / 9,126 行 / 478,685 字节**，字库仍 154,528 字节；
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 18` / `git apply: OK (34 sections)` /
+    `byte-compare: 32/34 identical`，差的两个 CRLF **485 / 114** 行 = 字节差（逐行数过）；
+    `:core:test` **329 条 / 红 1 条** = photo 漂移，无新红。
   - 2026-11-13 上午 **上行那道闸修对了 + `>url` 栈溢出修掉**（`HANDOFF.md` §18.6，
     给 App agent 的交接在 `docs/APP-CHANGES-2026-11-11.md` §0）——
     真因是屏侧自己写的 `bool open = says4 && v >= 4`：ack 外层**没有 `v` 这个键**
@@ -281,6 +295,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     `carpet_mic.c/.h`，这次逐行数过：工作树 CRLF **463 / 102** 行、patch 里 LF，
     字节差 463 / 102 **正好等于行数**，归一化后 `相同=True` ⇒ 纯行尾，不是漏打。
     这一版 34 个文件 / **5838+ / 86- / 9,064 行 / 473,685 字节**，字库仍 154,528 字节。
+    （**已被下面 11-13 中午那一版取代：5900+ / 86- / 9,126 行 / 478,685 字节。**）
     **已编已刷已称**（`Project build complete` / WEXIT=0 / `Hash of data verified.`，
     只 `app-flash`，分区没动）：
     `ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开`、

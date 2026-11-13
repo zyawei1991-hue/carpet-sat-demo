@@ -2983,3 +2983,63 @@ ble=off int=47K/29K min=32K` —— **内存充足（47K/29K），不是内存�
 （`carpet_mic.h` 这轮改过内容，所以不能拿"已知坑"免检）。
 `components/screen_link` 在补丁里**没有 diff 头**（只有一行 `+` 注释提到这个名字）。
 `:core:test` 实跑 **329 条 / 红 1 条**，仍是 §18.5 那条 photo 漂移，**本轮没有新红**。
+
+### 18.7 「对着屏说话」补上设置页那一格 + 出厂默认 OFF→AUTO（owner 的「现场不用电脑」硬约束）
+
+**为什么这不算"加功能"而是补约束**：这一格原来只有串口 `>micup auto` 能改，而出厂默认是 OFF。
+owner 的硬约束是**演示现场不用电脑** —— 换一块板、或者 NVS 被清过，这一格就永久回到关，
+现场没有任何手段开回来，等于这个功能在演示台上不存在。所以默认改 AUTO、屏上给一格，
+两条都是约束推出来的，不是偏好。AUTO 不放宽任何一道闸（还要链路连着 + 对面申报过 4 + 没被熔断）。
+
+**改了什么（屏侧）**：
+- `muse_settings_ui.c`：「声音」页加一行 `switch_row(list, "对着屏说话", carpet_mic_mode() != CARPET_MIC_OFF, on_talk_sw)`，
+  放在唤醒词那格**上面**（唤醒词只是免按键入口，总闸关了说词也不发）。**不新开页、不新开 NVS 键**：
+  读写的是 `carpet/mic_mode` 同一格，和 `>micup` 共用 `carpet_mic_set_mode()`，避免"屏上开着、串口读着关"。
+  三档只暴露两档：开=AUTO、关=OFF；**FORCE 故意不上屏**（对着解不了 `mic_chunk` 的旧 App 硬发会被
+  `close(1000,"bad contract")` 踢下线，那一档留在串口给台架）。
+- `carpet_mic.c/.h`：出厂档收成一个宏 `CARPET_MIC_FACTORY_MODE = CARPET_MIC_AUTO`，初值和"恢复出厂"共用；
+  新增 `carpet_mic_factory_default()`：**只抹 `mic_mode` 这一个键**。为什么需要它：验出厂默认必须让键
+  真的不存在，而整片擦 NVS 会连带抹掉 owner 存的 Wi-Fi / link_url / stay_online —— 不能为验一个默认值那么干。
+- `muse_input.c`：`>micup default` 走上面那个函数；帮助文案补 default，并作废"装机那版解不了 mic_chunk"旧句。
+
+#### 称到了（COM8 本轮我占；像素是串口截图，不是 HTTP）
+
+编译 `Project build complete` / `WEXIT=0`；两次 app-flash 都 `Hash of data verified.` / `WEXIT=0`。
+**这一格真在屏上，两态都用像素验过**（`CONFIG_LV_USE_SNAPSHOT=y`，`>ui.settings=sound` 开页 + 裸 `p` 取像素，
+`tools/zh_shot.py` 一次开机里连着问；466×466）：
+- 存着 auto 时：「对着屏说话」开关**开着**，中文渲染正常、说明行换行不压字（`shots-talk-on/zh_sound.png`）。
+- `>micup off` 后重开页：同一格**关着**（旋钮左、轨道灰），而「扬声器」那格不受影响
+  （`shots-talk-off/zh_sound.png`）⇒ 这一格读的就是 `carpet/mic_mode`，不是第二份状态。
+- **出厂默认实测**：`>micup default` → `I (17721) carpet_mic: 上行开关恢复出厂 = auto`；
+  冷开机（键不存在）后读回 `@micup now=auto` / `@mic mode=auto armed=0 phone_v4=0 rejected=0 dead=0 linked=0`。
+  同一次回读 `@url wifi=0 ssid=Mate 60 fails=0` ⇒ **只抹了一个键，owner 存的 Wi-Fi 没动**。
+- 唤醒词不受影响：`@wake ready=1 word=你好小安 chunk=512 on=1 inhibit=0 live=0 armed=0`、
+  `detect avg=2.75 ms worst=4.13 ms`；心跳 `hb t=38s … wifi=down … int=42K/29K`（内存够，是热点不在空中）。
+- 板子现在的 NVS 就是**出厂态**（mic_mode 键不存在），交给 owner 时默认即 auto。
+
+#### 没称到（卡在哪）
+
+- **手指点那一格**：串口注不了触摸（`muse_settings_ui.c` 里那句注释写明 "there is no way to inject a tap
+  over this port"）。写路径 = `on_talk_sw → carpet_mic_set_mode()`，后者被串口两态实跑过、日志齐全；
+  开关→回调这根线是代码证据。**要 owner 在屏上点一次开/关各一下**，看 `@micup` 跟不跟着变。
+- **这一版链路通着时的 `armed=1`**：热点不在空中（屏 `scan complete, 0 APs found`；这台 PC 只看见 `aa123`，
+  板子存的是 `Mate 60`）。见 §18.6 与任务 #8，别拿 linked=0 的读数当 linked=1 的证据。
+- 真人那一轮上行（要 owner 对着屏说一句话）。
+
+#### 本轮我自己的两个操作失误（记下来，别重犯）
+
+1. **在后台 build&&flash 链还没刷完时开了串口**。我 grep 到的 `Hash of data verified` 是**第一次**刷机的旧日志
+   （第二次还没写到那一步），于是以为刷完了。后果查清、无损：旧二进制把 `>micup default` 当非法参数拒了
+   （`@micup 只认 off / auto / force`），**NVS 一个键都没抹**；zh_shot 那次会话在 esptool 拿口之前已关闭。
+   规矩重申：**等刷机任务的完成通知到了再碰 COM8**，日志要看 mtime 不看内容有没有那行字。
+2. **补丁校验传了相对路径**，脚本进 scratch 后 `can't open patch`，而 `VERIFY_EXIT=0` 又是被 `| tail` 吃掉的
+   假退出码（这个坑记过又犯）。绝对路径重跑：`VERIFY_EXIT=1` 如实报失败原因，修好后才是下面那组数。
+
+#### 补丁与守卫
+
+`muse-carpet.patch` 重打（README §2 原命令，排除 `components/screen_link`、带上 `partitions_muse.csv`）：
+34 个文件 / **5900+ / 86− / 9,126 行 / 478,685 字节**，字库仍 154,528 字节。
+`verify_carpet_patch.py` 全新 scratch（`patchcheck-talk2`）：`baseline copies restored: 18` /
+`git apply: OK (34 sections)` / `byte-compare: 32/34 identical`。差的两个仍是 `carpet_mic.c/.h`，
+**这轮改过内容所以逐行数过**：工作树 CRLF **485 / 114** 行，字节差 21332−20847=**485**、7649−7535=**114**，
+正好等于行数 ⇒ 纯行尾。`:core:test` 实跑 **329 条 / 红 1 条** = photo 漂移（`缺的是 [photo]`），无新红。

@@ -4926,10 +4926,10 @@ index 0000000..969c865
 +void carpet_link_bench_maint(bool worried);
 diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
 new file mode 100644
-index 0000000..82e5c65
+index 0000000..59fc0fe
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.c
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,485 @@
 +/*
 + * 契约 v4 上行「对着屏说话」的屏侧那半：攒段 → 组帧 → 发。
 + *
@@ -5013,7 +5013,12 @@ index 0000000..82e5c65
 +static QueueHandle_t s_jobs;
 +static bool s_dead;                   /* 缓冲或任务要不到：这一路整个不可用，别再每次按下试一次 */
 +
-+static carpet_mic_mode_t s_mode = CARPET_MIC_OFF;
++/* 出厂默认 AUTO，不是 OFF（2026-11-13 改）。理由不是"想让它默认能说话"，是 owner 的
++ * 硬约束**演示现场不用电脑**：这一格原来只有串口 `>micup auto` 能改，换一块板或者
++ * NVS 被清过就永久回到关，现场没有任何手段开回来 —— 那等于这个功能在演示台上不存在。
++ * AUTO 本身不放宽任何一道闸：还要手机连着 + 对面在 ack.protocols 里申报过 4 + 没被熔断，
++ * 所以"默认开"不会让它对着一台不认上行的 App 硬发。屏上「声音」页现在也有这一格。 */
++static carpet_mic_mode_t s_mode = CARPET_MIC_FACTORY_MODE;
 +static bool s_mode_loaded;
 +
 +static volatile bool s_phone_v4;      /* 这一轮会话里，对面的 ack 申报过 4 */
@@ -5043,7 +5048,7 @@ index 0000000..82e5c65
 +     * 开机第一次按下可能早于 NVS 起来，那时把读失败当成没存过并缓存下来，
 +     * 结果是一台 `>micup force` 存过的屏重启后回不来，串口里还显示 armed=0 —— 现场查不出为什么。 */
 +    esp_err_t err = nvs_open(MIC_NS, NVS_READONLY, &h);
-+    if (err == ESP_ERR_NVS_NOT_FOUND) {     /* 没存过 = 出厂默认关，这一格可以缓存 */
++    if (err == ESP_ERR_NVS_NOT_FOUND) {     /* 没存过 = 出厂默认 AUTO（见 s_mode 那段），这一格可以缓存 */
 +        s_mode_loaded = true;
 +        return;
 +    }
@@ -5086,6 +5091,23 @@ index 0000000..82e5c65
 +    }
 +    ESP_LOGI(TAG, "上行开关 = %s%s", carpet_mic_mode_name(),
 +             s_last_err[0] ? "（没存进 NVS，重启回到上一格）" : "");
++}
++
++void carpet_mic_factory_default(void)
++{
++    nvs_handle_t h;
++    if (nvs_open(MIC_NS, NVS_READWRITE, &h) == ESP_OK) {
++        nvs_erase_key(h, MIC_KEY);      /* 只抹这一个键：Wi-Fi / link_url 都在别的命名空间，不动 */
++        nvs_commit(h);
++        nvs_close(h);
++    } else {
++        strlcpy(s_last_err, "NVS 打不开，没抹掉那一格", sizeof(s_last_err));
++    }
++    s_mode = CARPET_MIC_FACTORY_MODE;
++    s_mode_loaded = true;
++    s_rejected = false;
++    ESP_LOGI(TAG, "上行开关恢复出厂 = %s%s", carpet_mic_mode_name(),
++             s_last_err[0] ? "（NVS 没抹掉，重启会回到存过的那一格）" : "");
 +}
 +
 +/* ---------------- 地基 ---------------- */
@@ -5395,10 +5417,10 @@ index 0000000..82e5c65
 +}
 diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
 new file mode 100644
-index 0000000..052ab7b
+index 0000000..08f4d8d
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,114 @@
 +/*
 + * 契约 v4 的上行：「对着屏说话」。
 + *
@@ -5416,8 +5438,11 @@ index 0000000..052ab7b
 + * 2. **发帧不在采集任务里**。`esp_websocket_client_send_text` 最坏阻塞 2 秒，压在上面那
 + *    20 毫秒节拍上掉的是采到的声音。所以采集只管往 PSRAM 段里填，松手时把这一段交给
 + *    本文件自己的发送任务。
-+ * 3. **闸是三道，不是一道**：本地开关（NVS，出厂默认关）＋ 对面手机在 `ack.protocols` 里
-+ *    申报过 4 ＋ 这一轮没被判成"这台手机不收上行"。缺任何一道都不发。
++ * 3. **闸是三道，不是一道**：本地开关（NVS `carpet/mic_mode`，**出厂默认 AUTO**，
++ *    屏上「声音」页那一格「对着屏说话」和串口 `>micup` 读写同一格）＋ 对面手机在
++ *    `ack.protocols` 里申报过 4 ＋ 这一轮没被判成"这台手机不收上行"。缺任何一道都不发。
++ *    默认为什么不是 OFF：owner 的硬约束是**演示现场不用电脑**，而这一格原来只有串口能改，
++ *    换板或清 NVS 就永久回到关、现场开不回来。AUTO 不放宽任何一道，所以默认开是安全的。
 + *    为什么要留第三道：万一装的那版 App **申报了 4 但解不了 `mic_chunk`**，
 + *    它的入站解码失败分支是 `conn.close(1000, "bad contract")` —— 一块乱发的固件会把一台
 + *    本来好使的手机当场踢下线，那比"屏不能说话"重得多。所以"发过上行后 5 秒内掉线"
@@ -5438,15 +5463,19 @@ index 0000000..052ab7b
 +#include <stddef.h>
 +#include <stdint.h>
 +
-+/* 本地开关。默认 CARPET_MIC_OFF —— 见上面第 3 条。
-+ * AUTO  = 只在对面申报过 4 的时候才上行（真机那一档，App 补上 mic_chunk 之后用这个）。
++/* 本地开关。默认 CARPET_MIC_AUTO —— 见上面第 3 条（现场不用电脑，所以不能默认关）。
++ * AUTO  = 只在对面申报过 4 的时候才上行（真机那一档，也是屏上那一格"开"对应的档）。
 + * FORCE = 不看申报，只要链路连着就发（台架：fake-phone.mjs 和彩排台走这一档验形状）。
-+ * OFF   = 永远不发，屏上这一路退回 Muse 原来那句话。 */
++ *         **故意不上屏**：对着一台解不了 mic_chunk 的 App 硬发会被它 close(1000) 踢下线。
++ * OFF   = 永远不发，屏上这一路退回 Muse 原来那句话（屏上那一格"关"）。 */
 +typedef enum {
 +    CARPET_MIC_OFF = 0,
 +    CARPET_MIC_AUTO,
 +    CARPET_MIC_FORCE,
 +} carpet_mic_mode_t;
++
++/* 出厂那一档。初值和"恢复出厂"共用这一个数，别处再写第二份就会漂。 */
++#define CARPET_MIC_FACTORY_MODE CARPET_MIC_AUTO
 +
 +/* 链路起起来时调一次（`carpet_link_start()`）。两只 256 KB 的段缓冲这时候要最便宜，
 + * 等手机把 PSRAM 切碎再来就要不到 —— 所以不在按下的那一刻现要。
@@ -5495,6 +5524,11 @@ index 0000000..052ab7b
 +/* `>micup off|auto|force`：读和改本地开关，改完落 NVS。 */
 +carpet_mic_mode_t carpet_mic_mode(void);
 +void carpet_mic_set_mode(carpet_mic_mode_t mode);
++/* 台架口（`>micup default`）：只抹 NVS 里 mic_mode 这一个键，回到出厂那一档。
++ * 为什么需要它：验"出厂默认"必须让键真的不存在，而整片擦 NVS 会连带抹掉存过的
++ * Wi-Fi / link_url / stay_online —— 现场那台屏的 Wi-Fi 是 owner 存的，不能为验一个
++ * 默认值把它抹了。抹完 s_mode 直接落到出厂档，不必重启也读得对。 */
++void carpet_mic_factory_default(void);
 +const char *carpet_mic_mode_name(void);
 +
 +/* 开发口 `>mictest [秒]`：本机自己造一段语音（和 `>audtest` 同一套正弦包络），
@@ -6785,7 +6819,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..e57d1ec 100644
+index 7c579bb..4a3326c 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,26 @@
@@ -6989,7 +7023,7 @@ index 7c579bb..e57d1ec 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +992,244 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,250 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -7044,10 +7078,15 @@ index 7c579bb..e57d1ec 100644
 +        carpet_link_bench_say_audio(*rest ? rest : "", sec);
 +        return true;
 +    }
-+    /* 上行那一档开关：`>micup` 读，`>micup off|auto|force` 改（改完落 NVS，重启还在）。
-+     * off = 按下走 Muse 原来那一路；auto = 只在对面那台手机在 ack 里申报过 v4 才发；
-+     * force = 不看申报，只要链路连着就发（台架验帧形状用，对着真 App 用它会当场把手机踢下线——
-+     * 现在装机那版解不了 mic_chunk，它的处理是关连接）。 */
++    /* 上行那一档开关：`>micup` 读，`>micup off|auto|force|default` 改（改完落 NVS，重启还在）。
++     * 屏上「声音」页那一格「对着屏说话」读写的是同一格（开=auto、关=off），不是两份状态。
++     * off = 按下走 Muse 原来那一路；auto = 只在对面那台手机在 ack.protocols 里申报过 4 才发
++     * （**出厂默认这一档**）；force = 不看申报，只要链路连着就发，台架验帧形状用。
++     * default = 只抹 NVS 里 mic_mode 这一个键、回到出厂档（验默认值用；整片擦 NVS 会连带
++     * 抹掉 owner 存的 Wi-Fi，不能那么干）。
++     * force 故意不上屏：对着一台解不了 mic_chunk 的 App 硬发，它的处理是 close(1000,"bad contract")，
++     * 会把一台本来好使的手机当场踢下线。（11-13 更正：装机那版 1.26.0 **已经**解得了 mic_chunk，
++     * 旧注释里"现在装机那版解不了"那句作废；force 的危险是对**旧**版本而言，规矩不变。） */
 +    if (!strncmp(line, "micup", 5) && (line[5] == '\0' || line[5] == ' ')) {
 +        const char *want = line[5] == ' ' ? line + 6 : NULL;
 +        while (want && *want == ' ') want++;
@@ -7055,8 +7094,9 @@ index 7c579bb..e57d1ec 100644
 +            if (!strcmp(want, "off"))        carpet_mic_set_mode(CARPET_MIC_OFF);
 +            else if (!strcmp(want, "auto"))  carpet_mic_set_mode(CARPET_MIC_AUTO);
 +            else if (!strcmp(want, "force")) carpet_mic_set_mode(CARPET_MIC_FORCE);
++            else if (!strcmp(want, "default")) carpet_mic_factory_default();
 +            else {
-+                printf("@micup 只认 off / auto / force（现在 %s）\n", carpet_mic_mode_name());
++                printf("@micup 只认 off / auto / force / default（现在 %s）\n", carpet_mic_mode_name());
 +                fflush(stdout);
 +                return true;
 +            }
@@ -7234,7 +7274,7 @@ index 7c579bb..e57d1ec 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1264,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1270,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -7247,7 +7287,7 @@ index 7c579bb..e57d1ec 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1372,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1378,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -7594,7 +7634,7 @@ index 5788e5b..69e52de 100644
   * an empty ssid forgets every saved network. */
  void muse_settings_set_wifi(const char *ssid, const char *pass);
 diff --git a/esp32/components/muse/muse_settings_ui.c b/esp32/components/muse/muse_settings_ui.c
-index 20c46d3..bb486a9 100644
+index 20c46d3..987fd8e 100644
 --- a/esp32/components/muse/muse_settings_ui.c
 +++ b/esp32/components/muse/muse_settings_ui.c
 @@ -35,6 +35,7 @@
@@ -7605,18 +7645,19 @@ index 20c46d3..bb486a9 100644
  #include "muse_link.h"
  #include "muse_settings.h"
  #include "muse_state.h"
-@@ -45,6 +46,10 @@
+@@ -45,6 +46,11 @@
  #if CONFIG_MUSE_VIDEO
  #include "muse_video.h"
  #endif
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_link.h"   /* the access-point row on the Wi-Fi page */
 +#include "carpet/carpet_wake.h"   /* 唤醒词那一格：要念的是哪个词，只有模型自己知道 */
++#include "carpet/carpet_mic.h"    /* 「对着屏说话」那一格：开关本体在 carpet_mic，不在 muse_settings */
 +#endif
  
  /* Keep content in a column that stays inside a round panel (and fits a 368 px one). */
  #define LIST_W 330
-@@ -107,6 +112,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
+@@ -107,6 +113,13 @@ static int s_saved_n = -1;   /* as listed; -1 before the first fill */
  static int s_forget_armed = -1;
  static int64_t s_forget_armed_us;
  static char s_join_ssid[MUSE_SSID_MAX + 1];
@@ -7630,7 +7671,7 @@ index 20c46d3..bb486a9 100644
  
  /* Hatch page. */
  static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token, *s_hatch_sdk_token;
-@@ -128,6 +140,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
+@@ -128,6 +141,7 @@ static const int SLEEP_CHOICES[] = { 0, 30, 60, 120, 300, 600 };
  static const char *const SLEEP_NAMES[] = { "Never", "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes" };
  #define SLEEP_COUNT (int)(sizeof(SLEEP_CHOICES) / sizeof(SLEEP_CHOICES[0]))
  static lv_obj_t *s_sleep_checks[SLEEP_COUNT], *s_sleep_rows[SLEEP_COUNT];
@@ -7638,7 +7679,7 @@ index 20c46d3..bb486a9 100644
  static int s_sleep_shown = -1;
  
  /* Battery page. */
-@@ -166,6 +179,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
+@@ -166,6 +180,33 @@ static const lv_font_t *settings_font(const lv_font_t *font)
      return font;
  }
  
@@ -7672,7 +7713,7 @@ index 20c46d3..bb486a9 100644
  /* A 172 px portrait panel cannot fit an icon, name and status side by side. */
  static bool narrow_panel(void)
  {
-@@ -199,11 +239,17 @@ static int stacked_text_w(void)
+@@ -199,11 +240,17 @@ static int stacked_text_w(void)
      return (s_tiny ? TINY_LIST_W : muse_board->width - 16) - 20;
  }
  
@@ -7691,7 +7732,7 @@ index 20c46d3..bb486a9 100644
      lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
      lv_label_set_text(l, muse_text_showable(text, shown, sizeof(shown)));
      return l;
-@@ -212,7 +258,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
+@@ -212,7 +259,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color,
  static void set_text(lv_obj_t *l, const char *text)
  {
      char shown[SHOWN_MAX];
@@ -7700,7 +7741,7 @@ index 20c46d3..bb486a9 100644
      if (strcmp(lv_label_get_text(l), text) != 0) {
          lv_label_set_text(l, text);
      }
-@@ -480,6 +526,58 @@ static lv_obj_t *column(lv_obj_t *list)
+@@ -480,6 +527,58 @@ static lv_obj_t *column(lv_obj_t *list)
      return l;
  }
  
@@ -7759,7 +7800,7 @@ index 20c46d3..bb486a9 100644
  /* Label and value, not tappable. */
  static lv_obj_t *info_row(lv_obj_t *list, const char *text)
  {
-@@ -635,7 +733,7 @@ static void on_text_show(lv_event_t *e)
+@@ -635,7 +734,7 @@ static void on_text_show(lv_event_t *e)
      (void)e;
      bool pw = !lv_textarea_get_password_mode(s_text_ta);
      lv_textarea_set_password_mode(s_text_ta, pw);
@@ -7768,7 +7809,7 @@ index 20c46d3..bb486a9 100644
  }
  
  /* Beside the keyboard's field, a button to show a password. */
-@@ -752,7 +850,7 @@ static void build_text_page(lv_obj_t *tile)
+@@ -752,7 +851,7 @@ static void build_text_page(lv_obj_t *tile)
      int top = text_y(98);
      if (narrow_panel()) {
          /* Portrait panels need a header inside the screen, not the round layout. */
@@ -7777,7 +7818,7 @@ index 20c46d3..bb486a9 100644
          single_line(s_text_title, muse_board->width - 16);
          lv_obj_align(s_text_title, LV_ALIGN_TOP_MID, 0, 8);
          lv_obj_set_width(s_text_ta, muse_board->width - 60);
-@@ -791,6 +889,12 @@ static void open_text(const char *title, const char *initial, bool password, int
+@@ -791,6 +890,12 @@ static void open_text(const char *title, const char *initial, bool password, int
      lv_textarea_set_max_length(s_text_ta, max_len);
      lv_textarea_set_password_mode(s_text_ta, password);
      lv_textarea_set_text(s_text_ta, initial ? initial : "");
@@ -7790,7 +7831,7 @@ index 20c46d3..bb486a9 100644
      lv_textarea_set_placeholder_text(s_text_ta, hint ? hint : "");
      if (s_text_kp) {
          muse_keypad_reset(s_text_kp, password);
-@@ -944,10 +1048,12 @@ static bool rebuild_scan_list(void)
+@@ -944,10 +1049,12 @@ static bool rebuild_scan_list(void)
          bool saved = is_saved(s_aps[i].ssid);
          saved_seen |= saved;
          char buf[24];
@@ -7805,7 +7846,7 @@ index 20c46d3..bb486a9 100644
          }
          lv_label_set_text(v, buf);
      }
-@@ -973,6 +1079,33 @@ static bool sta_mac(uint8_t m[6])
+@@ -973,6 +1080,33 @@ static bool sta_mac(uint8_t m[6])
  #endif
  }
  
@@ -7839,7 +7880,7 @@ index 20c46d3..bb486a9 100644
  static void build_wifi_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -988,6 +1121,15 @@ static void build_wifi_page(lv_obj_t *tile)
+@@ -988,6 +1122,15 @@ static void build_wifi_page(lv_obj_t *tile)
      s_wifi_list = column(list);
  
      row(list, LV_SYMBOL_EDIT, "Other network...", NULL, on_wifi_other, NULL);
@@ -7855,7 +7896,7 @@ index 20c46d3..bb486a9 100644
      lv_obj_t *mac = info_row(list, "MAC address");
      uint8_t m[6];
      if (sta_mac(m)) {
-@@ -1006,27 +1148,29 @@ static void tick_wifi(void)
+@@ -1006,27 +1149,29 @@ static void tick_wifi(void)
      char buf[128];
      switch (w.state) {
      case MUSE_WIFI_OFF:
@@ -7892,7 +7933,7 @@ index 20c46d3..bb486a9 100644
          break;
      }
      set_text(s_wifi_status, buf);
-@@ -1046,6 +1190,23 @@ static void tick_wifi(void)
+@@ -1046,6 +1191,23 @@ static void tick_wifi(void)
      if (rebuild_scan_list() && w.state == MUSE_WIFI_NOT_NEARBY) {
          muse_wifi_apply();
      }
@@ -7916,7 +7957,7 @@ index 20c46d3..bb486a9 100644
  }
  
  /* ---------- Hatch ---------- */
-@@ -1125,12 +1286,26 @@ static void build_hatch_page(lv_obj_t *tile)
+@@ -1125,12 +1287,26 @@ static void build_hatch_page(lv_obj_t *tile)
      s_link_status = note(list, "");
      button(list, "Reset pairing", COLOR_DANGER, on_link_reset, &s_link_reset_lbl);
      s_hatch_status = note(list, "");
@@ -7949,7 +7990,7 @@ index 20c46d3..bb486a9 100644
                 "easier to send over Bluetooth. The VM ID picks one of your VMs. The SDK token is from "
                 "gadgets.muse.ai; one set here replaces the firmware's. "
                 "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
-@@ -1142,7 +1317,8 @@ static void tick_hatch(void)
+@@ -1142,7 +1318,8 @@ static void tick_hatch(void)
      const char *paired = !muse_link_hatch_linked()    ? "not paired"
                           : muse_link_sdk_token_changed() ? "paired with another SDK token, pair again to use this one"
                                                           : "paired";
@@ -7959,7 +8000,7 @@ index 20c46d3..bb486a9 100644
      set_text(s_link_status, link);
      if (s_link_reset_armed_us && esp_timer_get_time() - s_link_reset_armed_us >= 5000000) {
          s_link_reset_armed_us = 0;
-@@ -1153,9 +1329,13 @@ static void tick_hatch(void)
+@@ -1153,9 +1330,13 @@ static void tick_hatch(void)
      muse_hatch_status(&h);
      char buf[96];
      if (h.detail[0]) {
@@ -7975,7 +8016,7 @@ index 20c46d3..bb486a9 100644
      }
      set_text(s_hatch_status, buf);
      lv_obj_set_style_text_color(s_hatch_status, lv_color_hex(h.state == MUSE_HATCH_REACHABLE ? COLOR_OK :
-@@ -1218,11 +1398,12 @@ static void tick_ble(void)
+@@ -1218,11 +1399,12 @@ static void tick_ble(void)
          strlcpy(buf, "Off", sizeof(buf));
          break;
      case MUSE_BLE_ADVERTISING:
@@ -7990,7 +8031,7 @@ index 20c46d3..bb486a9 100644
          break;
      }
      set_text(s_ble_status, buf);
-@@ -1235,10 +1416,12 @@ static void tick_ble(void)
+@@ -1235,10 +1417,12 @@ static void tick_ble(void)
  
  /* ---------- Sound ---------- */
  
@@ -8004,7 +8045,7 @@ index 20c46d3..bb486a9 100644
      set_text(l, buf);
  }
  
-@@ -1288,6 +1471,13 @@ static void on_bright(lv_event_t *e)
+@@ -1288,6 +1472,28 @@ static void on_bright(lv_event_t *e)
      }
  }
  
@@ -8013,16 +8054,37 @@ index 20c46d3..bb486a9 100644
 +{
 +    muse_settings_set_wake_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 +}
++
++/* 「对着屏说话」那一格。**不新开一个 muse_settings 键**：开关本体是 carpet_mic 的
++ * NVS（carpet/mic_mode），串口 `>micup` 和这里读写的是同一格 —— 两处各存一份的话，
++ * 现场就会出现"屏上开着、串口读出来是关"这种没法判的状态。
++ *
++ * 三档只暴露两档：开 = AUTO（要手机连着且申报过 4 才真发），关 = OFF。
++ * FORCE（不看申报、连着就发）**故意不上屏**：那一档是给台架 fake-phone 验形状用的，
++ * 放到用户手里就等于允许对着一台解不了 mic_chunk 的 App 硬发，而那边的处理是
++ * close(1000,"bad contract") —— 把一台本来好使的手机当场踢下线。它留在串口。
++ * 从 FORCE 拨到关再拨回开会落到 AUTO，这是想要的：人手动拨过之后不再保留台架档。 */
++static void on_talk_sw(lv_event_t *e)
++{
++    bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
++    carpet_mic_set_mode(on ? CARPET_MIC_AUTO : CARPET_MIC_OFF);
++}
 +#endif
 +
  static void build_sound_page(lv_obj_t *tile)
  {
      lv_obj_t *list;
-@@ -1309,6 +1499,21 @@ static void build_sound_page(lv_obj_t *tile)
+@@ -1309,6 +1515,27 @@ static void build_sound_page(lv_obj_t *tile)
          s_vol_sl = slider(list, "Volume", 0, 100, muse_settings_volume(), &s_vol_val, on_volume);
      }
      s_gain_sl = slider(list, "Mic gain", 0, MUSE_MIC_GAIN_MAX / 3, muse_settings_mic_gain() / 3, &s_gain_val, on_gain);
 +#if CONFIG_MUSE_CARPET_CARDS
++    /* 「对着屏说话」的总闸，放在唤醒词**上面**：唤醒词只是免按键的入口，
++     * 这一格关了，说唤醒词也一样不发。两格都在「声音」页里，不新开页（owner 的规矩）。
++     * 为什么必须有这一格：开关原来只有串口 `>micup` 能改，而 owner 的硬约束是
++     * **演示现场不用电脑** —— 换一块板、或者 NVS 被清过，就再也开不回来了。 */
++    switch_row(list, "对着屏说话", carpet_mic_mode() != CARPET_MIC_OFF, on_talk_sw);
++    note(list, "开：语音交给手机转写，要手机连着且认这套上行。关：退回原来那句提示。");
 +    /* 唤醒词那一格。放在「声音」页里，不新开一页（owner 的规矩：不加新页面）。
 +     * 说明这一行必须是**动态**的：要念的是哪个词由模型自己报（carpet_wake_word()），
 +     * 写死在词表里就会和"换模型只改 sdkconfig 一行"那一步脱节 —— 屏上教的词和
@@ -8040,7 +8102,7 @@ index 20c46d3..bb486a9 100644
  
      lv_obj_t *meter = lv_obj_create(list);
      lv_obj_remove_style_all(meter);
-@@ -1378,17 +1583,27 @@ static void on_sleep_now(lv_event_t *e)
+@@ -1378,17 +1605,27 @@ static void on_sleep_now(lv_event_t *e)
      muse_state_set_asleep(true);
  }
  
@@ -8068,7 +8130,7 @@ index 20c46d3..bb486a9 100644
      button(list, LV_SYMBOL_EYE_CLOSE "  Sleep now", COLOR_ACCENT, on_sleep_now, NULL);
      note(list, "Tap the screen or press either button to wake.");
  }
-@@ -1431,16 +1646,25 @@ static void build_battery_page(lv_obj_t *tile)
+@@ -1431,16 +1668,25 @@ static void build_battery_page(lv_obj_t *tile)
      s_battery = page(tile, "BATTERY", true, &list);
      s_batt_shown_us = 0;
      s_batt_status = note(list, "");
@@ -8103,7 +8165,7 @@ index 20c46d3..bb486a9 100644
                 "few hours. Chip asleep is time in light sleep; CPU busy is time a core was running a task.");
  }
  
-@@ -1468,14 +1692,14 @@ static void tick_battery(void)
+@@ -1468,14 +1714,14 @@ static void tick_battery(void)
  
      int h = (int)(b.secs / 3600), m = (int)(b.secs / 60 % 60);
      if (h) {
@@ -8122,7 +8184,7 @@ index 20c46d3..bb486a9 100644
      }
      set_text(s_batt_status, buf);
  
-@@ -1496,10 +1720,10 @@ static void tick_battery(void)
+@@ -1496,10 +1742,10 @@ static void tick_battery(void)
      } else if (muse_battery_drain(&b, &rate10, &full_h)) {
          snprintf(buf, sizeof(buf), "%d%%, %d.%d%%/h", used, rate10 / 10, rate10 % 10);
          set_text(s_batt_drain, buf);
@@ -8135,7 +8197,7 @@ index 20c46d3..bb486a9 100644
          set_text(s_batt_drain, buf);
          set_text(s_batt_full, "measuring");
      }
-@@ -1516,7 +1740,7 @@ static void tick_battery(void)
+@@ -1516,7 +1762,7 @@ static void tick_battery(void)
      }
      buf[0] = '\0';
      if (b.started && b.awake[0]) {
@@ -8144,7 +8206,7 @@ index 20c46d3..bb486a9 100644
      }
      set_text(s_batt_awake, buf);
  }
-@@ -1543,13 +1767,14 @@ static void build_power_page(lv_obj_t *tile)
+@@ -1543,13 +1789,14 @@ static void build_power_page(lv_obj_t *tile)
      const char *sleep = muse_board->power_button ? muse_board->power_button : muse_board->aux_button;
      if (power && !strcmp(power, "screen")) {
          /* Touch-only boards (the LCD-7 and LCD-1.28) wake on a tap. */
@@ -8162,7 +8224,7 @@ index 20c46d3..bb486a9 100644
      }
      note(list, text);
  }
-@@ -1658,13 +1883,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
+@@ -1658,13 +1905,29 @@ void muse_settings_ui_build(lv_obj_t *tile)
  
  #if LV_USE_SNAPSHOT
  static volatile int s_bench_open = -1;   /* applied in the LVGL task, by the next tick */
@@ -8193,7 +8255,7 @@ index 20c46d3..bb486a9 100644
              return true;
          }
      }
-@@ -1688,6 +1929,22 @@ static void bench_open_pending(void)
+@@ -1688,6 +1951,22 @@ static void bench_open_pending(void)
              PAGES[i]->build(s_tile);
          }
          show(*PAGES[i]->obj);
