@@ -1,17 +1,20 @@
 diff --git a/esp32/avatar/muse_pixel.c b/esp32/avatar/muse_pixel.c
-index de2542f..267f09f 100644
+index de2542f..66f5a1a 100644
 --- a/esp32/avatar/muse_pixel.c
 +++ b/esp32/avatar/muse_pixel.c
-@@ -44,6 +44,20 @@ enum {
+@@ -44,6 +44,23 @@ enum {
      C_SHADOW,
      C_HEART,
      C_WHITE,
 +    /* 场景换装元素（owner 2026-11-13：不只是调色，要看得见道具）。 */
 +    C_BELT,      /* 车载：安全带织带 */
 +    C_BUCKLE,    /* 车载：安全带金属扣 */
-+    C_WHEEL,     /* 车载：车窗/轮胎/安全带扣芯 */
++    C_WHEEL,     /* 车载：轮胎/安全带扣芯 */
 +    C_WHEEL2,    /* 车载：轮毂 */
-+    C_CAR,       /* 车载：小汽车车身 */
++    C_CAR,       /* 车载：红车身 */
++    C_CARD,      /* 车载：车身暗部/描边 */
++    C_CARL,      /* 车载：车沿/保险杠高光 */
++    C_GLASS,     /* 车载：挡风玻璃 */
 +    C_TOY,       /* 亲子：玩偶绒毛 */
 +    C_TOYD,      /* 亲子：玩偶暗部/耳廓 */
 +    C_SLIDE,     /* 亲子：滑滑梯滑道 */
@@ -23,7 +26,7 @@ index de2542f..267f09f 100644
      C_COUNT,
  };
  
-@@ -89,6 +103,19 @@ static const uint32_t FIXED[C_COUNT] = {
+@@ -89,6 +106,22 @@ static const uint32_t FIXED[C_COUNT] = {
      [C_SHADOW] = 0x16101f,
      [C_HEART] = 0xff4f8b,
      [C_WHITE] = 0xffffff,
@@ -32,6 +35,9 @@ index de2542f..267f09f 100644
 +    [C_WHEEL] = 0x15171c,
 +    [C_WHEEL2] = 0x59606e,
 +    [C_CAR] = 0xe8465c,
++    [C_CARD] = 0xb02a3e,
++    [C_CARL] = 0xff8095,
++    [C_GLASS] = 0xcfeaf5,
 +    [C_TOY] = 0xe3a468,
 +    [C_TOYD] = 0xb87a44,
 +    [C_SLIDE] = 0xffb84d,
@@ -43,7 +49,7 @@ index de2542f..267f09f 100644
  };
  
  static rgb_t s_scheme[5];      /* live, blended: f0..f3, acc */
-@@ -96,6 +123,18 @@ static bool s_scheme_init;
+@@ -96,6 +129,18 @@ static bool s_scheme_init;
  static uint16_t s_pal[C_COUNT];
  static uint16_t s_pal_dim[C_COUNT];
  
@@ -62,7 +68,7 @@ index de2542f..267f09f 100644
  static uint8_t s_fb[W * H];
  static uint8_t s_mask[W * H];
  
-@@ -185,6 +224,14 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
+@@ -185,6 +230,14 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
      return SCHEMES[mode < MUSE_MODE_COUNT ? mode : MUSE_MODE_IDLE].acc;
  }
  
@@ -77,7 +83,7 @@ index de2542f..267f09f 100644
  static void update_palette(const scheme_t *target, float dt)
  {
      rgb_t tgt[5];
-@@ -199,10 +246,29 @@ static void update_palette(const scheme_t *target, float dt)
+@@ -199,10 +252,29 @@ static void update_palette(const scheme_t *target, float dt)
      }
      s_scheme_init = true;
  
@@ -107,13 +113,13 @@ index de2542f..267f09f 100644
      rgb_t acc = s_scheme[4];
      pal[C_G0] = s_scheme[0];
      pal[C_G1] = s_scheme[1];
-@@ -827,6 +893,186 @@ static void draw_alert(int x, int y)
+@@ -827,6 +899,215 @@ static void draw_alert(int x, int y)
      stamp(BANG, 6, x - 2, y, C_ACC, C_ACC);
  }
  
 +/* ---------------------------------------------------------------------------
 + * 场景换装道具（owner 2026-11-13：不只是调色，要看得见道具）
-+ *   车·守护   = 斜跨安全带 + 胸前一只小汽车
++ *   车·守护   = 坐进一辆红色小车（车系安全带）
 + *   家·亲子   = 左爪抱玩偶 + 右旁一架滑滑梯
 + *   对话·分身 = 绒毛躯干穿正装（外套 + 白衬衫 V + 领带）
 + * 全锚在 avatar_t 几何上，随 s_costume_pop 用 ordered-dither 浮现、道具再下滑入位
@@ -146,11 +152,54 @@ index de2542f..267f09f 100644
 +    }
 +}
 +
-+/* 车载：安全带斜挎上胸（右肩→左肋，末端一个金属扣），胸前一只侧视小汽车。
-+ * owner：方向盘在 64px 正面姿势下总糊成肚脐眼（居中的圈+毂，没有手握着），换成一眼能认出的汽车。
-+ * 车＝车厢梯形顶＋横条车身＋两轮＋前灯，横长条形，绝不是肚脐那样的中心圆点。 */
++/* 车载：avatar 坐进一辆红色小车（正面视角）——头露在挡风玻璃上方，浅蓝挡风玻璃 + 暗红框 + 反光，
++ * 宽而平的红车身裹住下半身、比 avatar 宽，底下两只大轮子、前面两只灯 + 格栅 + 保险杠，两爪搭在车沿；
++ * 安全带斜挎胸前透过玻璃可见。owner：「小红车太抽象，能让他坐在小红车里吗」。 */
 +static void draw_vehicle(const avatar_t *j, float ca, int slide)
 +{
++    int cx = iround(j->cx);
++    int rim = iround(j->cy + j->b * 0.44f) + slide;   /* 车沿（腰际），上半身露在这上方 */
++    int bot = rim + 13;                                /* 车底 */
++    int mid = rim + 6;                                 /* 最宽处 */
++
++    /* 轮子先画（车底两角），比车身宽、露出下半，带亮轮毂。 */
++    c_disc((float)(cx - 16), (float)bot, 3.2f, C_WHEEL, ca);
++    c_disc((float)(cx + 16), (float)bot, 3.2f, C_WHEEL, ca);
++    c_disc((float)(cx - 16), (float)bot, 1.3f, C_WHEEL2, ca);
++    c_disc((float)(cx + 16), (float)bot, 1.3f, C_WHEEL2, ca);
++
++    /* 红车身：口沿略收、中段最宽、底部平收（不收成蛋尖）；左右 + 底描暗红边。 */
++    for (int y = rim; y <= bot; y++) {
++        int hw = (y <= mid) ? 19 + (y - rim) * 3 / 6 : 22 - (y - mid) * 4 / 7;
++        if (hw < 12) hw = 12;
++        for (int x = cx - hw; x <= cx + hw; x++) {
++            bool edge = (x == cx - hw || x == cx + hw || y == bot);
++            cpx(x, y, edge ? C_CARD : C_CAR, ca);
++        }
++    }
++    for (int x = cx - 13; x <= cx + 13; x++) cpx(x, bot - 2, C_CARL, ca);      /* 前保险杠 */
++    c_disc((float)(cx - 10), (float)mid, 1.7f, C_SHIRT, ca);                   /* 左前灯 */
++    c_disc((float)(cx + 10), (float)mid, 1.7f, C_SHIRT, ca);                   /* 右前灯 */
++    for (int x = cx - 3; x <= cx + 3; x += 2) cpx(x, mid + 3, C_CARD, ca);     /* 中网格栅 */
++
++    /* 挡风玻璃：头下方一片宽梯形浅蓝玻璃（下宽上窄），暗红框 + 白色反光斜条。 */
++    int wtop = rim - 8, wbot = rim - 1;
++    for (int y = wtop; y <= wbot; y++) {
++        int ww = 10 + (y - wtop);
++        for (int x = cx - ww; x <= cx + ww; x++) {
++            bool fr = (x == cx - ww || x == cx + ww || y == wtop);
++            cpx(x, y, fr ? C_CARD : C_GLASS, ca);
++        }
++    }
++    cpx(cx + 3, wtop + 2, C_SHIRT, ca);
++    cpx(cx + 4, wtop + 3, C_SHIRT, ca);
++    cpx(cx + 5, wtop + 4, C_SHIRT, ca);
++
++    for (int x = cx - 18; x <= cx + 18; x++) cpx(x, rim, C_CARL, ca);          /* 车沿亮边 */
++    c_disc((float)(cx - 17), (float)rim, 1.8f, C_BL, ca);                      /* 左爪搭车沿 */
++    c_disc((float)(cx + 17), (float)rim, 1.8f, C_BL, ca);                      /* 右爪搭车沿 */
++
++    /* 安全带：斜挎上胸（右肩→左肋）+ 金属扣，透过挡风玻璃可见。 */
 +    int sx = iround(j->cx + j->a * 0.52f), sy = iround(j->fy + j->fb + 1.0f);
 +    int hx = iround(j->cx - j->a * 0.55f), hy = iround(j->cy + j->b * 0.28f);
 +    int steps = abs(hx - sx);
@@ -169,20 +218,6 @@ index de2542f..267f09f 100644
 +            cpx(hx + dx, hy + dy, (dx == 0 && dy == 0) ? C_WHEEL : C_BUCKLE, ca);
 +        }
 +    }
-+
-+    int wx = iround(j->cx), wy = iround(j->cy + j->b * 0.58f) + slide;
-+    for (int x = wx - 3; x <= wx + 2; x++) cpx(x, wy - 3, C_CAR, ca);                 /* 车顶 */
-+    for (int x = wx - 4; x <= wx + 3; x++) cpx(x, wy - 2, C_CAR, ca);                 /* 窗框 */
-+    for (int x = wx - 5; x <= wx + 4; x++) cpx(x, wy - 1, C_CAR, ca);                 /* 车厢底 */
-+    for (int x = wx - 3; x <= wx + 2; x++) if (x != wx) cpx(x, wy - 2, C_WHEEL, ca);  /* 车窗，中柱留红 */
-+    for (int y = wy; y <= wy + 1; y++)
-+        for (int x = wx - 7; x <= wx + 7; x++) cpx(x, y, C_CAR, ca);                  /* 车身 */
-+    for (int x = wx - 6; x <= wx + 6; x++) cpx(x, wy + 2, C_CAR, ca);                 /* 底盘 */
-+    c_disc((float)(wx - 4), (float)(wy + 3), 1.7f, C_WHEEL, ca);                      /* 后轮 */
-+    c_disc((float)(wx + 4), (float)(wy + 3), 1.7f, C_WHEEL, ca);                      /* 前轮 */
-+    cpx(wx - 4, wy + 3, C_WHEEL2, ca);
-+    cpx(wx + 4, wy + 3, C_WHEEL2, ca);
-+    cpx(wx + 7, wy, C_SHIRT, ca);                                                     /* 前灯 */
 +}
 +
 +/* 亲子：左爪一只轻轻呼吸的小熊玩偶，右旁一架滑滑梯（梯+平台+斜滑道+支柱）。 */
@@ -294,7 +329,7 @@ index de2542f..267f09f 100644
  /* ---------------------------------------------------------------------------
   * Frame
   * ------------------------------------------------------------------------- */
-@@ -1066,6 +1312,9 @@ void muse_pixel_render(const muse_pose_t *p)
+@@ -1066,6 +1347,9 @@ void muse_pixel_render(const muse_pose_t *p)
  
      draw_mouth(iround(j.fx), iround(eye_y + 3), mouth, mouth_open);
  
