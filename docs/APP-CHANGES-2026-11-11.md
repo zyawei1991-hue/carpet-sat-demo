@@ -81,17 +81,21 @@ ESP_LOGI(TAG, "ack：protocols=[%s]（envelope v=%d，契约规定它不上线�
 rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)
 ```
 
-真因是那个任务的栈 2048 字是"链路没起"时挑的（走浅分支），连着的时候多一个
-`screen_link_stop()` 压在同一条调用链上 ⇒ 溢出重启。已抬到 6144 字，**修完真机称到**：
+真因是那个任务的栈 2048 **字节**是"链路没起"时挑的（走浅分支），连着的时候多一个
+`screen_link_stop()` 压在同一条调用链上 ⇒ 溢出重启。已抬到 6144 字节，**修完真机称到**：
 
 ```
 @url clear: ESP_OK
 @url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=1 dialed=1
-I (96157) carpet: carpet_url 这一趟用完还剩 3500 字
+I (96157) carpet: carpet_url 这一趟用完还剩 3500 字节
 ```
 
-6144 − 3500 = **实际用了 2644 字**，比原来的 2048 字多 596 字 ⇒ 溢出是真因，不是猜的。
+6144 − 3500 = **实际用了 2644 字节**，比原来的 2048 多 596 ⇒ 溢出是真因，不是猜的。
 整趟 `reset? False`、`stack overflow` / `RTC_SW_CPU_RST` 各 0 次。**App 侧无影响。**
+
+（单位说明：ESP-IDF 的 `usStackDepth` 和 `uxTaskGetStackHighWaterMark` 都按**字节**算，
+`StackType_t = uint8_t`。屏侧固件以前把这些数印成"字"，错了 4 倍，这一轮一起改掉了；
+上面那行是改完之后的原文。详见 `firmware/screen/HANDOFF.md` §18.6。）
 
 ### 0.6 验收：闸这一层**已经称到了**（2026-11-13，真机 + 真装机 App）
 
@@ -103,6 +107,11 @@ I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上�
 
 按键和唤醒词**两条路读的是同一个 `carpet_mic_armed()`，现在都是 1** ⇒
 「对着屏说话还没开」这句话不会再出现。`>url clear` 重启链路之后复称仍是 `armed=1`。
+
+（这几行称于"改栈单位标签之前"那一版。之后又重编重刷了一次，两版差异逐行比过：
+只有 5 行日志字符串 `字`→`字节`，**功能完全相同**。当前这一版的"链路通着"读数还没补称 ——
+重刷后演示手机的热点没起来，屏 `wifi=down`（内存充足 `int=47K/29K`，不是内存问题）。
+细节和原始读数在 `firmware/screen/HANDOFF.md` §18.6，**不影响"App 侧不用改代码"这个结论**。）
 
 **还没称到的（要 owner 真人对着屏说一句话，屏侧自己造不出来）**：
 

@@ -805,14 +805,13 @@ static void link_task(void *arg)
 
             if (s_cb.on_disconnected != NULL) s_cb.on_disconnected();
             xEventGroupWaitBits(s_eg, BIT_DOWN, pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
-            /* 这一行是量体裁衣用的，不是装饰。这条任务的 `8192` 一直是按**字节**写的，
-             * 而这个 kernel 的 usStackDepth 收的是**字**（FreeRTOS-Kernel task.h:315 +
-             * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），
-             * 所以真机上一口吃掉的是 32 KB 连续内部 RAM —— 和 carpet_cmd 那次同一个坑。
-             * 2026-11-10 真机：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
-             * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 → LoadProhibited panic，
-             * 而那 32 KB 就是在这中间拿走的。高水位从这里读，改小才有依据。 */
-            ESP_LOGI(TAG, "link_task 栈还剩 %u 字",
+            /* 这一行是量体裁衣用的，不是装饰。**单位是字节**：这个 kernel 的
+             * `StackType_t` 是 `uint8_t`（portmacro.h:78），`usStackDepth` 和高水位都按字节算
+             * （idf_additions.h:268 "the number of bytes"、task.h:1509 "in bytes (as opposed to
+             * words…)"）。以前这里写成"usStackDepth 收的是字、8192 其实吃 32 KB"，**错了 4 倍**，
+             * 那个 32 KB 从来不存在（2026-11-13 纠正，见下面 xTaskCreate 那条）。
+             * 高水位从这里读，改小才有依据。 */
+            ESP_LOGI(TAG, "link_task 栈还剩 %u 字节",
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
         }
         /* 这条 else 分支以前是一行 `continue`，退避根本没跑到就撞回 start()。
@@ -890,15 +889,18 @@ esp_err_t screen_link_start(const screen_link_cfg_t *cfg, const screen_link_call
     s_ws_stack_i = 0;
     if (client_open(WS_STACKS[s_ws_stack_i]) != ESP_OK) return start_fail(ESP_ERR_NO_MEM);
 
-    /* 这条以前写 8192。这个 kernel 的 usStackDepth 收的是**字**（task.h:315 +
-     * esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配），所以那一行要的
-     * 是 32 KB，不是作者以为的 8 KB —— 和 carpet_cmd 那次是同一个坑。
-     * 真机 2026-11-10：t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
-     * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 LoadProhibited panic。
-     * 这 24 KB 差额是不是那一下的直接凶手**没单独称过**（栈这一版是能落 PSRAM 的：
-     * 内部最大连续块只剩 19K 时那 32 KB 照样建起来了），所以这一条的依据不是那条 panic，
-     * 是量出来的高水位：连上、收过 state、发过 page_report、走完一轮断线之后
-     * **还剩 2004 字**（峰值 2092 字）—— 4096 字这一档余量翻倍，够用。
+    /* 这条以前写 8192，现在 4096，**两个数都是字节**（= 8 KB → 4 KB）。
+     * 【2026-11-13 纠正：当初改小的理由是单位错算出来的。】旧注释说"usStackDepth 收的是字，
+     * 所以 8192 要的是 32 KB 不是 8 KB，和 11-10 那次 i2s DMA panic 有关" ——
+     * 这个 kernel 的 `StackType_t` 是 `uint8_t`（portmacro.h:78），`idf_additions.c:50` 那句
+     * `usStackDepth * sizeof(StackType_t)` 是 ×1，`idf_additions.h:268` 明写 "the number of bytes"
+     * ⇒ 8192 从来就是 8 KB，**那 24 KB 差额不存在**，拿它归因 panic 是错的。
+     * 11-10 真机确实崩过（t=3.3s `linked, contract v3`，t=4.3s `i2s_alloc_dma_desc:
+     * allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 LoadProhibited），
+     * 但**它和这条栈的因果从来没称过**，别再写成已定性。
+     * 改小之后站得住的依据只有量出来的高水位：连上、收过 state、发过 page_report、
+     * 走完一轮断线之后 **还剩 2004 字节**（峰值 4096−2004 = 2092 字节）⇒ 4 KB 这一档够用，
+     * 而且比 8 KB 少占 4 KB 内部 RAM（这块板最紧的就是它）。
      * 每轮断线会回读一次那个数（链路任务里那条 `link_task 栈还剩`），不够就往抬。 */
     BaseType_t ok = xTaskCreate(link_task, "screen_link", 4096, NULL, 5, &s_task);
     if (ok != pdPASS) {

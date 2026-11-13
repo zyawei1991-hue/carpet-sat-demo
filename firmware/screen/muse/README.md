@@ -31,7 +31,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
 - 我们的全部改动 = 34 个文件、5819 行新增 / 86 行删，其中一份是 154,528 字节的字库
-  （`muse-carpet.patch`，9,053 行 / 472,717 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  （`muse-carpet.patch`，9,064 行 / 473,685 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
   这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-13 凌晨实读的。
   比上一版（30 个文件 / 5291+ / 8,427 行）多的 528 行是**语音唤醒词那一整块**（owner 拍的路线，
   `HANDOFF.md` §18.3、§18.4）：新增 `carpet/carpet_wake.c/.h`、`idf_component.yml` 里那条
@@ -280,15 +280,26 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     `git apply: OK (34 sections)` / `byte-compare: 32/34 identical`；差的两个仍是
     `carpet_mic.c/.h`，这次逐行数过：工作树 CRLF **463 / 102** 行、patch 里 LF，
     字节差 463 / 102 **正好等于行数**，归一化后 `相同=True` ⇒ 纯行尾，不是漏打。
-    这一版 34 个文件 / **5827+ / 86- / 9,053 行 / 472,717 字节**，字库仍 154,528 字节。
+    这一版 34 个文件 / **5838+ / 86- / 9,064 行 / 473,685 字节**，字库仍 154,528 字节。
     **已编已刷已称**（`Project build complete` / WEXIT=0 / `Hash of data verified.`，
     只 `app-flash`，分区没动）：
     `ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开`、
     `@mic mode=auto armed=1 phone_v4=1 rejected=0 dead=0 linked=1`、
     `@wake ready=1 word=你好小安 … on=1 inhibit=0 live=0 armed=1`。
-    `>url clear` 在**链路通着**时不再崩：`carpet_url 这一趟用完还剩 3500 字`
-    （6144−3500=**用了 2644 字**，比原来那档 2048 多 596 ⇒ 溢出是真因）、
+    `>url clear` 在**链路通着**时不再崩：`carpet_url 这一趟用完还剩 3500 字节`
+    （6144−3500=**用了 2644 字节**，比原来那档 2048 多 596 ⇒ 溢出是真因）、
     整趟 `reset? False`、`stack overflow`/`RTC_SW_CPU_RST` 各 0 次。
+    **顺带挖出第三个 bug：栈的单位全仓库写错了 4 倍。** ESP-IDF 的 `StackType_t = uint8_t`
+    （portmacro.h:78）、`idf_additions.c:50` 是 `× sizeof(StackType_t)` = ×1、
+    `idf_additions.h:268` 明写 "number of bytes"、`task.h:1509` 高水位 "in bytes"
+    ⇒ `usStackDepth` 和高水位都是**字节**。独立反证：板上最大连续内部 RAM 22,528 字节，
+    若 6144 是"字"就要 24,576 字节连续 ⇒ 要不到，而任务起来了。
+    已改 `carpet_link.c` 三处 + `screen_link.c` 两处日志/注释（`carpet_mic.c` 那句「8 KB」本来就对）。
+    **两条用错单位算出来的假真因一并作废**：① `carpet_cmd` 4096→6144 的"依据" ——
+    两次峰值都是 `4096−1684 = 6144−3732 = 2412` 字节，**一样深**，它在 4096 上从没溢出过
+    （保留 6144 不冒回归风险，但它是**可压回 4096 的候选**）；② `link_task` 8192→4096 那条
+    "32 KB 吃掉内部 RAM 导致 i2s DMA panic" —— 8192 从来就是 8 KB，**24 KB 差额不存在**，
+    那次 panic 与这条栈的因果**从没称过**。详见 `HANDOFF.md` §18.6。
     **还没称到**：真人那一轮上行（要 owner 对着屏说话，屏侧造不出来）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：

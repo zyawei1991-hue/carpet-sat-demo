@@ -2863,9 +2863,9 @@ set 和 clear 都复现（`diag-ack.txt` / `diag-urlclear.txt`）：
 rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)
 ```
 
-真因：2048 字是 11-10 那晚**链路没起**时挑的（走浅分支）；连着的时候同一条调用链上
-多一个 `screen_link_stop()`。参照物：`gate_task` 跑 `url_read()+link_open()` 用的是 4096 字。
-抬到 6144 字后真机称到：
+真因：2048 **字节**是 11-10 那晚**链路没起**时挑的（走浅分支）；连着的时候同一条调用链上
+多一个 `screen_link_stop()`。参照物：`gate_task` 跑 `url_read()+link_open()` 用的是 4096 字节。
+抬到 6144 字节后真机称到：
 
 ```
 @url clear: ESP_OK
@@ -2873,10 +2873,50 @@ rst:0xc (RTC_SW_CPU_RST),boot:0x2b (SPI_FAST_FLASH_BOOT)
 I (96157) carpet: carpet_url 这一趟用完还剩 3500 字
 ```
 
-6144 − 3500 = **实际用了 2644 字**，比原来那档 2048 多 **596 字** ⇒ 溢出是真因，不是猜的。
+6144 − 3500 = **实际用了 2644 字节**，比原来那档 2048 多 **596 字节** ⇒ 溢出是真因，不是猜的。
 整趟 `reset? False`、`stack overflow` / `RTC_SW_CPU_RST` 各 **0** 次。
+（上面那行日志当时印的是"字"，**单位印错了**，已改成"字节"，见下一段。）
 **NVS 卫生**：诊断用的 `>url set` 会写 NVS，当场 `>url clear` 并回读
 `src=factory saved=(none)`（11-12 那次「又连不上」一半就是我留下的拨号地址，§18.1）。
+
+#### 顺着这个数挖出来的第三个 bug：**栈的单位全仓库写错了 4 倍**，还用它编过两条假真因
+
+`carpet_url 这一趟用完还剩 3500 字` 里的"字"是错的。查实（读的是 IDF 源码本身，不是推断）：
+
+- `FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:78` `#define portSTACK_TYPE uint8_t`
+  ⇒ `sizeof(StackType_t) == 1`；
+- `esp_additions/idf_additions.c:50` `heap_caps_malloc(usStackDepth * sizeof(StackType_t), …)`
+  ⇒ **×1，不是 ×4**；
+- `esp_additions/include/freertos/idf_additions.h:268` 明写 `usStackDepth … the number of **bytes**`；
+- `FreeRTOS-Kernel/include/freertos/task.h:1509` 高水位返回 "in **bytes** (as opposed to words
+  in the standard FreeRTOS documentation)"。
+
+**独立反证**（不用读源码也成立）：板上内部 RAM 最大连续块实测 22,528 字节，
+若 6144 是"字"就要 24,576 字节连续内部 RAM ⇒ **根本要不到**，而任务起来了。
+
+⇒ 全仓库把 `usStackDepth`/高水位当"字"的注释和日志都错了 4 倍。已改：
+`carpet_link.c` 三处日志/注释（`carpet_url`、`carpet_gate`、`carpet_cmd`）、
+`screen_link.c` 两处（`link_task` 日志 + 8192→4096 那条依据）。
+`carpet_mic.c:402` 那句「8 KB PSRAM 那一档」**是对的**（`MIC_SEND_STACK = 8*1024`），没动。
+`screen_link.c/.h` 两份（本仓库 + Muse 树）改完 `cmp` 过 **SAME**。
+
+**两条被单位错算编出来的假真因，一并作废（这比单位本身更值钱）：**
+
+1. **`carpet_cmd` 4096→6144 的"依据"是假的。** 原始读数两次都是字节：4096 那档剩 1684、
+   6144 这档剩 3732。峰值 = 栈 − 剩余：`4096−1684 = 2412`、`6144−3732 = 2412`
+   ⇒ **两次一样深**。旧注释把剩余当"字"再乘 4，算出"峰值 3675 字 / 5211 字、比上次深 1536 字"，
+   全是假的；`carpet_cmd` 在 4096 字节上**从没溢出过**，还有 1684 字节余量。
+   现在**保留 6144 不动**（多吃 2 KB 内部 RAM 换余量，不冒回归风险），但别再拿"它需要 24 KB"
+   当理由；真要腾内部 RAM，这一档是**可以压回 4096 的候选**，压之前重跑三次 nap → 叫醒看剩余。
+2. **`link_task` 8192→4096 那条"32 KB 吃掉内部 RAM 导致 i2s DMA panic"是假的。**
+   8192 从来就是 8 KB，**那 24 KB 差额不存在**。11-10 确实崩过
+   （`i2s_alloc_dma_desc: allocate DMA buffer failed` → `i2s_rx_channel_start` 空指针 LoadProhibited），
+   但**它和这条栈的因果从来没称过**，旧注释把它写成已定性是错的。
+   改小之后站得住的依据只有高水位：剩 2004 字节 ⇒ 峰值 2092 字节，4 KB 够用，还少占 4 KB 内部 RAM。
+
+**教训**：`>url` 那次溢出是真的、修对了；但**同一个文件里另有两处"称出来的依据"其实是算出来的**。
+凡是注释里出现"峰值 = 栈 − 剩余"这种换算，先确认单位，否则量到的真数会推出假结论，
+而假结论比没结论更难发现 —— 它看起来有数字撑着。
 
 #### 称到了 / 没称到
 
@@ -2893,7 +2933,32 @@ I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上�
 ⇒ 「对着屏说话还没开」这句话不会再出现。编译刷机：`Project build complete` / `WEXIT=0` /
 `Hash of data verified.`。
 
-**没称到**：真人那一轮上行（`上行 m-xxxxxx-n：<n>/<n> 帧…`）和它后面的转写/答句。
+**上面这几行是在"改单位标签之前"那一版固件上称的。** 改完单位又重编重刷了一次
+（同样 `WEXIT=0` / `Hash of data verified.`），两版之间的差异**逐行比过**：
+`carpet_link.c` 59 行差异里只有 **4 行非注释**，全是 `字`→`字节` 的日志串；
+`screen_link.c` 只有 **1 行**日志串 ⇒ **功能完全相同**，闸的结论不受影响。
+但严格说，**当前这一版的"链路通着"读数还没称到**，只称到浅分支：
+
+```
+@url clear: ESP_OK
+@url now=ws://192.168.43.1:8443 src=factory saved=(none) linked=0 dialed=0
+I (33436) carpet: carpet_url 这一趟用完还剩 4148 字节
+```
+
+`linked=0` ⇒ 走的是"只存不拨"那条浅路径（用了 6144−4148 = 1996 字节），
+**不是**那条会溢出的深路径（深路径上一版称到剩 3500 字节）。新标签本身已验证会印。
+
+**没称到 ①**：当前这一版在**链路通着**时的 `armed=1` 和深路径栈余量。
+**卡在哪**：重刷之后 Wi-Fi 一直没起来，`hb t=343s setup=off wifi=down ws=down raw=down
+ble=off int=47K/29K min=32K` —— **内存充足（47K/29K），不是内存问题**；
+75 秒抓取里一条扫描日志都没有，因为 `gate_task` 卡在
+`while (!muse_wifi_connected()) vTaskDelay(2000)`（`carpet_link.c:1038`）这个**静默**等待循环里，
+还没进 `{5,15,30,60}` 那条会打日志的退避阶梯。最可能是演示那台 Mate 60 的热点关了
+（上一版固件在同一块板上 t=48s 就连上过）。串口只有 `>wifi clear`（会抹掉 owner 存的网络）
+和 `>wifi set`（要 hex 凭据），**两条都不该动** ⇒ 等热点回来再补称，别拿浅分支的数当深分支的证据。
+**这正是当初挑错栈的那个陷阱**：2048 就是在 `linked=0` 的浅分支上定的。
+
+**没称到 ②**：真人那一轮上行（`上行 m-xxxxxx-n：<n>/<n> 帧…`）和它后面的转写/答句。
 **卡在哪**：要 owner 真人对着屏说一句话，屏侧自己造不出来（台架那三个渲染设备在板载麦克风上
 全是数字静音，§18.4）。**"门开了"已验证，"门后那一趟走完"还没验证**，别把后者写成前者。
 
@@ -2910,10 +2975,11 @@ I (96439) carpet: ack：protocols=[4,4]（envelope v=1，契约规定它不上�
 #### 补丁与守卫
 
 `muse-carpet.patch` 重打（README §2 那条命令，**排除 `components/screen_link`**、
-**带上 `esp32/partitions_muse.csv`**）：34 个文件 / **5827+ / 86− / 9,053 行 / 472,717 字节**，
-字库仍 154,528 字节。`verify_carpet_patch.py` 全新 scratch 实跑：
+**带上 `esp32/partitions_muse.csv`**）：34 个文件 / **5838+ / 86− / 9,064 行 / 473,685 字节**，
+字库仍 154,528 字节。`verify_carpet_patch.py` 全新 scratch 实跑（`patchcheck-unit`）：
 `baseline copies restored: 18` / `git apply: OK (34 sections)` / `byte-compare: 32/34 identical`。
 差的两个仍是 `carpet_mic.c/.h`，这次**逐行数过**：工作树 CRLF **463 / 102** 行、patch 里 LF，
 字节差 463 / 102 **正好等于行数**，归一化后内容相同 ⇒ 纯行尾，不是漏打
 （`carpet_mic.h` 这轮改过内容，所以不能拿"已知坑"免检）。
-`components/screen_link` 在补丁里只出现在一行 `+` 注释里，**没有它的 diff 头**。
+`components/screen_link` 在补丁里**没有 diff 头**（只有一行 `+` 注释提到这个名字）。
+`:core:test` 实跑 **329 条 / 红 1 条**，仍是 §18.5 那条 photo 漂移，**本轮没有新红**。

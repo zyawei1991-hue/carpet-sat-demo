@@ -3492,10 +3492,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..9690b5c
+index 0000000..7f0a770
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1255 @@
+@@ -0,0 +1,1266 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -4245,11 +4245,12 @@ index 0000000..9690b5c
 +             * 剩下的栈一次性打出来：叫醒这条会走 NVS 写 + 重连，4096 够不够是**称出来的**，
 +             * 不是猜的 —— 下面那行高水位就是证据。 */
 +            muse_input_wake(m.page[0] ? m.page : "ws");
-+            /* 单位按仓库自己的规矩来（main/stack_monitor.c:25）：这个 kernel 的高水位是**字**，
-+             * 一个 StackType_t 四字节，所以这里乘回来才念成字节。实测（6144 字那版，三次
-+             * nap → 叫醒）：剩 3732 字节 = 933 字，峰值吃到 5211 字；栈大小那条注释里有
-+             * 和 4096 那版的对照。这一行留在叫醒分支里不是装饰——现场要说"这一版到底够不够"，
-+             * 靠的就是它后面那个数。 */
++            /* 单位：**字节**。这个 kernel 的 `StackType_t` 是 `uint8_t`（portmacro.h:78），
++             * 高水位本来就按字节返回（task.h:1509 原话 "in bytes (as opposed to words in the
++             * standard FreeRTOS documentation)"），所以这里 `* sizeof(StackType_t)` 是 ×1，
++             * 不是换算 —— 以前这条注释写成"高水位是字、一个 StackType_t 四字节"，错了 4 倍。
++             * 实测（6144 字节那版，三次 nap → 叫醒）：剩 3732 字节 ⇒ 峰值 6144−3732 = 2412 字节。
++             * 这一行留在叫醒分支里不是装饰——现场要说"这一版到底够不够"，靠的就是它后面那个数。 */
 +            ESP_LOGI(TAG, "woke by link, carpet_cmd 还剩 %u 字节",
 +                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
 +            continue;
@@ -4442,16 +4443,22 @@ index 0000000..9690b5c
 +    }
 +    xSemaphoreGive(s_link_mtx);
 +    /* 这一行量的是"这一趟吃到多深"，留给下一次改这一档用。
-+     * 档位变迁：4096 字 → 2026-11-10 内部 RAM 只剩 10K/4K 时降到 2048 字（那一档
-+     * `>url` 直接 OOM，地址改了但没重拨）→ **2026-11-13 抬到 6144 字**。
++     * **单位是字节，不是字**：ESP-IDF 的 `portSTACK_TYPE = uint8_t`，`xTaskCreate` 的
++     * `usStackDepth` 和 `uxTaskGetStackHighWaterMark` 都按字节算（task.h 原话：
++     * "in bytes (as opposed to words in the standard FreeRTOS documentation)"）。
++     * 这一句以前印的是"字"，差 4 倍，照它挑栈会挑崩 —— 2026-11-13 改掉。
++     * 档位变迁：4096 字节 → 2026-11-10 内部 RAM 只剩 10K/4K 时降到 2048 字节（那一档
++     * `>url` 直接 OOM，地址改了但没重拨）→ **2026-11-13 抬到 6144 字节**。
 +     * 抬的理由是实测崩了一次：owner 的板连着手机时 `>url set` / `>url clear` 各触发一次
 +     * `***ERROR*** A stack overflow in task carpet_url has been detected.` + RTC_SW_CPU_RST 重启。
-+     * 2048 字那一档是在**链路没起来**的时候定的（走 else 分支只印一行，栈很浅）；
++     * 2048 字节那一档是在**链路没起来**的时候定的（走 else 分支只印一行，栈很浅）；
 +     * 链路活着时这条任务要多跑一个 `screen_link_stop()`，比 `gate_task` 还深，
-+     * 而 `gate_task` 跑 `url_read()+link_open()` 用的是 4096 字 —— 一半的栈干更多的活，必崩。
-+     * 现在关 BLE 之后内部 RAM 最大连续块约 29K，24K 这一档拿得到；拿不到也只是走下面
++     * 而 `gate_task` 跑 `url_read()+link_open()` 用的是 4096 字节 —— 一半的栈干更多的活，必崩。
++     * 修完真机称到"还剩 3500 字节"⇒ 这一趟实际吃了 6144−3500 = **2644 字节**，
++     * 比 2048 那一档多 596 字节，溢出是真因不是猜的。
++     * 6K 这一档在关 BLE 之后（内部 RAM 最大连续块约 22–29K）拿得到；拿不到也只是走下面
 +     * 那条 OOM 日志（地址存了不重拨），不会崩。余量看下面那行回读。 */
-+    ESP_LOGI(TAG, "carpet_url 这一趟用完还剩 %u 字",
++    ESP_LOGI(TAG, "carpet_url 这一趟用完还剩 %u 字节",
 +             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
@@ -4564,10 +4571,11 @@ index 0000000..9690b5c
 +                 wait_s, tries + 1);
 +        vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
 +    }
-+    /* 这一档还是 4096 字（16 KB），没动它：它跑的是 url_read（读 NVS）+ link_open
++    /* 这一档还是 4096 **字节**（4 KB，不是 16 KB —— 这个 kernel 的 usStackDepth 按字节算），
++     * 没动它：它跑的是 url_read（读 NVS）+ link_open
 +     * （里面 ws 句柄和链路任务都在建），现在正是建不起来的那一段时间，减它就是减余量。
 +     * 先把它用完时的余量称出来，下次要抬要压都有数。 */
-+    ESP_LOGI(TAG, "carpet_gate 这一趟用完还剩 %u 字",
++    ESP_LOGI(TAG, "carpet_gate 这一趟用完还剩 %u 字节",
 +             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 +    vTaskDelete(NULL);
 +}
@@ -4583,17 +4591,20 @@ index 0000000..9690b5c
 +    if (!s_lock) s_lock = xSemaphoreCreateMutex();
 +    if (!s_cmdq) s_cmdq = xQueueCreate(CMD_QUEUE_LEN, sizeof(cmd_msg_t));
 +    if (!s_link_mtx) s_link_mtx = xSemaphoreCreateMutex();
-+    /* 6144 **字**（这个 kernel 的 usStackDepth 是字数不是字节数，FreeRTOS-Kernel
-+     * task.h:315 + esp_additions/idf_additions.c:50 按 `* sizeof(StackType_t)` 分配）= 24 KB。
-+     * 为什么从 4096 提到这里，是称出来的不是猜的：叫醒那条分支（set_asleep(false) →
-+     * 往 flash 的环里落一条 `lit` → 可能还有 muse_wifi_apply()）在 4096 字上跑完，
-+     * 高水位连着三次都是 1684 字节剩余（421 字），也就是峰值吃到 3675 字 —— 4096 字
-+     * 那条路本来就没剩多少，再叠一条日志或 NVS 多一层就是栈溢出，而溢出发生在熄屏的叫醒上，
-+     * 现场只会看到"屏叫不醒"。
-+     * 6144 字上重跑同一套（三次 nap → 叫醒，全过，无溢出无复位）：**剩 3732 字节 = 933 字**，
-+     * 峰值吃到 5211 字。比 4096 那次测到的峰值还深 1536 字 —— 说明上一次那三趟没走到最深
-+     * 的那条分支（叫醒会顺带把 Wi-Fi 的整条重连派下去，栈吃到多深取决于那一刻链路停在哪一步），
-+     * 4096 字真跑那条是会溢出的，这就是把它抬到 6144 的依据。现在余量 933 字（约 3.7 KB）。
++    /* 6144 **字节**（= 6 KB）。**不是 24 KB**：这个 kernel 的 `StackType_t` 是 `uint8_t`
++     * （portmacro.h:78），`idf_additions.c:50` 那句 `usStackDepth * sizeof(StackType_t)`
++     * 是 ×1，`idf_additions.h:268` 也明写 "the number of bytes"。以前这条注释写成
++     * "6144 字 = 24 KB"，错了 4 倍 —— 24 KB 连续内部 RAM 在这块板上根本要不到
++     * （最大连续块实测 22–29K），而任务起来了，这本身就是单位的反证。
++     *
++     * 【2026-11-13 纠正：当初从 4096 抬到 6144 的"依据"是单位错算出来的，不是真溢出。】
++     * 两次实测的原始读数（都是字节）：4096 那档剩 1684，6144 这档剩 3732。
++     * 峰值 = 栈大小 − 剩余：4096−1684 = **2412**，6144−3732 = **2412** —— **两次一样深**。
++     * 旧注释把剩余当成"字"再乘 4，于是算出"峰值 3675 字 / 5211 字、比上次深 1536 字"，
++     * 全是假的；carpet_cmd 在 4096 字节上**从没溢出过**，还有 1684 字节余量。
++     * 现在保留 6144 不动（多吃 2 KB 内部 RAM，换叫醒那条路的余量，不冒回归风险），
++     * 但**别再拿"它需要 24 KB"当理由**；真要腾内部 RAM，这一档是可以压回 4096 的候选，
++     * 压之前重跑三次 nap → 叫醒看剩余。
 +     * 没往 PSRAM 放：这条任务要写 flash，写的时候 cache 会关，栈在 PSRAM 的任务不能干这个
 +     * （muse_voice.c:1305 给语音任务用 MUSE_BIG_CAPS 时特意注明"this task never writes flash"）。 */
 +    if (xTaskCreate(cmd_task, "carpet_cmd", 6144, NULL, 4, &s_cmd_task) != pdPASS) {
