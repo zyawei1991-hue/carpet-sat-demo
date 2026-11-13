@@ -197,6 +197,33 @@ peak 几千 ⇒ 声音采到了，问题在转写那一半（你们的事）。*
 
 ---
 
+### 0.9 【2026-11-13 下午】owner 又试了一次，还是「没转出来」——§0.7 那四条到当前远端 tip 仍未落地
+
+远端 tip 实读 `1292005`（`git ls-remote git@github.com:zyawei1991-hue/carpet-sat-demo.git main`，
+**不是 gh-proxy 那个只读镜像**），和本地 HEAD 一致。对着这一版逐行核过，§0.7 要的四条**一条都没进**：
+
+- `AppRuntime.kt:1007` 屏上这条路仍是裸 `transcribe(MicUplink.pcmToWav(seg.pcm))`，**没有 `configured` 前置判断**（手机自己按键那条 :737 有）。
+- `SiliconFlowAsr.transcribe()`（:34–77）仍把 `!configured` / 非 200 / 抛异常 / 文本空**四种因一律 `return null`**，全程不打 status、不打 body。
+- `onMicSegment`（:1008–1009）拿到 null 仍只说那一句「屏上那句话没转出来：没听清或转写失败」。
+
+**先排一个最可能的单因，owner 不用等你们改就能自己查**：装机那版 APK 很可能**根本没配 ASR key**。
+证据是手机自己那个麦克风按钮的闸 —— `HomeShell.kt:533` `enabled = app.voiceInputConfigured && !transcribing`，
+没配 key 时它是**灰的**；点它会说「语音输入还没接：等 key 配上再按」（`HomeShell.kt:575`）。
+屏上那条路和手机按钮用的是**同一个** `SiliconFlowAsr.configured`，所以：
+
+- owner 点一下**手机自己的麦克风按钮**：
+  - 若说「语音输入还没接：等 key 配上再按」⇒ **APK 没配 key**，屏上那条必然也 null。修法 = 打包时 `local.properties` 里加 `siliconflow.asrKey`（key 只在 owner 手机/命令行，**不进仓库、不进日志**）。
+  - 若它能录、能转出文字 ⇒ key 和网都好，屏上那条的 null 就只剩**非 200 / 文本空 / 采到的是静音**三种，必须靠 §0.7 第 2、3 条（拆 null + 打 status/body）才分得清。
+
+**和上一轮那道闸分清，别混**：owner 之前问「对着屏说话还没开」、你们说「不用改 App」——那是对的，
+那道闸的真因是屏侧多要了一个契约规定不上线的 envelope `v>=4`，**屏侧已修**（`4f62f77`），装机回读 `protocols=[4,4] ⇒ 上行开`。
+**这一条不是那道闸**：上行现在开着的、屏也把整段发到了手机（§0.7 真人 turns=2 已称），卡在你们这半的**转写**上。
+
+§0.7 那四条仍然要做，一条都不能省（补 `configured` 前置 / 拆 null 成四句 / 打 status+body 前 200 字但**绝不许打 key 或 Authorization** / `ingestMicChunk` 的 Reject 分支给可见反馈）。
+屏侧 `peak` 那一趟仍欠着（§0.7 末尾）：真人说话时 peak 十几=采到数字静音（屏侧，我查）、几千=采到了（你们那半）。
+
+---
+
 ### 0.8 以下 §0 旧文（11-11 深夜）**已作废，只留作历史**
 
 旧文要你们做的两件事（补 `mic_chunk` 解码、`CONTRACT_VERSION 3→4`）**你们都已经做完了**

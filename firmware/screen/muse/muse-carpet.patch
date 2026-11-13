@@ -6393,10 +6393,10 @@ index 0000000..969c865
 +void carpet_link_bench_maint(bool worried);
 diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
 new file mode 100644
-index 0000000..5f45c01
+index 0000000..cbee44e
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.c
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,516 @@
 +/*
 + * 契约 v4 上行「对着屏说话」的屏侧那半：攒段 → 组帧 → 发。
 + *
@@ -6490,6 +6490,7 @@ index 0000000..5f45c01
 +
 +static volatile bool s_phone_v4;      /* 这一轮会话里，对面的 ack 申报过 4 */
 +static volatile bool s_rejected;      /* 发过上行之后链路就断：这台手机不收，本会话不再试 */
++static volatile bool s_talk_req;      /* 点 Avatar 进对话：LVGL 任务立记号，采集任务取走 */
 +
 +static int s_cur = -1;                /* 正在采的那只 */
 +static char s_turn[MIC_TURN_MAX];
@@ -6650,6 +6651,20 @@ index 0000000..5f45c01
 +bool carpet_mic_link_up(void)
 +{
 +    return screen_link_connected();
++}
++
++/* 点 Avatar 进对话（B §1 的兜底，永远有效）：LVGL 任务立记号，采集任务下一拍取走，
++ * 和唤醒词命中走同一条 talk_to_phone —— 闸一道都不放宽（仍由 carpet_mic_armed() 判）。 */
++void carpet_mic_talk_request(void)
++{
++    s_talk_req = true;
++}
++
++bool carpet_mic_talk_take(void)
++{
++    if (!s_talk_req) return false;
++    s_talk_req = false;
++    return true;
 +}
 +
 +void carpet_mic_phone_declared(bool has_v4)
@@ -6900,10 +6915,10 @@ index 0000000..5f45c01
 +}
 diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
 new file mode 100644
-index 0000000..08f4d8d
+index 0000000..b77731c
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,120 @@
 +/*
 + * 契约 v4 的上行：「对着屏说话」。
 + *
@@ -6974,6 +6989,12 @@ index 0000000..08f4d8d
 + * Muse 原来那句 "SET UP MUSE FIRST"（要人装 Muse 官方 App）在这个产品里是一句假指令。 */
 +bool carpet_mic_link_up(void);
 +
++/* 点 Avatar 进对话（B §1 的唯一兜底，永远有效）：LVGL 任务里点脸那一格调 request 立记号，
++ * 采集任务下一拍 take 取走，和唤醒词命中走同一条 talk_to_phone。闸一道都不放宽
++ * （仍由 carpet_mic_armed() 判）。用记号而不是直接调，是因为采集只许 voice_task 一个读者。 */
++void carpet_mic_talk_request(void);
++bool carpet_mic_talk_take(void);
++
 +
 +/* 按下（已经过了"太短就不算说话"那道判据）：开始攒这一段。
 + * 返回 false = 两只段缓冲都还在发上一句，这一轮别采。 */
@@ -7020,10 +7041,10 @@ index 0000000..08f4d8d
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..384a5f3
+index 0000000..7ec8fda
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1094 @@
+@@ -0,0 +1,1098 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -7050,6 +7071,7 @@ index 0000000..384a5f3
 +#include <string.h>
 +
 +#include "carpet/carpet_link.h"
++#include "carpet/carpet_mic.h"
 +#include "esp_log.h"
 +#include "muse_ui.h"
 +
@@ -7551,12 +7573,9 @@ index 0000000..384a5f3
 +
 +static void nav_back(void)
 +{
-+    if (s_detail) {
-+        s_detail = false;
-+        apply();
-+        return;
-+    }
-+    nav_to(s_pg == PG_PICKER ? PG_FACE : PG_PICKER);
++    /* owner 2026-11-13：所有「返回」一律回 Avatar，不再层级回退（详情/场景环
++     * 也直接回脸）。nav_to(PG_FACE) 里的 sync_tile(0) 会顺手清掉 s_detail。 */
++    nav_to(PG_FACE);
 +}
 +
 +/* 详情那三行：点完立刻刷一次，不然到下一个 tick 之前屏上是上一个功能的值。 */
@@ -7743,10 +7762,16 @@ index 0000000..384a5f3
 +        /* B 没给长按派导航动作（SOS 圆钮那条不适用：这屏没有圆钮）。只判不发。 */
 +        ESP_LOGI(TAG, "长按：B 未派动作，不动");
 +        break;
-+    default:   /* G_TAP：点空处回脸（兜底）。脸/设置那两格的点击归 Muse 自己。 */
++    default:   /* G_TAP：点空处回脸（兜底）。设置那一格的点击归 Muse 自己。 */
 +        if (s_tile == 2 || s_tile == 3 || s_tile == 4) {
 +            nav_to(PG_FACE);
 +            ESP_LOGI(TAG, "单击空处 → 回脸");
++        } else if (s_tile == 0) {
++            /* B §1 的唯一兜底：点 Avatar 进对话。立记号，采集任务下一拍走和唤醒词
++             * 同一条 talk_to_phone（闸一道都不放宽）。脸那格没有本组件控件，点击
++             * 干净地落到这里（active_tile_obj 返回 NULL → s_on_control=false）。 */
++            carpet_mic_talk_request();
++            ESP_LOGI(TAG, "点 Avatar → 进对话");
 +        }
 +        break;
 +    }
@@ -10005,7 +10030,7 @@ index 20c46d3..987fd8e 100644
  }
  #endif
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index 4a98f64..b080d0a 100644
+index 4a98f64..51374a5 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -43,6 +43,9 @@
@@ -10142,12 +10167,30 @@ index 4a98f64..b080d0a 100644
      static int last_mode = -1;
      if ((int)mode != last_mode) {
          color_mic(s_ptt_hint, mode == MUSE_MODE_LISTENING ? 0x64d4ff : 0x80bfff);
-@@ -1335,15 +1408,23 @@ static void build_overlays(void)
+@@ -1335,15 +1408,35 @@ static void build_overlays(void)
      lv_obj_t *scr = lv_screen_active();
  
      /* Page dots. */
 -    for (int i = 0; i < 2 && s_tv; i++) {
 +    for (int i = 0; i < DOT_COUNT && s_tv; i++) {
++        lv_obj_t *tile = (i == 1) ? s_settings : s_face;
++        lv_align_t align = LV_ALIGN_BOTTOM_MID;
++        int ax = (i * 2 - (DOT_COUNT - 1)) * 8, ay = -14;
++#if CONFIG_MUSE_CARPET_CARDS
++        if (i == 2) tile = s_carpet;
++        if (i == 3) tile = s_scene;
++        if (i == 4) tile = s_amb;
++        /* B 十字导航：脸就是中心的 Avatar，不单独占点；四个方向点摆到四方位
++         * （上=场景环 / 下=功能 / 右=设置 / 左=氛围），和五格十字一一对上。
++         * 原来五点全挤底部一排，和十字导航对不上（owner 2026-11-13）。
++         * 内缩 12px：落在进度环内缘(ring_in=223)之内，上方那点刚好避开顶部状态行。 */
++        if (i == 0) { s_dots[i] = NULL; continue; }
++        ax = 0; ay = 0;
++        if (i == 1)      { align = LV_ALIGN_RIGHT_MID;  ax = -12; }
++        else if (i == 2) { align = LV_ALIGN_BOTTOM_MID; ay = -12; }
++        else if (i == 3) { align = LV_ALIGN_TOP_MID;    ay = 12; }
++        else             { align = LV_ALIGN_LEFT_MID;   ax = 12; }
++#endif
          lv_obj_t *d = lv_obj_create(scr);
          lv_obj_remove_style_all(d);
          lv_obj_set_size(d, 8, 8);
@@ -10158,18 +10201,12 @@ index 4a98f64..b080d0a 100644
 -        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, i ? 8 : -8, -14);
 +        lv_obj_add_flag(d, LV_OBJ_FLAG_CLICKABLE);
 +        lv_obj_set_ext_click_area(d, 5);
-+        lv_obj_t *tile = (i == 1) ? s_settings : s_face;
-+#if CONFIG_MUSE_CARPET_CARDS
-+        if (i == 2) tile = s_carpet;
-+        if (i == 3) tile = s_scene;
-+        if (i == 4) tile = s_amb;
-+#endif
 +        lv_obj_add_event_cb(d, dot_clicked_cb, LV_EVENT_CLICKED, tile);
-+        lv_obj_align(d, LV_ALIGN_BOTTOM_MID, (i * 2 - (DOT_COUNT - 1)) * 8, -14);
++        lv_obj_align(d, align, ax, ay);
          s_dots[i] = d;
      }
  
-@@ -1514,19 +1595,36 @@ static void update_chrome(float now)
+@@ -1514,19 +1607,37 @@ static void update_chrome(float now)
      s_next_settings_tick = now + SETTINGS_TICK_S;
  
      if (s_tv) {
@@ -10189,6 +10226,7 @@ index 4a98f64..b080d0a 100644
          if (shown != s_shown_page) {
 -            for (int i = 0; i < 2; i++) {
 +            for (int i = 0; i < DOT_COUNT; i++) {
++                if (!s_dots[i]) continue;   /* 脸=中心 Avatar，无点 */
                  lv_obj_set_style_bg_color(s_dots[i], lv_color_hex(i == page ? COLOR_ACCENT : COLOR_DOT_OFF), 0);
 -                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, page && subpage);
 +                lv_obj_set_flag(s_dots[i], LV_OBJ_FLAG_HIDDEN, settings && subpage);
@@ -10210,7 +10248,7 @@ index 4a98f64..b080d0a 100644
      }
  
      /* Joining, the icon blinks: the compact layout has no state label. */
-@@ -1680,7 +1778,7 @@ static void update_status(muse_mode_t mode, float now)
+@@ -1680,7 +1791,7 @@ static void update_status(muse_mode_t mode, float now)
      if (s_talk_hint_lbl) {
          /* Hidden over the settings rows, as the rim icons are, and once the
           * call is ending (an empty hint). */
@@ -10219,7 +10257,7 @@ index 4a98f64..b080d0a 100644
          lv_obj_set_flag(s_talk_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
          lv_obj_set_flag(s_end_hint_lbl, LV_OBJ_FLAG_HIDDEN, !show);
          if (show && strcmp(lv_label_get_text(s_talk_hint_lbl), hint)) {
-@@ -1838,6 +1936,14 @@ void muse_ui_bench_page(bool settings)
+@@ -1838,6 +1949,14 @@ void muse_ui_bench_page(bool settings)
  {
      s_bench_page = settings ? 1 : 0;   /* applied in the LVGL task */
  }
@@ -10234,7 +10272,7 @@ index 4a98f64..b080d0a 100644
  #endif
  
  /* Streams the screen over the USB cable as base64 RGB565 (bench testing; needs
-@@ -1887,9 +1993,21 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1887,9 +2006,21 @@ static void frame_tick(lv_timer_t *timer)
  {
  #if LV_USE_SNAPSHOT
      if (s_bench_page >= 0) {
@@ -10258,7 +10296,7 @@ index 4a98f64..b080d0a 100644
      }
  #endif
      update_control_hints(muse_state_mode(NULL));
-@@ -1928,9 +2046,17 @@ static void frame_tick(lv_timer_t *timer)
+@@ -1928,9 +2059,17 @@ static void frame_tick(lv_timer_t *timer)
      if (s_image_dsc.data) {
          return;   /* the image covers the face */
      }
@@ -10279,7 +10317,7 @@ index 4a98f64..b080d0a 100644
          return;
      }
  
-@@ -2004,6 +2130,11 @@ esp_err_t muse_ui_start(void)
+@@ -2004,6 +2143,11 @@ esp_err_t muse_ui_start(void)
      } else {
          muse_menu_build(lv_screen_active(), s_w, s_h);
      }
@@ -10291,7 +10329,7 @@ index 4a98f64..b080d0a 100644
      build_overlays();
      lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
      s_ready = true;
-@@ -2018,11 +2149,33 @@ void muse_ui_show_face(void)
+@@ -2018,11 +2162,33 @@ void muse_ui_show_face(void)
      if (!s_tv) {
          return;
      }
@@ -10355,7 +10393,7 @@ index a671bbc..776cd3c 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..d50d582 100644
+index 000104e..18ea2f2 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -38,6 +38,10 @@
@@ -10552,7 +10590,7 @@ index 000104e..d50d582 100644
      }
      if ((!ready || s_held_count) && s_held_count >= HELD_MAX) {
          go_idle("NOTES STILL WAITING TO SEND");
-@@ -1217,6 +1373,27 @@ static void voice_task(void *arg)
+@@ -1217,6 +1373,44 @@ static void voice_task(void *arg)
              }
              /* The 20 ms read paces this loop. */
              idle_capture();
@@ -10576,11 +10614,28 @@ index 000104e..d50d582 100644
 +                pre_reset();
 +                continue;
 +            }
++            /* 点 Avatar 进对话（B §1 的唯一兜底）：和唤醒词命中走同一条免按键采集，
++             * 闸一道都不放宽。记号由 LVGL 任务在点脸那一格时立下（carpet_page.c）。 */
++            if (carpet_mic_talk_take()) {
++                muse_input_wake("touch");
++                if (carpet_mic_armed()) {
++                    muse_wifi_power(MUSE_WIFI_FULL);
++                    carpet_wake_inhibit(true);
++                    talk_to_phone(false, true);
++                    carpet_wake_inhibit(false);
++                } else if (carpet_mic_link_up()) {
++                    go_idle("对着屏说话还没开");
++                } else {
++                    go_idle("先让手机连上圆屏");
++                }
++                pre_reset();
++                continue;
++            }
 +#endif
              if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                  continue;
              }
-@@ -1255,6 +1432,19 @@ static void voice_task(void *arg)
+@@ -1255,6 +1449,19 @@ static void voice_task(void *arg)
          }
  #endif
          muse_input_clear_call_pending(s_press_mark);
