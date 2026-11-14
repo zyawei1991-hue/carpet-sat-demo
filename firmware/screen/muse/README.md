@@ -30,9 +30,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 36 个文件、6806 行新增 / 95 行删，其中一份是 261,748 字节的字库
-  （`muse-carpet.patch`，11,616 行 / 628,394 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-14（外页划动回中心 Avatar 这一版）实读的。
+- 我们的全部改动 = 36 个文件、7004 行新增 / 95 行删，其中一份是 267,276 字节的字库
+  （`muse-carpet.patch`，11,908 行 / 645,153 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-14（钟面升级 + AMOLED 烧屏防护这一版）实读的。
   这一轮（11-13 下午）在唤醒词那版之上又加了三件 owner 当面拍的交互：**A** 导航圆点从全底部
   一排改成四方位（上=场景环 / 下=功能 / 右=设置 / 左=氛围，脸=中心 Avatar 不单独占点，`muse_ui.c`）；
   **B** 所有「返回」一律回 Avatar/脸页，不再层级回退（`carpet_page.c` 的 `nav_back()`）；
@@ -428,6 +428,28 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     功能格下滑→face），朝外划也回 face；氛围格右滑轮换 gallery→photo→clock 留在氛围不跳中心；无「控件上」误触。
     **没称到**：手指真划（串口注不了触摸，`>gestfrom` 走的是和真手指同一条判定路，为代码 + 合成手势证）；
     要 owner 在真屏上从四个外格各朝里划一次肉眼确认回中心。
+  - **11-14（P0 两件：钟面升级 + AMOLED 烧屏防护，owner「可以，按你的建议做吧」批的开源借鉴 P0）**：
+    **钟面**——`carpet_page.c` 时钟页不再走条目表，整页一块大数字钟面：`build_clock`/`clock_refresh` 专画三行
+    （76px 时:分 主角 / 日期 / 下次过境），`FONT_CLOCK 76` + `s_clock` 一路 tiny_ttf，列用 `LV_SIZE_CONTENT`
+    让每行按自然行高占位（不套定高 band，避免 76px 行高溢出）。墙钟走 `carpet_link.c` 新增 SNTP
+    （`esp_netif_sntp`，ntp.aliyun.com，TZ=CST-8；gate_task 等到网后幂等起、`wait_for_sync=false` 不阻塞拨号阶梯），
+    `carpet_link_wallclock()` 读 `time()/localtime_r()`；没同步上诚实回落 `--:--`+「时间同步中」，绝不摆假时间。
+    字库子集重跑（补 时/同步 等字）261,748→**267,276 字节**，fork 与仓库两处同拷（sha 525fd2b0…）。
+    **烧屏防护**——`muse_ui.c` 两招：① 亮度封顶 `MUSE_BURNIN_MAX_PCT 80`（update_sleep 里 apply 前压，预览/正常都走，
+    睡眠 0 不受影响）；② 像素位移整块 `s_tv` 每 30s 在 ≤3px 的 8 位环上挪一格（脸+所有 carpet 页一起动；
+    睡眠黑盖 `s_cover` 挂 scr 不跟着挪；translate 是渲染偏移不动 scroll，手势/ goto 照走）。
+    台架口 `>burnin`（回读 moves/dx/dy/phase/cap/set/applied）+ `>bright [pct]`（存亮度档以称封顶）。
+    重打 patch：36 文件 / **7004+ / 95- / 11,908 行 / 645,153 字节**，字库 **267,276 字节**。
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` / `git apply: OK (36 sections)` /
+    **`byte-compare: 36/36 identical`**。**已编已刷已称**（`Project build complete` / IDF_RC=0 /
+    `Hash of data verified.`，只 `app-flash`，分区没动）：boot `tiny_ttf 267276 字节 → 28/22/30/76px`；
+    `>burnin` 隔 30s 三读：moves 1→2→3、phase 0→1→2、(dx,dy) (0,0)→(3,0)→(3,3) 走 8 位环；
+    `>bright 100` 后 `set=100 applied=80`（封顶真压住），`>bright 80` 复原；
+    clock.png 实看：76px `--:--` 主角 + 琥珀「时间同步中」+ 低墨「等首帧」+ 紫返回 pill，居中无溢出无豆腐；
+    face.png 实看 avatar 无回归（build 循环特判 PG_CLOCK 没连累别的页）。
+    **没称到**：联网后真时真日期（台架演示热点没开，boot `no saved wifi network nearby`，SNTP 不起、钟面走回落；
+    要 owner 开热点后补称，任务 #59；不为台架验证改板子存的 Wi-Fi，那会动演示 provisioning）；
+    像素位移 ±3px 肉眼（截图差 3px 难辨，靠 `>burnin` 累计回读证）。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
