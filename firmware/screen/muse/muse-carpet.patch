@@ -7648,10 +7648,10 @@ index 0000000..b77731c
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..ec8ec22
+index 0000000..7d8d0c1
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1309 @@
+@@ -0,0 +1,1365 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -7680,6 +7680,7 @@ index 0000000..ec8ec22
 +#include "carpet/carpet_link.h"
 +#include "carpet/carpet_mic.h"
 +#include "esp_log.h"
++#include "esp_lv_adapter_input.h"   /* esp_lv_adapter_touch_notify_interrupt：按住期间主动喂触摸读 */
 +#include "muse_ui.h"
 +#include "muse_pixel.h"
 +#include "muse_settings.h"
@@ -8380,6 +8381,9 @@ index 0000000..ec8ec22
 +static int s_bench_x0, s_bench_y0, s_bench_x1, s_bench_y1;
 +static uint32_t s_bench_until;
 +static uint32_t s_bench_hold;
++/* `>touch`：串口立记号，LVGL 任务里回读真触摸 indev 的解析结果（台架那条不走 indev，
++ * 真玻璃划不动时唯一没称过的就是这一段）。只读，不改任何对象。 */
++static volatile bool s_touch_dump;
 +
 +static lv_indev_t *pointer_indev(void)
 +{
@@ -8545,6 +8549,19 @@ index 0000000..ec8ec22
 +        return;
 +    }
 +    if (s_down) {
++        /* 手势引擎是 40ms 轮询，适配层触摸却是 IRQ 门控（只在 INT 边沿读控制器，见
++         * esp_lv_adapter_input_touch.c 的 should_read）。CST9217 若只在按下/抬手报边沿，
++         * 按住期间点就停在按下处、dx/dy 恒 0，真玻璃上每次划动都退化成单击 —— 台架不走
++         * indev 所以称不出这一条。按住时每拍主动喂一次中断信号，逼 LVGL 下一拍读跟手的新
++         * 坐标；芯片若本就连续报 INT，给已给的二值信号量是空操作，无副作用。 */
++        if (!s_bench && s_ptr) {
++            esp_lv_adapter_touch_notify_interrupt(s_ptr);
++        }
++        /* 真玻璃划动诊断：点一变就记一行（台架不记，免得刷屏）。真划动该看到一串移动点；
++         * 若按下后点一直不动、抬手 dx=0，那就是采点没跟上手指（IRQ 只报按下/抬手那两下）。 */
++        if (!s_bench && (p.x != s_x1 || p.y != s_y1)) {
++            ESP_LOGI(TAG, "划动中 (%d,%d) 累计 dx=%d dy=%d", p.x, p.y, p.x - s_x0, p.y - s_y0);
++        }
 +        /* 每一拍都记终点，抬手那一拍也记 —— 少了这一句 dx/dy 就永远是 0。 */
 +        s_x1 = p.x;
 +        s_y1 = p.y;
@@ -8590,6 +8607,39 @@ index 0000000..ec8ec22
 +void carpet_page_scene_bench(int n)
 +{
 +    s_bench_scene = n;
++}
++
++/* `>touch` 台架口：串口只立记号，回读在 LVGL 任务里做（indev 链表归 LVGL 任务管）。
++ * 称的是台架那条永远不走的一段——真触摸 indev 到底解析没解析出来、是什么类型/模式、
++ * 此刻 state/point 是多少。真玻璃划不动时，先看这里：pointer=NONE 就是真路径根本没入口。 */
++void carpet_page_touch_dump(void)
++{
++    s_touch_dump = true;
++}
++
++static void touch_dump_locked(void)
++{
++    lv_indev_t *ptr = pointer_indev();
++    int n = 0;
++    for (lv_indev_t *d = lv_indev_get_next(NULL); d; d = lv_indev_get_next(d)) {
++        lv_point_t p;
++        lv_indev_get_point(d, &p);
++        printf("@touch indev[%d]=%p type=%d mode=%d state=%d point=(%d,%d)%s\n",
++               n++, (void *)d, (int)lv_indev_get_type(d), (int)lv_indev_get_mode(d),
++               (int)lv_indev_get_state(d), (int)p.x, (int)p.y, d == ptr ? "  <= pointer" : "");
++    }
++    if (!ptr) {
++        printf("@touch pointer=NONE（真触摸路径找不到 POINTER indev，真玻璃划动必死；台架不受影响）\n");
++    } else {
++        lv_point_t p;
++        lv_indev_get_point(ptr, &p);
++        printf("@touch pointer=%p state=%d point=(%d,%d) dark=%d 格=%d 页=%s on_control=%d down=%d\n",
++               (void *)ptr, (int)lv_indev_get_state(ptr), (int)p.x, (int)p.y,
++               (int)muse_ui_dark(), (int)s_tile,
++               s_tile >= 2 ? PAGE_NAMES[s_pg] : (s_tile == 0 ? "face" : "settings"),
++               (int)s_on_control, (int)s_down);
++    }
++    fflush(stdout);
 +}
 +
 +/* ---------- 事件 ---------- */
@@ -8878,6 +8928,12 @@ index 0000000..ec8ec22
 +        }
 +    }
 +
++    /* >touch：真触摸 indev 回读（只读），落在 LVGL 任务里。 */
++    if (s_touch_dump) {
++        s_touch_dump = false;
++        touch_dump_locked();
++    }
++
 +    if (s_reshare) {
 +        s_reshare = false;
 +        s_reported[0] = '\0';
@@ -8963,10 +9019,10 @@ index 0000000..ec8ec22
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_page.h b/esp32/components/muse/carpet/carpet_page.h
 new file mode 100644
-index 0000000..4ec0f02
+index 0000000..bd038d9
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,67 @@
 +/*
 + * 场景页（L1 选场景 / L2 场景 / L3 功能详情）住在 muse_ui.c 建的那格 tile 里。
 + *
@@ -9028,6 +9084,10 @@ index 0000000..4ec0f02
 +/* `>scene=<n>` 台架口：选定第 n 个场景（1 车 / 2 亲子 / 3 对话）+ 头像换装 + 回脸，
 + * 和点一张场景卡同一条路。串口任务只写一个整数，落地在 LVGL 任务里。 */
 +void carpet_page_scene_bench(int n);
++
++/* `>touch` 台架口：回读真触摸 indev 的解析结果（类型/模式/state/point）+ 手势互斥闸。
++ * 台架那条造点不走 indev，真玻璃划不动时唯一没称过的就是这一段。串口立记号，LVGL 任务里读。 */
++void carpet_page_touch_dump(void);
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_wake.c b/esp32/components/muse/carpet/carpet_wake.c
@@ -9376,7 +9436,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..7574168 100644
+index 7c579bb..93a8bf0 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,26 @@
@@ -9580,7 +9640,7 @@ index 7c579bb..7574168 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +992,344 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,351 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -9754,6 +9814,13 @@ index 7c579bb..7574168 100644
 +        fflush(stdout);
 +        return true;
 +    }
++    /* `>touch`：回读真触摸 indev 解析没解析出来、类型/模式/state/point，外加手势互斥闸。
++     * 真玻璃「划了没反应」时，先用这一条把"真路径有没有入口"和台架判定分开：
++     * pointer=NONE 就是真触摸根本没接上（台架照样能划，所以光称 >gest 看不出来）。 */
++    if (!strncmp(line, "touch", 5) && (line[5] == '\0' || line[5] == ' ')) {
++        carpet_page_touch_dump();
++        return true;
++    }
 +    /* `>scene=<n>`：选定第 n 个场景（1 车 / 2 亲子 / 3 对话）+ 头像换装 + 回脸，
 +     * 和点一张场景卡同一条路。为的是把 B §3 的换装调色单独截图证。 */
 +    if (!strncmp(line, "scene=", 6)) {
@@ -9925,7 +9992,7 @@ index 7c579bb..7574168 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1364,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1371,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -9938,7 +10005,7 @@ index 7c579bb..7574168 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1472,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1479,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
