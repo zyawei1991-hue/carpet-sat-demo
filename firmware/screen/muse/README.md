@@ -30,9 +30,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 36 个文件、7004 行新增 / 95 行删，其中一份是 267,276 字节的字库
-  （`muse-carpet.patch`，11,908 行 / 645,153 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-14（钟面升级 + AMOLED 烧屏防护这一版）实读的。
+- 我们的全部改动 = 36 个文件、7136 行新增 / 98 行删，其中一份是 267,276 字节的字库
+  （`muse-carpet.patch`，12,073 行 / 652,981 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-14（P2 avatar 情绪表情这一版）实读的。
   这一轮（11-13 下午）在唤醒词那版之上又加了三件 owner 当面拍的交互：**A** 导航圆点从全底部
   一排改成四方位（上=场景环 / 下=功能 / 右=设置 / 左=氛围，脸=中心 Avatar 不单独占点，`muse_ui.c`）；
   **B** 所有「返回」一律回 Avatar/脸页，不再层级回退（`carpet_page.c` 的 `nav_back()`）；
@@ -450,6 +450,21 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     **没称到**：联网后真时真日期（台架演示热点没开，boot `no saved wifi network nearby`，SNTP 不起、钟面走回落；
     要 owner 开热点后补称，任务 #59；不为台架验证改板子存的 Wi-Fi，那会动演示 provisioning）；
     像素位移 ±3px 肉眼（截图差 3px 难辨，靠 `>burnin` 累计回读证）。
+  - **11-14（P2：avatar 情绪表情接 state frame，owner「继续」批的开源借鉴 P2；不换 m5stack-avatar、保留换装/眨眼/呼吸）**：
+    `muse_pixel.h/.c` 新增 `muse_emotion_t` + `muse_pixel_set_emotion()`（setter 与 set_scene 同一路数）；脸段只在
+    `mode==IDLE && happy<=0.2` 时按情绪改眼型/嘴型/眉/腮红 —— 说话口型、听的睁眼、想的眉、报警 X 永远优先（摸头也优先）。
+    新增 `MOUTH_FROWN`（嘴角向下）与「愁眉」brow=3（内高外低）。映射：happy=眯眼+咧嘴+腮红↑、excited=睁大+扬眉+咧嘴、
+    sad=愁眉+撇嘴+腮红↓、worried=愁眉+抿嘴、sleepy=半耷拉眼+抿嘴、thinking=不对称眉+抿嘴、neutral=默认微笑。
+    `carpet_link.c` 新增 `emotion_of()`（读帧里 `ui.emotion` 英文键；缺/null/未知落 NEUTRAL，#34「帧里没带就落中性」同坑），
+    在 `on_state` 锁内每帧落情绪；台架口 `>emo <name>` + `carpet_link_bench_emotion()`（走同一条 on_state，不手点枚举）。
+    眨眼/呼吸/视线/换装一行没动。重打 patch：36 文件 / **7136+ / 98- / 12,073 行 / 652,981 字节**，字库 267,276 不变。
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` / `git apply: OK (36 sections)` / **`byte-compare: 36/36 identical`**。
+    **已编已刷已称**（IDF_RC=0 / `Hash of data verified.`，只 app-flash、分区没动）：`>emo` 七键回读
+    `view.emotion=中性/开心/兴奋/难过/担心/犯困/思考`、`face=0 mode=1`(IDLE)；七张截图逐张实看表情各异且对
+    （眯眼咧嘴 / 睁大扬眉 / 愁眉撇嘴 / 愁眉抿嘴 / 半耷拉眼 / 不对称眉 / 默认微笑）；换装三场景无回归
+    （红车+安全带 / 薄荷+玩偶滑梯 / 紫+正装领带，均带中性脸）；`anim_a vs anim_b 13100 px differ` 证呼吸/眨眼没冻。
+    **没称到**：真 App 经 WebSocket 发情绪帧上脸（台架无热点；`>emo` 走同一条 on_state 但非真链路，待现场补）；
+    情绪像素差被呼吸/眨眼相位混淆（基线 anim 差就 ~13k），故以逐张实看为准、不以 diff 数为准。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
