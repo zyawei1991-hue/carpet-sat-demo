@@ -40,6 +40,18 @@
 
 ---
 
+## App 侧候选开源依赖（2026-11-14，仅评估，尚未引入）
+
+App 侧地基件调研的完整方案见 `docs/APP-OPENSOURCE-BASICS.md`。此条先记账：
+
+- [square/okhttp](https://github.com/square/okhttp) — Apache-2.0，替换 5 文件 21 处手写 HttpURLConnection，若引入从此处取
+- [androidx room / datastore](https://developer.android.com/jetpack/androidx) — Apache-2.0，对话台账落盘 + 替换 SharedPreferences
+- [ehsannarmani/ComposeCharts](https://github.com/ehsannarmani/ComposeCharts) — Apache-2.0，SOS 倒计时环
+- [patrykandpatrick/vico](https://github.com/patrykandpatrick/vico) — Apache-2.0，能耗/里程曲线
+- [pushpalat/JetLime](https://github.com/pushpalat/JetLime) — MIT，成长时间轴
+
+---
+
 ## 圆屏场景层候选开源项目（2026-11-14，仅评估，尚未引入）
 
 屏侧场景层调研的完整方案见 `docs/SCREEN-SCENE-OPENSOURCE.md`。此条先记账：
