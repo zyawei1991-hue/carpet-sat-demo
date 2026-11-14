@@ -7,12 +7,13 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.telephony.TelephonyManager
 import com.carpet.satdemo.core.link.CellStatus
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 /**
  * 蜂窝侧观测。产出 [CellStatus] 喂给链路状态机。
@@ -28,6 +29,15 @@ class NetworkMonitor(
 ) {
     private val ctx = context
     private val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    /** 探测要的是"此刻通不通"的答案，不是等重定向走完 —— 跟旧实现 instanceFollowRedirects=false 同口径 */
+    private val probeClient = OkHttpClient.Builder()
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .retryOnConnectionFailure(false)
+        .build()
+
     private var job: Job? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
 
@@ -81,16 +91,12 @@ class NetworkMonitor(
      * 2s 超时口径来自 link-policy.md 对 cell_good 的定义。
      */
     private fun probe(): Boolean {
-        val conn = URL(probeUrl).openConnection() as HttpURLConnection
         return try {
-            conn.requestMethod = "HEAD"
-            conn.connectTimeout = 2_000
-            conn.readTimeout = 2_000
-            conn.instanceFollowRedirects = false
-            val code = conn.responseCode
-            code in 200..299
-        } finally {
-            conn.disconnect()
+            probeClient.newCall(
+                Request.Builder().url(probeUrl).head().build(),
+            ).execute().use { it.code in 200..299 }
+        } catch (e: Exception) {
+            false
         }
     }
 

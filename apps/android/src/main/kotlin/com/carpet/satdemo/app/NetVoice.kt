@@ -9,9 +9,11 @@ import com.carpet.satdemo.core.ai.AudioChunks
 import com.carpet.satdemo.core.ai.AzureSpeech
 import com.carpet.satdemo.core.ai.EdgeSpeech
 import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 /**
  * 网络合成：这台手机的第二张嘴。
@@ -31,7 +33,13 @@ import java.net.URLEncoder
  * 屏那侧不需要知道声音从哪来。
  */
 internal object NetVoice {
-    private const val ENDPOINT = "https://fanyi.baidu.com/gettts"
+    /** connect 6 秒跟 core 那几条 HTTP 路同一口径；读超时 15 秒是旧实现的口径 */
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .followRedirects(true)
+        .build()
 
     /** 一句答话的上限。答句已压到 ≤30 字（拍板口径）；再长的输入按 30 字截断 —— 300 字 ≈ 2.13 MB PCM 会撞穿屏侧 2 MB 缓冲整段不接 */
     private const val MAX_CHARS = 30
@@ -91,22 +99,29 @@ internal object NetVoice {
             rate <= 0.92f -> 4
             else -> 5
         }
-        val query = "lan=zh&text=" + URLEncoder.encode(body, "UTF-8") + "&spd=$spd&source=web"
-        var conn: HttpURLConnection? = null
+        val url = HttpUrl.Builder()
+            .scheme("https")
+            .host("fanyi.baidu.com")
+            .encodedPath("/gettts")
+            .addQueryParameter("lan", "zh")
+            .addQueryParameter("text", body)
+            .addQueryParameter("spd", spd.toString())
+            .addQueryParameter("source", "web")
+            .build()
         return try {
-            conn = (URL("$ENDPOINT?$query").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = 15000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0")
+            client.newCall(
+                Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0")
+                    .get()
+                    .build(),
+            ).execute().use { resp ->
+                if (resp.code != 200) return null
+                if (!resp.header("Content-Type").orEmpty().startsWith("audio/")) return null
+                resp.body?.bytes()?.takeIf { it.size > 512 }
             }
-            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
-            if (!conn.contentType.orEmpty().startsWith("audio/")) return null
-            conn.inputStream.use { it.readBytes().takeIf { b -> b.size > 512 } }
         } catch (e: Exception) {
             null
-        } finally {
-            conn?.disconnect()
         }
     }
 

@@ -35,7 +35,7 @@ class AndroidCompatTest {
     )
 
     private val banned = mapOf(
-        "java.net.http." to "Android 没有这个包（JDK 11）。用 HttpURLConnection",
+        "java.net.http." to "Android 没有这个包（JDK 11）。用 OkHttp",
         "java.awt." to "Android 没有 AWT",
         "javax.swing." to "Android 没有 Swing",
         "javax.imageio." to "Android 没有 ImageIO",
@@ -86,7 +86,7 @@ class AndroidCompatTest {
         )
     }
 
-    /** `HttpURLConnection` 是这次换的传输，形状错了等于没接模型，所以断言到字节 */
+    /** 传输可注入，形状错了等于没接模型，所以断言到字节 */
     @Test
     fun `模型请求的体是合法的 OpenAI 形状`() {
         val seen = ArrayList<Triple<String, String, Map<String, String>>>()

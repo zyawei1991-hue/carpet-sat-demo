@@ -40,11 +40,22 @@
 
 ---
 
+## OkHttp（`core/build.gradle.kts`，`com.squareup.okhttp3:okhttp:4.12.0`）
+
+| 项 | 值 |
+|---|---|
+| 上游 | [`square/okhttp`](https://github.com/square/okhttp) |
+| 上游许可 | Apache-2.0 |
+| 我们的用法 | 替换 5 个文件 21 处手写 `HttpURLConnection`（Providers / AzureSpeech / SiliconFlowAsr / NetVoice / NetworkMonitor），2026-11-14 引入 |
+| 性质 | Maven 坐标直接引依赖，不改其源码；Android 自带同款，桌面彩排台与手机同一条传输代码 |
+
+---
+
 ## App 侧候选开源依赖（2026-11-14，仅评估，尚未引入）
 
 App 侧地基件调研的完整方案见 `docs/APP-OPENSOURCE-BASICS.md`。此条先记账：
 
-- [square/okhttp](https://github.com/square/okhttp) — Apache-2.0，替换 5 文件 21 处手写 HttpURLConnection，若引入从此处取
+- ~~square/okhttp~~ — **已引入**，见上一节
 - [androidx room / datastore](https://developer.android.com/jetpack/androidx) — Apache-2.0，对话台账落盘 + 替换 SharedPreferences
 - [ehsannarmani/ComposeCharts](https://github.com/ehsannarmani/ComposeCharts) — Apache-2.0，SOS 倒计时环
 - [patrykandpatrick/vico](https://github.com/patrykandpatrick/vico) — Apache-2.0，能耗/里程曲线

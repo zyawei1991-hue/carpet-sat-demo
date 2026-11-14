@@ -1,8 +1,10 @@
 package com.carpet.satdemo.core.ai
 
-import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Azure Speech 的 TTS（真·晓伊），D13 记的"正路"：拿订阅 key 走公开 REST 接口，
@@ -27,6 +29,12 @@ object AzureSpeech {
     var speechKey: String = ""
 
     val configured: Boolean get() = region.isNotBlank() && speechKey.isNotBlank()
+
+    /** connect 6 秒跟其它几条 HTTP 路同一口径；读超时按每次调用单独设 */
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     /**
      * 合成一句。失败（没配 / 连不上 / 服务不认 / 一个字音频都没回）返回 null。
@@ -54,30 +62,27 @@ object AzureSpeech {
             xml(body) +
             "</prosody></voice></speak>"
 
-        var conn: HttpURLConnection? = null
         return try {
-            conn = (URL("https://$region.tts.speech.microsoft.com/cognitiveservices/v1").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = timeoutMs.toInt()
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Ocp-Apim-Subscription-Key", speechKey)
-                setRequestProperty("Content-Type", "application/ssml+xml")
-                setRequestProperty("X-Microsoft-OutputFormat", "audio-24khz-48kbitrate-mono-mp3")
-                setRequestProperty("User-Agent", "CarpetSatDemo")
-            }
-            conn.outputStream.use { it.write(ssml.toByteArray(Charsets.UTF_8)) }
-            if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
-            if (!conn.contentType.orEmpty().startsWith("audio/")) return null
-            conn.inputStream.use { input ->
-                val out = ByteArrayOutputStream()
-                input.copyTo(out)
-                out.toByteArray().takeIf { it.size > 1024 }
-            }
+            val request = Request.Builder()
+                .url("https://$region.tts.speech.microsoft.com/cognitiveservices/v1")
+                .header("Ocp-Apim-Subscription-Key", speechKey)
+                .header("X-Microsoft-OutputFormat", "audio-24khz-48kbitrate-mono-mp3")
+                .header("User-Agent", "CarpetSatDemo")
+                .post(ssml.toRequestBody("application/ssml+xml".toMediaType()))
+                .build()
+            client.newBuilder()
+                .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(request)
+                .execute()
+                .use { resp ->
+                    if (resp.code != 200) return null
+                    val bytes = resp.body?.bytes() ?: return null
+                    if (!resp.header("Content-Type").orEmpty().startsWith("audio/")) return null
+                    bytes.takeIf { it.size > 1024 }
+                }
         } catch (e: Exception) {
             null
-        } finally {
-            conn?.disconnect()
         }
     }
 

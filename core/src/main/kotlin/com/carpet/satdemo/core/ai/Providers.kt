@@ -1,8 +1,12 @@
 package com.carpet.satdemo.core.ai
 
-import java.net.HttpURLConnection
 import java.net.URI
 import java.time.Duration
+import java.util.concurrent.TimeUnit
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -117,7 +121,7 @@ class LocalRuleProvider : AiProvider {
 /**
  * OpenAI 兼容端点。
  *
- * ⚠️ **走的是 `HttpURLConnection`，不是 JDK 11 那个 `java.net.http.HttpClient`**。
+ * ⚠️ **HTTP 传输走 OkHttp（Android 自带、JDK 也能跑），不是 JDK 11 那个 `java.net.http.HttpClient`**。
  * 上一版用了后者，编译和 214 条单测全绿、桌面彩排台也跑得完美 —— 因为那些都在 JDK 17 上跑。
  * **Android 到现在都没有 `java.net.http` 这个包**，而 `AppRuntime` 在 `Application.onCreate`
  * 里就构造这个 provider，类初始化一碰到 `HttpClient` 就是 NoClassDefFoundError，
@@ -468,47 +472,43 @@ class OpenAiCompatProvider(
         }
 
         /**
-         * 一次 POST。**这里不许出现 `java.net.http.*`**（见类注释那次闪退）：
-         * `HttpURLConnection` 从 API 1 就有，JDK 上也一样能跑，桌面彩排台和手机才是同一条代码。
+         * 一次 POST，走 OkHttp（THIRD-PARTY.md 有记账）。Android 自带同一套 OkHttp，
+         * 桌面彩排台和手机才是同一条代码；不再用 JDK 的 `java.net.http.HttpClient` ——
+         * Android 没有那个包，类初始化碰到就 NoClassDefFoundError（类注释里那次点开即闪退）。
          *
-         * 两个超时都必须显式设：不设读超时等于无限等，现场网关不回话会把那条线程挂死。
+         * 读超时按调用方给的 [readMs] 每次单独设：不设等于无限等，现场网关不回话会把线程挂死。
          * 非 2xx 连同状态码和正文前一段抛出去 —— 界面上要能分清 401（密钥）和 404（地址口径）。
          */
-        private fun post(url: String, body: String, headers: Map<String, String>, readMs: Long): String {
-            val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 6_000
-            conn.readTimeout = readMs.coerceIn(1_000, 60_000).toInt()
-            conn.doOutput = true
-            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
-            try {
-                // 请求体要一次写完再关流。关流之后 connect() 才真正发出去，所以这两句的顺序不能反
-                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                val code = conn.responseCode
-                val text = (if (code / 100 == 2) conn.inputStream else conn.errorStream)
-                    ?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
-                if (code / 100 != 2) throw HttpStatusException(code, text.take(160).replace('\n', ' '))
-                return text
-            } finally {
-                conn.disconnect()
-            }
-        }
+        private fun post(url: String, body: String, headers: Map<String, String>, readMs: Long): String =
+            exchange(
+                Request.Builder().url(url).post(body.toRequestBody("application/json".toMediaType())),
+                headers,
+                readMs,
+            )
 
         /** 同 [post]，只读。读超时放宽到 20 秒：模型清单本身很小，慢的只是个别网关的管理面 */
-        private fun get(url: String, headers: Map<String, String>, readMs: Long): String {
-            val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 6_000
-            conn.readTimeout = readMs.coerceIn(1_000, 60_000).toInt()
-            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
-            try {
-                val code = conn.responseCode
-                val text = (if (code / 100 == 2) conn.inputStream else conn.errorStream)
-                    ?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
-                if (code / 100 != 2) throw HttpStatusException(code, text.take(160).replace('\n', ' '))
+        private fun get(url: String, headers: Map<String, String>, readMs: Long): String =
+            exchange(Request.Builder().url(url).get(), headers, readMs)
+
+        /** connect 6 秒是本地网络的经验值；读超时 coerce 在 1–60 秒，跟旧 HttpURLConnection 口径一致 */
+        private val client = OkHttpClient.Builder()
+            .connectTimeout(Duration.ofSeconds(6))
+            .retryOnConnectionFailure(true)
+            .build()
+
+        private fun exchange(builder: Request.Builder, headers: Map<String, String>, readMs: Long): String {
+            headers.forEach { (k, v) -> builder.header(k, v) }
+            val call = client.newBuilder()
+                .readTimeout(readMs.coerceIn(1_000, 60_000), TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(builder.build())
+            call.execute().use { resp ->
+                // 错误响应体在同一个 body 里拿（errorStream 之分是 HttpURLConnection 的）
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw HttpStatusException(resp.code, text.take(160).replace('\n', ' '))
+                }
                 return text
-            } finally {
-                conn.disconnect()
             }
         }
     }

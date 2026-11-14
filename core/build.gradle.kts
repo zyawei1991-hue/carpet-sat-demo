@@ -15,6 +15,8 @@ dependencies {
     api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     api("org.java-websocket:Java-WebSocket:1.5.6")
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    // HTTP 传输统一走 OkHttp（THIRD-PARTY.md 有记账）。Android 自带，桌面彩排台跟手机同一条代码
+    api("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")

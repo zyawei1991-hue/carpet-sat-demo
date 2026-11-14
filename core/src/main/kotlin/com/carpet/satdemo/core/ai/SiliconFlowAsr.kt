@@ -1,9 +1,11 @@
 package com.carpet.satdemo.core.ai
 
-import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLConnection
+import java.util.concurrent.TimeUnit
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * 硅基流动的 ASR（手机侧语音输入）：AudioRecord 录出的 WAV 16k 单声道，
@@ -23,6 +25,12 @@ object SiliconFlowAsr {
     var apiKey: String = ""
 
     val configured: Boolean get() = apiKey.isNotBlank()
+
+    /** connect 6 秒跟其它几条 HTTP 路同一口径；读超时按每次转写单独设 */
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     /**
      * 转写的四种可分辨结局（屏侧交接 §0.7/§0.9：四种因共用一句"没听清"，
@@ -51,52 +59,38 @@ object SiliconFlowAsr {
         if (!configured) return AsrResult.NoKey
         if (wav.isEmpty()) return AsrResult.Empty
 
-        val boundary = "----CarpetSat" + System.currentTimeMillis().toString(16)
-        val head = buildString {
-            append("--").append(boundary).append("\r\n")
-            append("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
-            append(MODEL).append("\r\n")
-            append("--").append(boundary).append("\r\n")
-            append("Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n")
-            append("Content-Type: ").append(guessMime("speech.wav")).append("\r\n\r\n")
-        }.toByteArray(Charsets.UTF_8)
-        val tail = ("\r\n--" + boundary + "--\r\n").toByteArray(Charsets.UTF_8)
-
-        var conn: HttpURLConnection? = null
+        val request = Request.Builder()
+            .url(BASE_URL)
+            .header("Authorization", "Bearer $apiKey")
+            .header("User-Agent", "CarpetSatDemo")
+            .post(
+                MultipartBody.Builder()
+                    .setType(MultipartBody.FORM)
+                    .addFormDataPart("model", MODEL)
+                    .addFormDataPart(
+                        "file",
+                        "speech.wav",
+                        wav.toRequestBody(guessMime("speech.wav").toMediaType()),
+                    )
+                    .build(),
+            )
+            .build()
         return try {
-            conn = (URL(BASE_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 6000
-                readTimeout = timeoutMs.toInt()
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Authorization", "Bearer $apiKey")
-                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-                setRequestProperty("User-Agent", "CarpetSatDemo")
-                setFixedLengthStreamingMode(head.size + wav.size + tail.size)
-            }
-            conn.outputStream.use { out ->
-                out.write(head)
-                out.write(wav)
-                out.write(tail)
-            }
-            if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-                // 错误响应体读 errorStream（getInputStream 对非 2xx 直接抛）
-                val body = runCatching {
-                    conn.errorStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
-                }.getOrElse { "" }
-                return AsrResult.Rejected(conn.responseCode, body.take(200))
-            }
-            val body = conn.inputStream.use { input ->
-                val buf = ByteArrayOutputStream()
-                input.copyTo(buf)
-                buf.toString(Charsets.UTF_8)
-            }
-            extractText(body)?.takeIf { it.isNotBlank() }?.let { AsrResult.Text(it) }
-                ?: AsrResult.Empty
+            client.newBuilder()
+                .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(request)
+                .execute()
+                .use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.code != 200) {
+                        return AsrResult.Rejected(resp.code, body.take(200))
+                    }
+                    extractText(body)?.takeIf { it.isNotBlank() }?.let { AsrResult.Text(it) }
+                        ?: AsrResult.Empty
+                }
         } catch (e: Exception) {
             AsrResult.Network
-        } finally {
-            conn?.disconnect()
         }
     }
 
@@ -148,6 +142,6 @@ object SiliconFlowAsr {
             "flac" to "audio/flac",
         )
         val ext = name.substringAfterLast('.', "").lowercase()
-        return map[ext] ?: URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+        return map[ext] ?: "application/octet-stream"
     }
 }
