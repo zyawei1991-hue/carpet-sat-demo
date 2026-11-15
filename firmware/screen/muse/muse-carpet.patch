@@ -7648,10 +7648,10 @@ index 0000000..b77731c
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..7d8d0c1
+index 0000000..185e74d
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1365 @@
+@@ -0,0 +1,1505 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -7676,6 +7676,7 @@ index 0000000..7d8d0c1
 +#include <stdlib.h>
 +#include <stdio.h>
 +#include <string.h>
++#include <math.h>
 +
 +#include "carpet/carpet_link.h"
 +#include "carpet/carpet_mic.h"
@@ -7789,6 +7790,12 @@ index 0000000..7d8d0c1
 +#define INK_TEXT_LOW        0x94A1B4   /* 不活/等首帧时的过境行 */
 +#define INK_SAT             0x58A6FF   /* 活着的下次过境：基线那颗卫星蓝 */
 +#define INK_WAIT            0xE3B341   /* 还没对上时：琥珀，不摆假时间 */
++
++/* 星轨守护钟面（owner 2026-11-16 选的 2 号）：青蓝轨道环 + 绕行卫星 + 径向渐变地球。
++ * 纯 LVGL 画，不塞位图、不引解码器。 */
++#define ORBIT_CYAN          0x35E0FF
++#define ORBIT_TEAL          0x1FB6C9
++#define ORBIT_R             210        /* 轨道半径：466 圆里留 23px 边 */
 +
 +/* 466 的圆里，宽 300 的一列上下各能让到多少：屏半径 233、半宽 150，
 + * sqrt(233^2-150^2)=178 ⇒ 整列最高 356 px。场景页都按这条上限排过：
@@ -7973,6 +7980,8 @@ index 0000000..7d8d0c1
 +static line_t s_clock_hero;
 +static line_t s_clock_date;
 +static line_t s_clock_pass;
++static lv_obj_t *s_clock_stage;   /* 星轨装饰层：整 tile 大，挂在 amb tile 上、文字列下面 */
++static lv_obj_t *s_clock_sat;     /* 绕行那颗卫星点 */
 +static line_t s_detail_title;
 +static line_t s_detail_value;
 +static line_t s_detail_hint;
@@ -8174,8 +8183,11 @@ index 0000000..7d8d0c1
 +{
 +    for (int i = PG_PICKER; i < PG_COUNT; i++) {
 +        if (s_col[i]) {
-+            lv_obj_set_flag(s_col[i], LV_OBJ_FLAG_HIDDEN,
-+                            !(s_tile == tile_for_page(i) && !s_detail && s_pg == i));
++            bool hidden = !(s_tile == tile_for_page(i) && !s_detail && s_pg == i);
++            lv_obj_set_flag(s_col[i], LV_OBJ_FLAG_HIDDEN, hidden);
++            /* 星轨装饰层跟钟面同隐同现，别在 gallery/photo 上露出来 */
++            if (i == PG_CLOCK && s_clock_stage)
++                lv_obj_set_flag(s_clock_stage, LV_OBJ_FLAG_HIDDEN, hidden);
 +        }
 +    }
 +    if (s_detail_col) {
@@ -8785,8 +8797,134 @@ index 0000000..7d8d0c1
 + * 三行直接挂 flex 列、按各自行高占位（76px 那档行高约 110，22px 约 32），总高约
 + * 44+6+110+6+32+6+32=236，最外 dy≈118 ⇒ 半径 sqrt(150²+118²)=191<233，落在圆内。
 + * 内容用 Ink 蓝系；返回药丸仍是共享的紫（见 INK_ 那段注释）。 */
++/* 星轨层里的一颗圆点。align CENTER + 偏移 ⇒ 不依赖 tile 具体尺寸。 */
++static lv_obj_t *orbit_dot(lv_obj_t *st, int dx, int dy, int size, uint32_t color, lv_opa_t opa)
++{
++    lv_obj_t *o = lv_obj_create(st);
++    lv_obj_remove_style_all(o);
++    lv_obj_set_size(o, size, size);
++    lv_obj_align(o, LV_ALIGN_CENTER, dx, dy);
++    lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_color(o, lv_color_hex(color), 0);
++    lv_obj_set_style_bg_opa(o, opa, 0);
++    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
++    return o;
++}
++
++/* 一整圈环：bg_angles 0..360 画满圆，indicator 收掉不要旋钮。 */
++static lv_obj_t *orbit_ring(lv_obj_t *st, int pct, int width, uint32_t color, lv_opa_t opa)
++{
++    lv_obj_t *a = lv_arc_create(st);
++    lv_obj_set_size(a, LV_PCT(pct), LV_PCT(pct));
++    lv_obj_center(a);
++    lv_arc_set_range(a, 0, 360);
++    lv_arc_set_bg_angles(a, 0, 360);
++    lv_arc_set_angles(a, 0, 0);
++    lv_obj_remove_style(a, NULL, LV_PART_KNOB);
++    lv_obj_set_style_arc_width(a, width, LV_PART_MAIN);
++    lv_obj_set_style_arc_color(a, lv_color_hex(color), LV_PART_MAIN);
++    lv_obj_set_style_arc_opa(a, opa, LV_PART_MAIN);
++    lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, 0);
++    lv_obj_remove_flag(a, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
++    return a;
++}
++
++/* 卫星绕行的 exec_cb：角度→圆上坐标。用 set_pos（不挂 align），布局不会把它拽回去。 */
++static void orbit_sat_anim(void *var, int32_t deg)
++{
++    lv_obj_t *o = var;
++    lv_obj_t *st = lv_obj_get_parent(o);
++    int cx = lv_obj_get_width(st) / 2;
++    int cy = lv_obj_get_height(st) / 2;
++    float a = (float)deg * 3.14159265f / 180.0f;
++    int x = cx + (int)(ORBIT_R * sinf(a));
++    int y = cy - (int)(ORBIT_R * cosf(a));
++    lv_obj_set_pos(o, x - 8, y - 8);
++}
++
++/* 星轨装饰层：星点 + 径向渐变地球 + 三层环 + 四方位刻度 + 绕行卫星。
++ * 挂在 amb tile 上、整 tile 大；文字列稍后 move_foreground 压到它上面。
++ * 烧屏防护挪的是 s_tv 整块，这一层跟着挪，不用单独管。 */
++static void build_clock_orbit(lv_obj_t *tile)
++{
++    lv_obj_t *st = lv_obj_create(tile);
++    lv_obj_remove_style_all(st);
++    lv_obj_set_size(st, LV_PCT(100), LV_PCT(100));
++    lv_obj_center(st);
++    lv_obj_set_style_bg_opa(st, LV_OPA_TRANSP, 0);
++    lv_obj_remove_flag(st, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
++    s_clock_stage = st;
++
++    /* 星点：固定种子摆一次就不动（动的是卫星那颗），落在地球外、轨道内 */
++    uint32_t seed = 20261116u;
++    for (int i = 0; i < 28; i++) {
++        seed = seed * 1103515245u + 12345u;
++        int ang = (int)((seed >> 16) % 360);
++        seed = seed * 1103515245u + 12345u;
++        int rad = 150 + (int)((seed >> 16) % 60);
++        float a = (float)ang * 3.14159265f / 180.0f;
++        int dx = (int)(rad * sinf(a)), dy = -(int)(rad * cosf(a));
++        seed = seed * 1103515245u + 12345u;
++        int sz = 1 + (int)((seed >> 16) % 2);
++        uint32_t col = (i % 3) ? 0x9FE8F5 : 0xFFFFFF;
++        orbit_dot(st, dx, dy, sz, col, (lv_opa_t)(LV_OPA_30 + (i % 4) * 15));
++    }
++
++    /* 地球：径向渐变圆 + 一圈辉光，纯 LVGL，不塞位图 */
++    lv_obj_t *g = lv_obj_create(st);
++    lv_obj_remove_style_all(g);
++    lv_obj_set_size(g, LV_PCT(64), LV_PCT(64));
++    lv_obj_align(g, LV_ALIGN_CENTER, 0, -6);
++    lv_obj_set_style_radius(g, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
++    /* 实心暗盘 + 辉光描边：RGB565 上径向渐变会出竖条纹，夜地球剪影更干净 */
++    lv_obj_set_style_bg_color(g, lv_color_hex(0x062028), 0);
++    lv_obj_set_style_border_width(g, 2, 0);
++    lv_obj_set_style_border_color(g, lv_color_hex(ORBIT_TEAL), 0);
++    lv_obj_set_style_border_opa(g, LV_OPA_40, 0);
++    lv_obj_set_style_shadow_width(g, 40, 0);
++    lv_obj_set_style_shadow_color(g, lv_color_hex(ORBIT_TEAL), 0);
++    lv_obj_set_style_shadow_opa(g, LV_OPA_30, 0);
++    lv_obj_remove_flag(g, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
++
++    orbit_ring(st, 96, 1, ORBIT_TEAL, LV_OPA_20);    /* 最外淡圈 */
++    orbit_ring(st, 90, 9, ORBIT_TEAL, LV_OPA_20);    /* 辉光 */
++    orbit_ring(st, 90, 3, ORBIT_CYAN, LV_OPA_COVER); /* 主环 */
++
++    const int tx[4] = {0, ORBIT_R, 0, -ORBIT_R};
++    const int ty[4] = {-ORBIT_R, 0, ORBIT_R, 0};
++    for (int i = 0; i < 4; i++) {
++        lv_obj_t *t = orbit_dot(st, tx[i], ty[i], 10, 0x000000, LV_OPA_COVER);
++        lv_obj_set_style_border_width(t, 2, 0);
++        lv_obj_set_style_border_color(t, lv_color_hex(ORBIT_CYAN), 0);
++        lv_obj_set_style_border_opa(t, LV_OPA_70, 0);
++    }
++
++    /* 卫星：带辉光的点，60s 绕一圈。装饰轨道，不冒充真实过境倒计时。 */
++    s_clock_sat = lv_obj_create(st);
++    lv_obj_remove_style_all(s_clock_sat);
++    lv_obj_set_size(s_clock_sat, 16, 16);
++    lv_obj_set_style_radius(s_clock_sat, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_color(s_clock_sat, lv_color_hex(0xE8FBFF), 0);
++    lv_obj_set_style_bg_opa(s_clock_sat, LV_OPA_COVER, 0);
++    lv_obj_set_style_shadow_width(s_clock_sat, 20, 0);
++    lv_obj_set_style_shadow_color(s_clock_sat, lv_color_hex(ORBIT_CYAN), 0);
++    lv_obj_set_style_shadow_opa(s_clock_sat, LV_OPA_60, 0);
++    lv_obj_remove_flag(s_clock_sat, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
++    lv_obj_set_pos(s_clock_sat, 233 - 8, 233 - ORBIT_R - 8);
++    lv_anim_t an;
++    lv_anim_init(&an);
++    lv_anim_set_var(&an, s_clock_sat);
++    lv_anim_set_exec_cb(&an, orbit_sat_anim);
++    lv_anim_set_values(&an, 0, 360);
++    lv_anim_set_time(&an, 60000);
++    lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
++    lv_anim_start(&an);
++}
++
 +static void build_clock(lv_obj_t *col)
 +{
++    build_clock_orbit(lv_obj_get_parent(col));
 +    make_pill(col, COL_W, BTN_H, "返回", on_back_clicked, NULL);
 +
 +    /* 不套定高 band：band 的猜高度会和字体真实行高对不上、上下溢出。列是
@@ -8809,7 +8947,9 @@ index 0000000..7d8d0c1
 +    lv_label_set_long_mode(s_clock_pass.label, LV_LABEL_LONG_MODE_DOTS);
 +    snprintf(s_clock_pass.shown, sizeof s_clock_pass.shown, "等首帧");
 +
++    lv_obj_move_foreground(col);   /* 文字列压到星轨层上面 */
 +    lv_obj_set_flag(col, LV_OBJ_FLAG_HIDDEN, true);
++    lv_obj_set_flag(s_clock_stage, LV_OBJ_FLAG_HIDDEN, true);
 +}
 +
 +/* 每帧只读 time()/localtime_r()（carpet_link_wallclock 里），不碰链路锁、不阻塞。
