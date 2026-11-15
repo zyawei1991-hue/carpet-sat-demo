@@ -68,6 +68,24 @@ data class Turn(
 }
 
 /**
+ * 台账的落盘接缝。**:core 是纯 JVM 模块，不引 Room** —— Room 的实现住在 app 模块
+ * （[com.carpet.satdemo.app.TurnDatabase]），彩排台（simulator）不接、保持内存。
+ *
+ * 同步小接口，跟 [ConversationLog] 的线程模型对齐：只从主 scope 调。
+ * 实现方自己管 IO 线程（Room 允许在主线程之外的同步调用），crash 也不许往外抛 ——
+ * 落盘失败不能把一句话从时间线上挤掉，"记录只有一份"指的是内存这条线。
+ */
+interface TurnStore {
+    /** 追加一条（[ConversationLog.append] 过闸之后、进内存 list 的同时调用） */
+    fun put(turn: Turn)
+
+    /** 启动回灌：取最近 [cap] 条，按记录顺序返回。实现方在宿主线程同步读 */
+    fun loadRecent(cap: Int): List<Turn>
+
+    fun clear()
+}
+
+/**
  * 会话记录本体。线程不安全 —— 和 DemoRuntime 一样只从主 scope 动它，
  * 链路那边进来的帧由 AppRuntime 切回同一线程后再 append。
  */
@@ -76,11 +94,18 @@ class ConversationLog(
     /** 文案闸。默认放行，App 侧传 [AiGateway.guard] 进来：话不是我们生成的也要过这一道 */
     private val guard: (String) -> String = { it },
     private val log: (String) -> Unit = {},
+    /**
+     * 落盘（App 侧 Room，2026-11-14 起）。null = 纯内存（彩排台、旧测试都是这一档）。
+     * 回灌不走这里 —— 宿主在构造本类**之前**先 [TurnStore.loadRecent]，把结果交给 [seed]：
+     * StateFlow 一初始化就该有值，不然首页先闪一下空白再"历史回来"，看着像丢过数据。
+     */
+    private val store: TurnStore? = null,
+    seed: List<Turn> = emptyList(),
 ) {
-    private val _turns = MutableStateFlow<List<Turn>>(emptyList())
+    private val _turns = MutableStateFlow(seed.takeLast(cap))
     val turns: StateFlow<List<Turn>> = _turns
 
-    private val seen = LinkedHashSet<String>()
+    private val seen = LinkedHashSet<String>().apply { seed.takeLast(cap).forEach { add(dedupKey(it)) } }
 
     val size: Int get() = _turns.value.size
 
@@ -90,7 +115,7 @@ class ConversationLog(
      * 所以它得看见"存进去的到底是哪句话"，不能自己再拼一遍。
      */
     fun append(turn: Turn): Turn? {
-        val key = "${turn.turnId}:${turn.from.name}"
+        val key = dedupKey(turn)
         if (!seen.add(key)) {
             log("这一轮已经记过了（${turn.turnId}），丢掉重复的那条")
             return null
@@ -100,8 +125,11 @@ class ConversationLog(
         _turns.value = (before + kept).takeLast(cap)
         // 被挤出去的那几轮要把去重键一起放掉，否则 cap 到了上限，旧 id 反而永久占位
         (before + kept).take((before.size + 1) - _turns.value.size).forEach {
-            seen.remove("${it.turnId}:${it.from.name}")
+            seen.remove(dedupKey(it))
         }
+        // 落盘跟着内存走：内存收下的才是"发生过的话"。挤出去的旧条目由 Room 的
+        // loadRecent(cap) 天然挡在外面，不用在这里逐条删 —— 台账多留一点在库里不伤谁
+        store?.let { runCatching { it.put(kept) }.onFailure { log("台账落盘失败：${it.message}") } }
         return kept
     }
 
@@ -131,7 +159,10 @@ class ConversationLog(
     fun clear() {
         _turns.value = emptyList()
         seen.clear()
+        store?.let { runCatching { it.clear() }.onFailure { log("台账清库失败：${it.message}") } }
     }
+
+    private fun dedupKey(t: Turn) = "${t.turnId}:${t.from.name}"
 
     /**
      * 「娃在屏上说了啥」要的那几句：**只数屏说上来的**（`via=screen` 且是问句那一条），

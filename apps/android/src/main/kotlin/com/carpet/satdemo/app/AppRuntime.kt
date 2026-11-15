@@ -105,8 +105,8 @@ class AppRuntime(private val host: Application) {
 
     private val prefs = host.getSharedPreferences("demo", 0)
 
-    /** 车况养护推荐的那份状态。判据、勾选、录入都在这，规则本身在 `:core` */
-    val maint = MaintStore(prefs)
+    /** 车况养护推荐的那份状态。判据、勾选、录入都在这，规则本身在 `:core`。配置落盘走 DataStore */
+    val maint = MaintStore(host.maintDataStore)
 
     /** 星历替身。开关切到厂商 SDK 后它就退场，但「模拟未过顶」那个开关还得能改口，所以留着引用 */
     private var simEph: SimulatedEphemerisSource? = null
@@ -482,6 +482,13 @@ class AppRuntime(private val host: Application) {
         },
         launch = { body -> scope.launch { body() } },
         note = { line -> runtime.log(line) },
+        // 台账落盘 + 启动回灌（TurnDatabase.kt）：杀进程之后"刚才是不是有人在车边跟屏说话"
+        // 依然能在手机上看到。同步读 Room（构造时一次 <1ms/条），首页不会闪"历史飞回来"
+        log = conversationLogWithDb(
+            host,
+            guard = { ai.guard(it) },
+            log = { line -> runtimeRef?.log(line) },
+        ),
         // 屏起的那一轮归哪一页，读屏自己报上来的那个字段。屏没报过页就不归页 ——
         // 那种句子只在首页的总时间线里出现，比"猜一个亲子"诚实
         screenScene = { screenSceneOf(runtime.status.value.screenPage) },

@@ -125,4 +125,65 @@ class ConversationLogTest {
             assertEquals(r, r.toDialog().toReply(), "$r 来回换算后变了")
         }
     }
+
+    /** Room 落盘后的行为契约：内存收下的话一定进过 store，seed 回来的话不重复落盘 */
+    private class RecordingStore : TurnStore {
+        val put = mutableListOf<Turn>()
+        var cleared = 0
+        override fun put(turn: Turn) {
+            put.add(turn)
+        }
+
+        override fun loadRecent(cap: Int): List<Turn> = put.takeLast(cap)
+        override fun clear() {
+            cleared++
+            put.clear()
+        }
+    }
+
+    @Test
+    fun `内存收下的话同步交给落盘而重复的那条不进库`() {
+        val store = RecordingStore()
+        val log = ConversationLog(cap = 3, store = store)
+        for (i in 0 until 4) log.record(up("第 $i 句", id = "t-$i"))
+        assertEquals(4, store.put.size, "四句都得进过库（挤出去的是内存的事，库不删）")
+        // 圆屏按两下：重复那条内存丢掉，库里也不能多一条
+        assertNull(log.record(up("第 3 句", id = "t-3")))
+        assertEquals(4, store.put.size)
+        // 闸改掉的话，落库的是改后那句 —— 库里不该有越界原文
+        val gated = ConversationLog(guard = { "改后" }, store = store)
+        gated.record(up("原文"))
+        assertEquals("改后", store.put.last().text)
+    }
+
+    @Test
+    fun `seed 回灌直接出现在时间线里并且不丢去重键`() {
+        val store = RecordingStore()
+        store.put(Turn(TurnFrom.Me, "昨天的问", ReplySource.LocalRule, turnId = "t-1", via = DialogOrigin.screen))
+        store.put(Turn(TurnFrom.Ai, "昨天的答", ReplySource.LocalRule, turnId = "t-1", via = DialogOrigin.phone))
+        val log = ConversationLog(cap = 3, store = store, seed = store.loadRecent(3))
+        assertEquals(listOf("昨天的问", "昨天的答"), log.turns.value.map { it.text })
+        // 回灌进来的 turnId 同样占去重键：同一帧重放（断线重连）不许变成两条
+        assertNull(log.record(up("昨天的问", id = "t-1")))
+        assertEquals(2, log.size)
+    }
+
+    @Test
+    fun `清空的时候库也跟着清而落盘失败不许把话从时间线挤掉`() {
+        val store = RecordingStore()
+        val log = ConversationLog(store = store)
+        log.record(up("一句"))
+        log.clear()
+        assertEquals(1, store.cleared)
+        // store 抛异常 = 落盘坏了，不是"这句话没发生过"：内存照收，只是一条日志
+        val broken = object : TurnStore {
+            override fun put(turn: Turn) = throw IllegalStateException("盘满了")
+            override fun loadRecent(cap: Int) = emptyList<Turn>()
+            override fun clear() = throw IllegalStateException("盘满了")
+        }
+        val log2 = ConversationLog(store = broken)
+        val kept = log2.record(up("还能说话"))
+        assertNotNull(kept)
+        assertEquals(1, log2.size)
+    }
 }

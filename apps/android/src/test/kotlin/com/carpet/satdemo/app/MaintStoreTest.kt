@@ -23,7 +23,9 @@ import org.junit.runner.RunWith
 class MaintStoreTest {
 
     private fun store() = MaintStore(
-        ApplicationProvider.getApplicationContext<Context>().getSharedPreferences("t-${System.nanoTime()}", 0),
+        MaintStore.dataStoreFor(
+            ApplicationProvider.getApplicationContext<Context>().cacheDir.resolve("t-${System.nanoTime()}"),
+        ),
     )
 
     @Test
@@ -47,13 +49,13 @@ class MaintStoreTest {
     @Test
     fun `what the owner typed is still there after the store is rebuilt`() {
         val a = store()
-        val prefs = ApplicationProvider.getApplicationContext<Context>()
-            .getSharedPreferences("t-shared", 0)
-        val withPrefs = MaintStore(prefs)
+        val dir = ApplicationProvider.getApplicationContext<Context>()
+            .cacheDir.resolve("t-shared-${System.nanoTime()}")
+        val withPrefs = MaintStore(MaintStore.dataStoreFor(dir))
         withPrefs.setFilterDays(500)
         withPrefs.setHasChild(true)
-        assertEquals(500, MaintStore(prefs).filterDays())
-        assertTrue(MaintStore(prefs).hasChild())
+        assertEquals(500, MaintStore(MaintStore.dataStoreFor(dir)).filterDays())
+        assertTrue(MaintStore(MaintStore.dataStoreFor(dir)).hasChild())
         // 孩子那一条会改变判据的严重度，所以这个开关不是装饰
         val kid = withPrefs.suggest(withPrefs.board(null, null, false)).single { it.rule == "cabin.filter" }
         assertEquals("kids", kid.sceneKey)
