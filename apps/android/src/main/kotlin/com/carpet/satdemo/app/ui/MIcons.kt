@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Sos
 import androidx.compose.material.icons.outlined.SupportAgent
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Task
 import androidx.compose.material.icons.outlined.Today
 import androidx.compose.material.icons.outlined.Visibility
@@ -120,6 +121,9 @@ object MIcons {
     val growth = Icons.Outlined.Nature
     val checkin = Icons.Outlined.Today
     val task = Icons.Outlined.Task
+
+    /** 相册推图（classes.jar 里核对过：outlined/ImageKt 存在） */
+    val photo = Icons.Outlined.Image
 
     /** 展开/收起。箭头朝向就是"内容往哪走"：向下=还有东西要出来，向上=收回去 */
     val expand = Icons.Outlined.ExpandMore

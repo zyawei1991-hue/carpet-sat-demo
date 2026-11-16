@@ -423,6 +423,11 @@ class AppRuntime(private val host: Application) {
     val aiEndpoint: StateFlow<AiEndpoint> = _endpoint
 
     init {
+        // 屏报 photo 页自动推一组照片（11-11 §8.3）。推一次就停 —— 屏停在相册页上，
+        // 状态流每拍都发，不做去重会把同一张反复糊上去
+        scope.launch {
+            runtime.status.collect { onScreenPageReported(it.screenPage) }
+        }
         // Azure Speech F0（D13 正路）：region/key 从 BuildConfig 灌进 :core 的合成器。
         // 没配就是空串，AzureSpeech.configured 不过，NetVoice 自动跳过这条
         AzureSpeech.region = BuildConfig.AZURE_SPEECH_REGION
@@ -467,6 +472,41 @@ class AppRuntime(private val host: Application) {
         initialTone = VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)),
         initialFace = prefs.getString(KEY_VOICE_FACE, null),
     )
+
+    /**
+     * 相册推图（11-11 清单 §8.3）：屏报 photo 页时自动推、设置页可手动选图推。
+     * 照片从相册 URI 现读现压，不打包进 APK。
+     */
+    private val photoPush = PhotoPush(
+        server = { runtimeRef?.server },
+        log = { line -> runtimeRef?.log(line) },
+    )
+
+    /** 推一张相册照片。false = 屏不在线，调用方给可见反馈 */
+    fun pushPhoto(uri: android.net.Uri): Boolean = photoPush.push(host, uri)
+
+    /**
+     * 屏报 photo 页自动推一组。**只推一次**：屏停在相册页上，每条状态刷新都触发会
+     * 把同一张照片反复糊上去 —— 推过之后记下那张屏的 id，换屏或重进页面才重推。
+     */
+    fun onScreenPageReported(page: com.carpet.satdemo.core.protocol.ScreenPage?) {
+        if (page != com.carpet.satdemo.core.protocol.ScreenPage.photo) return
+        if (autoPushedTo) return
+        autoPushedTo = true
+        pendingAlbumPick?.let { uri ->
+            pushPhoto(uri)
+        } ?: runtime.log("圆屏翻到相册页 · 还没选过照片，去「我的」页选一张推上去")
+    }
+
+    private var autoPushedTo: Boolean = false
+    private var pendingAlbumPick: android.net.Uri? = null
+
+    /** 设置页选定的那张照片，屏翻到相册页时自动推 */
+    fun setAlbumPick(uri: android.net.Uri?) {
+        pendingAlbumPick = uri
+        autoPushedTo = false
+        uri?.let { pushPhoto(it) }
+    }
 
     /**
      * 对话的唯一一条接线：入账 → 该不该触发技能 → 答 → 回镜给圆屏。

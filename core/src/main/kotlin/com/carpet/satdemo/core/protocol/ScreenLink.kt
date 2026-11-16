@@ -151,6 +151,15 @@ enum class CommandType {
      * 实测 `armed=0` 一条上行都不发 —— 申报和实现分家比不申报更危险
      * （`protocol/screen-link.md` §上行音频通道）。
      */
+    /**
+     * v3 上的**第三条下行**（2026-11-16 加，同样不升档）：相册照片分块推给屏，
+     * args = {album_id, seq, total, fmt, b64}。`album_id` 标识一张照片（屏靠它判"缺号整张丢、
+     * 下一张换 id 重来"），`seq` 从 0 连续、`total` 是这张 JPEG 的总字节数，块 2048 字节 ——
+     * 照片没有实时节拍，块比语音大也行；组帧上限 3800 与 [audio_chunk] 同一条纪律。
+     * JPEG 从手机相册**现选现推，不打包进 APK**。屏没升到带 photo handler 的固件时
+     * 这一条被静默忽略 —— 正是加性修订要的失败方式。
+     */
+    photo_chunk,
     mic_chunk,
 }
 

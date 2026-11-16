@@ -1,5 +1,8 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.core.ai.PermissionTier
+import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.app.ui.viewmodel.MeAssistantUi
 import com.carpet.satdemo.app.ui.viewmodel.MeUiState
@@ -184,6 +188,7 @@ fun MeTab(
             }
         }
         AssistantSettings(vm, ready.assistant)
+        AlbumPushCard(app, ready.flags.acceptScreens)
         RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
@@ -227,6 +232,37 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
  * 没有一处告诉用户哪儿换了一件事。现在「AI 助手与模型」管配置，「它现在会做什么」管清单，
  * 中间那道缝就是这两件事的分界。
  */
+/**
+ * 相册推图（11-11 清单 §8.3 / B §5）：从手机相册现选一张推给圆屏的相册页。
+ * 照片不打包进 APK —— 每一张都是推的那一刻从相册现读现压的。
+ * 屏侧 JPEG 解码还在等固件：推过去没反应时先看 App 日志有没有"照片已推给圆屏"，
+ * 有 = App 这边通了，屏上不显示是固件还没跟上（老固件静默忽略，不掉线）。
+ */
+@Composable
+private fun AlbumPushCard(app: AppRuntime, acceptScreens: Boolean) {
+    // PickVisualMedia 不申请存储权限（Photo Picker 系统组件）；老系统退回 GetContent
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) app.setAlbumPick(uri)
+    }
+    InkCard(icon = MIcons.photo) {
+        CardTitle("圆屏相册", trailing = if (app.runtime.status.value.screenPage == ScreenPage.photo) "屏在相册页" else null)
+        Text(
+            "选一张手机相册里的照片推到圆屏轮播。照片现选现推，不占 App 的体积；圆屏翻到相册页时也会自动推最近选的这张。",
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
+        val screenOnline = app.runtime.status.value.clients > 0
+        Button(
+            onClick = {
+                pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            enabled = acceptScreens && screenOnline,
+            colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (screenOnline) "选照片推给圆屏" else "圆屏不在线") }
+    }
+}
+
 @Composable
 private fun AssistantSettings(vm: MeViewModel, s: MeAssistantUi) {
     InkCard(icon = MIcons.agent, tone = if (s.endpoint.configured) Tone.Sat else Tone.Neutral) {

@@ -195,6 +195,9 @@ class ScreenLinkServer(
     private fun deliverable(msg: ScreenMessage, ver: Int): Boolean = when {
         msg.t == MsgType.dialog -> ver >= 2
         msg.command?.cmd == CommandType.audio_chunk -> ver >= 3
+        // photo_chunk 同挂在 v3 的 command 上：老固件收到不认识的 cmd 只丢帧不断线，
+        // 这里过滤是"本来就收不到的连接别白送"，不是防掉线
+        msg.command?.cmd == CommandType.photo_chunk -> ver >= 3
         else -> true
     }
 
