@@ -70,5 +70,8 @@ class Heartbeat(
                 else ProactiveTip("dock.pair", "还没有圆屏连上来。先放开「允许圆屏接入」，再把圆屏编号加进白名单。")
             },
         )
+
+        /** 卫星链路那几条。家长和助手听这些只会困惑 —— 亲子态该说的是围栏和安全 */
+        val SATELLITE_RULE_IDS = setOf("eph.stale", "terminal.offline", "dock.waiting")
     }
 }

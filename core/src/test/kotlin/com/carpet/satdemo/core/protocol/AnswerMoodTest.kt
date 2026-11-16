@@ -39,4 +39,19 @@ class AnswerMoodTest {
     fun `没命中就说中性`() {
         assertEquals(UiEmotion.neutral, AnswerMood.of("已经记下了。"))
     }
+
+    /** §3：亲子/助手页不认卫星词表 —— 「离线」在那儿不是坏消息，是没在聊的事 */
+    @Test
+    fun `亲子页卫星词不表情`() {
+        assertEquals(false, AnswerMood.satelliteWords(ScreenPage.kids))
+        assertEquals(false, AnswerMood.satelliteWords(ScreenPage.avatar))
+        assertEquals(true, AnswerMood.satelliteWords(ScreenPage.vehicle))
+        assertEquals(true, AnswerMood.satelliteWords(null))
+        assertEquals(UiEmotion.neutral, AnswerMood.of("卫星终端离线了。", satelliteWords = false))
+        assertEquals(UiEmotion.neutral, AnswerMood.of("过境了，可以发。", satelliteWords = false))
+        // 真正的安全话还是要有脸：越界在亲子页照样紧张
+        assertEquals(UiEmotion.worried, AnswerMood.of("已经越界了。", satelliteWords = false))
+        // 屏没报页时照旧全表
+        assertEquals(UiEmotion.sad, AnswerMood.of("卫星终端离线了。", satelliteWords = true))
+    }
 }

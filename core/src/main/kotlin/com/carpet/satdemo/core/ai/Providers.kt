@@ -106,8 +106,9 @@ interface AiProvider {
      */
     val lastError: String? get() = null
 
-    /** 拿结构化事实 + 对话历史，生成最后那句话。失败要返回 null，不许抛到 UI 线程 */
-    suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String?
+    /** 拿结构化事实 + 对话历史，生成最后那句话。失败要返回 null，不许抛到 UI 线程。
+     *  [persona] 决定 SYSTEM 身份和答句口径（车载守护 / 亲子 / 屏上助手） */
+    suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona = Persona.Guardian): String?
 }
 
 /** 本地话术器：把 Skill 自己那句结论原样说出来。**这是默认 provider**，所以断网、没 key 也能演示，但界面得标 */
@@ -115,7 +116,7 @@ class LocalRuleProvider : AiProvider {
     override val label = "本机规则"
     override val live = false
 
-    override suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String? = null
+    override suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona): String? = null
 }
 
 /**
@@ -168,7 +169,7 @@ class OpenAiCompatProvider(
         correctedBase = null
     }
 
-    override suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String? {
+    override suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona): String? {
         if (!endpoint.configured) {
             error = "地址 / 密钥 / 模型名少填了一项"
             return null
@@ -200,7 +201,7 @@ class OpenAiCompatProvider(
                     error = "地址形状不对：${endpoint.baseUrl}"
                     return@withContext null
                 }
-                val text = request(url, headers, facts, history, question)
+                val text = request(url, headers, facts, history, question, persona)
                 if (text != null) {
                     correctedBase = base.takeIf { it != normalizeBaseUrl(endpoint.baseUrl) }
                     return@withContext text
@@ -217,7 +218,7 @@ class OpenAiCompatProvider(
                 for (base in candidates) {
                     val respUrl = runCatching { URI.create(base + "/responses").toURL().toString() }
                         .getOrNull() ?: continue
-                    val viaResponses = requestResponses(respUrl, headers, facts, history, question)
+                    val viaResponses = requestResponses(respUrl, headers, facts, history, question, persona)
                     if (viaResponses != null) {
                         correctedBase = base.takeIf { it != normalizeBaseUrl(endpoint.baseUrl) }
                         return@withContext viaResponses
@@ -270,17 +271,18 @@ class OpenAiCompatProvider(
         facts: String,
         history: List<ChatTurn>,
         question: String,
+        persona: Persona,
     ): String? {
         var raw: String
         try {
-            raw = transport(url, body(facts, history, question, endpoint.disableThinking), headers)
+            raw = transport(url, body(facts, history, question, endpoint.disableThinking, persona), headers)
         } catch (e: HttpStatusException) {
             // 404/405 是路径口径不对，跟 thinking 那个字段没关系：去掉它重发只是白等一次
             shapeFailure = e.looksLikeWrongPath
             if (endpoint.disableThinking && e.code in 400..499 && !shapeFailure) {
                 // 网关嫌 thinking 字段：去掉再试一次，这次的结果（无论成败）才是最终答案
                 return try {
-                    val retry = transport(url, body(facts, history, question, false), headers)
+                    val retry = transport(url, body(facts, history, question, false, persona), headers)
                     accept(retry)
                 } catch (again: HttpStatusException) {
                     shapeFailure = again.looksLikeWrongPath
@@ -316,10 +318,11 @@ class OpenAiCompatProvider(
         facts: String,
         history: List<ChatTurn>,
         question: String,
+        persona: Persona,
     ): String? {
         var raw: String
         try {
-            raw = transport(url, responsesBody(facts, history, question), headers)
+            raw = transport(url, responsesBody(facts, history, question, persona), headers)
         } catch (e: HttpStatusException) {
             shapeFailure = e.looksLikeWrongPath
             error = "Responses 接口 HTTP ${e.code}：${e.snippet.ifBlank { "网关没给正文" }}"
@@ -339,9 +342,9 @@ class OpenAiCompatProvider(
         return text
     }
 
-    private fun responsesBody(facts: String, history: List<ChatTurn>, question: String): String = buildString {
+    private fun responsesBody(facts: String, history: List<ChatTurn>, question: String, persona: Persona): String = buildString {
         append("{\"model\":\"").append(escape(endpoint.model)).append("\",")
-        append("\"instructions\":\"").append(escape("$SYSTEM\n已知事实（只有这些是真的，缺的就说缺）：\n$facts")).append("\",")
+        append("\"instructions\":\"").append(escape("${systemOf(persona)}\n已知事实（只有这些是真的，缺的就说缺）：\n$facts")).append("\",")
         append("\"input\":[")
         var has = false
         history.takeLast(6).forEach { h ->
@@ -383,12 +386,13 @@ class OpenAiCompatProvider(
         else -> "请求失败：${e.javaClass.simpleName}${e.message?.let { " · $it" } ?: ""}"
     }
 
-    private fun body(facts: String, history: List<ChatTurn>, question: String, thinking: Boolean): String = buildString {
+    private fun body(facts: String, history: List<ChatTurn>, question: String, thinking: Boolean, persona: Persona): String = buildString {
         append("{\"model\":\"").append(escape(endpoint.model)).append("\",")
-        // 实测 20 字答句 completion 就要 158 token（145 是思考草稿），给 120 会截断漏推理，250 起步才稳
-        append("\"max_tokens\":250,")
+        // 长答按句分段念（owner 11-16 拍的折中）：250 会把长答截成半句，抬到 900 给"念完一段"留量；
+        // 短答照旧 —— 口径由 SYSTEM 压着，不是靠 token 上限压
+        append("\"max_tokens\":900,")
         append("\"temperature\":0.2,\"messages\":[")
-        append("{\"role\":\"system\",\"content\":\"").append(escape(SYSTEM)).append("\"},")
+        append("{\"role\":\"system\",\"content\":\"").append(escape(systemOf(persona))).append("\"},")
         append("{\"role\":\"system\",\"content\":\"").append(escape("已知事实（只有这些是真的，缺的就说缺）：\n$facts")).append("\"}")
         history.takeLast(6).forEach { h ->
             append(",{\"role\":\"").append(h.role).append("\",\"content\":\"").append(escape(h.content)).append("\"}")
@@ -403,14 +407,33 @@ class OpenAiCompatProvider(
         /**
          * 系统提示词里两条是硬要求：**不许编数字**（数字只能来自 facts），**SOS 一类不可逆动作不许替用户决定**
          * （§6.1 文案红线同样约束模型 —— 它也不能说"已送达"）。
-         * 一句 ≤30 字是 2026-11-11 拍的口径：答案要进语音，长句既慢又烧 token，屏侧 2 MB 缓冲也放不下。
+         *
+         * 分场景（owner 2026-11-15：「对话应该是在不同场景下要有不同的内容」）：
+         * 身份跟着 [Persona] 走；长度口径从"≤30 字"放宽成"尽量短、别超过三句" ——
+         * 11-11 那个 30 字硬上限把长答压成半句，owner 拍板改成按句分段念。
+         * 卫星话术只在守护人格里给，亲子/助手态提卫星只会把每个话题都绕回过顶。
          */
-        private const val SYSTEM =
-            "你是车宠守护助手。用一句话回答，不超过30个字，直接给结论，不要解释推理过程。" +
-                "规则：只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
-                "不得声称求救、消息已送达或平台已受理，除非事实里明确写了已交核心网；" +
-                "不可逆动作（SOS、远程熄火、扣费）只能提示用户自己在界面上确认，不能替用户执行；" +
-                "中文，像设备在说话，不像客服。"
+        private fun systemOf(persona: Persona): String = when (persona) {
+            Persona.Guardian ->
+                "${persona.identity}。回答尽量短，能一句说清就一句，别超过三句。" +
+                    "规则：只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
+                    "不得声称求救、消息已送达或平台已受理，除非事实里明确写了已交核心网；" +
+                    "不可逆动作（SOS、远程熄火、扣费）只能提示用户自己在界面上确认，不能替用户执行；" +
+                    "卫星链路的事只在用户问起或真有守护事件时说，别把每个话题都绕回卫星；" +
+                    "中文，像设备在说话，不像客服。"
+            Persona.Family ->
+                "${persona.identity}。说话温暖、亲切，可以稍微俏皮，别超过三句。" +
+                    "规则：只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
+                    "育儿问题给通用的温和建议，不诊断不下结论；" +
+                    "不谈卫星、链路、过顶这些设备话题；" +
+                    "中文，像家人在说话。"
+            Persona.Assistant ->
+                "${persona.identity}。回答尽量短，能一句说清就一句，别超过三句。" +
+                    "规则：只根据给出的已知事实回答，缺事实就直说不知道，绝不编数字或状态；" +
+                    "通用问答助手，不知道就说不知道；" +
+                    "不主动谈卫星链路；" +
+                    "中文，自然口语。"
+        }
 
         val json = Json { ignoreUnknownKeys = true }
 

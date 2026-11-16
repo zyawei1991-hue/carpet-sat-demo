@@ -14,6 +14,14 @@ data class Skill(
     /** 命中即路由。全小写比对，中文关键词不做分词 —— 表里写什么就找什么 */
     val keywords: List<String>,
     val needs: PermissionTier,
+    /**
+     * 权限不够时的那句话。默认 null = 沿用 [handle]（SOS 这类 handle 本身不出网、
+     * 只是解释"我不替你按"的技能，被拦时说同一句正合适）。
+     * **出网的技能必须给这一条**：被拦的那条连取数都不许做 —— 没开「读云端」就
+     * 拿定位去问第三方，等于权限档白设。
+     * 放在 [handle] 前面是为了让各技能的尾随 lambda 仍落在 [handle] 上。
+     */
+    val deniedLine: ((SkillContext) -> String)? = null,
     val handle: (SkillContext) -> SkillResult,
 )
 
@@ -217,6 +225,54 @@ object BuiltinSkills {
                         else -> if (c.fenceInside) "在围栏内。" else "已经越界了。"
                     },
                 )
+            },
+
+            // §7：问天气。出网（Open-Meteo，无 key）须显式开「读云端」，没开就诚实说去哪开，不编。
+            // 取数在 handle 里当场做（Weather 自带 30 分钟缓存），结果写进 fields 给模型压成一句话；
+            // 没定位/没网回的都是"没拿到"这个事实本身 —— 数字只能来自 Open-Meteo 的返回
+            Skill(
+                id = "weather",
+                title = "明天天气",
+                keywords = listOf("天气", "下雨", "气温", "冷不冷", "热不冷", "冷吗", "热吗", "带伞", "多少度"),
+                needs = PermissionTier.ReadCloud,
+                deniedLine = { "天气要出网查，得先在设置里把 AI 权限开到「读云端」—— 开之前我不拿你的定位去问外面。" },
+            ) { c ->
+                val lat = c.gnssLat
+                val lon = c.gnssLon
+                if (lat == null || lon == null) {
+                    SkillResult(
+                        skillId = "weather",
+                        intent = "天气查询",
+                        fields = mapOf("located" to "false"),
+                        line = "现在没有定位，天气报不准 —— 我不猜城市。",
+                    )
+                } else {
+                    val f = Weather.tomorrow(lat, lon, System.currentTimeMillis())
+                    if (f == null) {
+                        SkillResult(
+                            skillId = "weather",
+                            intent = "天气查询",
+                            fields = mapOf("located" to "true", "fetched" to "false"),
+                            line = "天气这会儿没取到（没网或者服务没回），等一会儿再问。",
+                        )
+                    } else {
+                        SkillResult(
+                            skillId = "weather",
+                            intent = "天气查询",
+                            fields = mapOf(
+                                "located" to "true",
+                                "fetched" to "true",
+                                "tomorrow_weather" to f.codeCn,
+                                "tomorrow_tmax_c" to f.tMaxC.toString(),
+                                "tomorrow_tmin_c" to f.tMinC.toString(),
+                                "tomorrow_precip_prob" to f.precipProb.toString(),
+                            ),
+                            // 模型在时这句会被按现有口径重说一遍；模型不在时技能话术本身就是完整答案
+                            line = "明天${f.codeCn}，${f.tMinC.toInt()}~${f.tMaxC.toInt()}℃" +
+                                (if (f.precipProb >= 30) "，降水概率 ${f.precipProb}%，记得带伞。" else "，降水概率 ${f.precipProb}%。"),
+                        )
+                    }
+                }
             },
 
             // 亲子页那一问：「娃在屏上说了啥」。**它读的是手机那份对话记录** ——

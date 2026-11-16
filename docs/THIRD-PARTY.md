@@ -51,12 +51,35 @@
 
 ---
 
+## Room（`apps/android/build.gradle.kts`，`androidx.room:room-runtime/room-ktx/room-compiler:2.6.1`）
+
+| 项 | 值 |
+|---|---|
+| 上游 | [androidx room](https://developer.android.com/jetpack/androidx) |
+| 上游许可 | Apache-2.0 |
+| 我们的用法 | 对话台账（`TurnDatabase.kt`）落盘，2026-11-14 引入；KSP 注解处理（`1.9.24-1.0.20`，前半段必须跟 Kotlin 版本对齐） |
+| 性质 | Maven 坐标直接引依赖，不改其源码；只住在 app 模块，`:core` 只见 `TurnStore` 接缝、simulator 不接 |
+
+---
+
+## DataStore（`apps/android/build.gradle.kts`，`androidx.datastore:datastore-preferences:1.1.1`）
+
+| 项 | 值 |
+|---|---|
+| 上游 | [androidx datastore](https://developer.android.com/jetpack/androidx) |
+| 上游许可 | Apache-2.0 |
+| 我们的用法 | `MaintStore` 的 5 个维护配置键落盘（`maint_prefs.preferences_pb`），替代 SharedPreferences，2026-11-15 引入 |
+| 性质 | Maven 坐标直接引依赖，不改其源码；MaintStore 构造时快照 + 写走 runBlocking，对外同步接口不变 |
+
+---
+
 ## App 侧候选开源依赖（2026-11-14，仅评估，尚未引入）
 
 App 侧地基件调研的完整方案见 `docs/APP-OPENSOURCE-BASICS.md`。此条先记账：
 
 - ~~square/okhttp~~ — **已引入**，见上一节
-- [androidx room / datastore](https://developer.android.com/jetpack/androidx) — Apache-2.0，对话台账落盘 + 替换 SharedPreferences
+- ~~androidx room~~ — **已引入**，见上一节
+- ~~androidx datastore~~ — **已引入**，见上一节
 - [ehsannarmani/ComposeCharts](https://github.com/ehsannarmani/ComposeCharts) — Apache-2.0，SOS 倒计时环
 - [patrykandpatrick/vico](https://github.com/patrykandpatrick/vico) — Apache-2.0，能耗/里程曲线
 - [pushpalat/JetLime](https://github.com/pushpalat/JetLime) — MIT，成长时间轴

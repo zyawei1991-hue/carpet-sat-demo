@@ -541,7 +541,8 @@ class DemoRuntime(
         if (d.dir == DialogDir.down) {
             lastDialogDownMs = clockMs()
             // 脸跟着这句话走。在这里读，是因为手机打的字和屏问出来的答都从这一个口子下去
-            dialogMood = AnswerMood.of(d.text)
+            // 卫星词表按屏报的页滤：亲子/助手页上「过境了」「离线」不是人家在聊的事（§3）
+            dialogMood = AnswerMood.of(d.text, satelliteWords = AnswerMood.satelliteWords(screenPage))
             log("答句表情 → ${dialogMood?.name}")
         }
         // action 只许挂在答句上。上行那句是屏自己说出来的话，让它带着"把我自己挪到哪一页"

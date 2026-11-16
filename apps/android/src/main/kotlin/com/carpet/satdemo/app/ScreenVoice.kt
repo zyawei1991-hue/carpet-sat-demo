@@ -159,6 +159,18 @@ class ScreenVoice(
     /** 同一个原因只写一次日志：答句是一句接一句来的，每句都刷一条会把现场日志冲掉 */
     private var lastGate: String? = null
 
+    /**
+     * §4 长答按句分段念：**同一轮**的断点。
+     *
+     * 固件那边（`carpet_audio.c` 的 `feed()`）只认"同 turn_id 下 seq 从上次断的地方接着数，
+     * total 一直是整轮的字节数"。第二句的 seq 重新从 0 数，整段会被当成乱序直接丢掉；
+     * 每句各报各的字节数，第一句播到一半就被判成"收齐了"。所以这两格必须跨句活着，
+     * 新一轮（[speak] 换了 turnId）就归零。
+     */
+    private var turnSeq: String? = null
+    private var nextSeq = 0
+    private var turnBytes = 0
+
     private fun gate(line: String) {
         _issue.value = line
         if (lastGate != line) {
@@ -321,10 +333,38 @@ class ScreenVoice(
         // owner 规矩（2026-11-11）：起头在圆屏的那一轮**只有圆屏念**，手机一声不出，
         // 也不受「发声设备」设置影响 —— 屏上对话时人就在屏边，手机兜底等于在另一个人耳边又念一遍
         if (origin == com.carpet.satdemo.core.protocol.DialogOrigin.screen) {
-            worker.execute { runCatching { synthesizeAndSend(turnId, body, screenOnly = true) }.onFailure { log("屏幕语音失败：${it.message}") } }
+            worker.execute { runCatching { synthesizeAndSend(turnId, body, screenOnly = true, origin = origin) }.onFailure { log("屏幕语音失败：${it.message}") } }
             return
         }
-        worker.execute { runCatching { synthesizeAndSend(turnId, body) }.onFailure { log("屏幕语音失败：${it.message}") } }
+        worker.execute { runCatching { synthesizeAndSend(turnId, body, origin = origin) }.onFailure { log("屏幕语音失败：${it.message}") } }
+    }
+
+    /**
+     * §4（owner 2026-11-15 拍板的妥协案）：长答**按句切**，不攒整轮。
+     *
+     * 真模型的答句动辄七八十字，整段合成要十几秒，车主听见的是长久的沉默；
+     * 按句切之后第一句几秒内就开口，后面的句子在第一句播放期间陆续补上。
+     * 屏那侧同一 `turn_id` 接续 seq（[AudioChunks.commands] 的 seqStart/totalBytes），
+     * 手机喇叭那侧 QUEUE_ADD 顺序排 —— 两条路都不会把句子顺序念乱。
+     */
+    internal fun splitSentences(text: String): List<String> {
+        val out = mutableListOf<String>()
+        val buf = StringBuilder()
+        text.forEach { ch ->
+            buf.append(ch)
+            if (ch in "。！？；\n") {
+                val s = buf.toString().trim()
+                if (s.isNotEmpty()) out += s
+                buf.clear()
+            }
+        }
+        buf.toString().trim().takeIf { it.isNotEmpty() }?.let { out += it }
+        // 太碎的尾句并回前一句，别让「好的。」单独占一轮合成
+        if (out.size >= 2 && out.last().length <= 3) {
+            out[out.size - 2] = out[out.size - 2] + out.last()
+            out.removeAt(out.size - 1)
+        }
+        return out
     }
 
     /**
@@ -478,34 +518,93 @@ class ScreenVoice(
      * 两条去处同源 —— 屏连着且 ≥v3 就解码成 16k PCM 推过去，否则就在本机播同一个 MP3。
      * 屏和手机喇叭因此念的是**同一句、同一个声音**，不会再出现"屏上是一种音色、手机是另一种"。
      */
-    private fun synthesizeAndSend(turnId: String, text: String, screenOnly: Boolean = false) {
+    private fun synthesizeAndSend(
+        turnId: String,
+        text: String,
+        screenOnly: Boolean = false,
+        origin: com.carpet.satdemo.core.protocol.DialogOrigin? = null,
+    ) {
+        // §4：一句一句来。第一句先走完整条路（定落点、报 issue），后面的句子照同一个落点补上。
+        // 遇到这轮拿不准的句子就停：后半句 seq 接不上，屏会整段丢，比只念半句的错更难解释
+        val parts = splitSentences(text)
+        var spoken = 0
+        var stop = false
+        parts.forEachIndexed { i, part ->
+            if (stop) return@forEachIndexed
+            runCatching { synthesizeOne(turnId, part, screenOnly, origin, first = i == 0, spokenBytesSoFar = spoken) }
+                .onFailure { log("屏幕语音失败（第 ${i + 1}/${parts.size} 句）：${it.message}") }
+                .onSuccess { sent ->
+                    if (sent == null) stop = true
+                    else spoken += sent
+                }
+        }
+    }
+
+    /**
+     * 合成并送出一**句**。返回 null = 这句没能推给屏（路由失败/切块失败），调用方必须停；
+     * 返回正数 = 这句计入整轮音频的字节数，下一句的 total 要把它算进去。
+     * 网络这条路自己在本机放音的情况也返回字节数 —— 那份 PCM 本来就是同一段声音，
+     * 屏这边只要真收到了，断句账就得记下去。
+     */
+    private fun synthesizeOne(
+        turnId: String,
+        text: String,
+        screenOnly: Boolean,
+        origin: com.carpet.satdemo.core.protocol.DialogOrigin?,
+        first: Boolean,
+        spokenBytesSoFar: Int,
+    ): Int? {
+        // 新一轮：断点归零。同一轮（含一句拆出的各段、试听后的追问）接着数
+        if (turnSeq != turnId) {
+            turnSeq = turnId
+            nextSeq = 0
+            turnBytes = 0
+        }
+        val seqStart = nextSeq
+        val bytesBefore = turnBytes
+
         val link = server()
         val screenReady = link != null && link.audioReady
 
-        val result = playNetAnswer(turnId, text, link, screenOnly)
+        // 每句都打一条路由快照：现场"声音从哪出"对不上时，这一行就是第一现场
+        log(
+            "屏幕语音：路由 answerDevice=${_screenDevice.value.name} screenOnly=$screenOnly " +
+                "origin=$origin audioReady=$screenReady negotiated=${link?.negotiatedVersion ?: "-"}"
+        )
+
+        val result = playNetAnswer(turnId, text, link, screenOnly, seqStart, bytesBefore)
         if (result != null) {
+            // 这句哪儿都没响：后半句没有接着说的账本了，整轮停在这里
+            if (result.where == NetResult.Nothing) return null
+            if (result.bytes > 0) {
+                nextSeq = seqStart + result.frames
+                turnBytes = bytesBefore + result.bytes
+            }
             // 必须分清"手机响了"和"屏收到了"：解码失败时只有手机在响，屏的缓冲里一个字都没有。
             // 只看手机这一侧就清 issue，下次拔掉手机才发现屏从来没说过话
-            _issue.value = when (result) {
+            _issue.value = when (result.where) {
                 NetResult.ScreenOnly -> null
                 NetResult.PhoneOnly ->
-                    if (screenReady) "这句只在这台手机上念了，圆屏那边暂时放不出来"
+                    // 用户主动选"这台手机"= 预期落点，不是问题，别挂红字；
+                    // 只有"屏该接但没接住"（选了圆屏却降级）才需要解释
+                    if (answerHere() && _screenDevice.value == ScreenDevice.phone) null
+                    else if (screenReady) "这句只在这台手机上念了，圆屏那边暂时放不出来"
                     else whyNot(link)
                 NetResult.Nothing -> "这句没念出来，可以再问一次"
             }
             if (_issue.value == null) lastGate = null
             else if (lastGate != _issue.value) { lastGate = _issue.value; log("屏幕语音：${_issue.value}") }
-            return
+            return result.bytes
         }
 
         // 网络不通，退本机引擎
         if (unusable.get() || !latch.await(engineWaitMs, TimeUnit.MILLISECONDS)) {
             gate("这句没念出来。先连上能上网的 Wi-Fi 再问一次；还是没声的话，去手机设置里装一个中文语音包")
-            return
+            return null
         }
         val engine = tts ?: run {
             gate("这句没念出来，这台手机上没有可用的语音引擎")
-            return
+            return null
         }
 
         // 送不到屏（没连 / v2）就先在本机念。合成成 PCM 再发是给屏的路径，
@@ -514,7 +613,17 @@ class ScreenVoice(
             applyTone()
             speakHere(engine, text)
             gate(whyNot(link))
-            return
+            return null
+        }
+
+        // 落点跟 playNetAnswer 同一条规矩：用户选了"这台手机"，屏在线也不许往屏推
+        if (answerHere()) {
+            applyTone()
+            speakHere(engine, text)
+            _issue.value = null
+            lastGate = null
+            log("屏幕语音：本机引擎念这一句（owner 选的这台手机）")
+            return 0
         }
 
         // 换过引擎之后旧实例上的音高会丢，这里每句都重设一次（开销可忽略）
@@ -537,43 +646,46 @@ class ScreenVoice(
             if (ret != TextToSpeech.SUCCESS) {
                 speakHere(engine, text)
                 gate("这句没能交给圆屏去念，先在手机上念了")
-                return
+                return null
             }
             if (!done.await(20, TimeUnit.SECONDS)) {
                 speakHere(engine, text)
                 gate("这句念得太慢，先在手机上念了")
-                return
+                return null
             }
             if (!file.exists() || file.length() == 0L) {
                 speakHere(engine, text)
                 gate("这句没合成出来，先在手机上念了")
-                return
+                return null
             }
             val pcm = AudioChunks.wavToPcm16k(file.readBytes())
             if (pcm == null) {
                 speakHere(engine, text)
                 gate("这句的音频圆屏用不了，先在手机上念了")
-                return
+                return null
             }
             // 合成期间屏可能刚断：执行器排了一两秒，这一步必须重新读一次连接
             val live = server()
             if (live == null || !live.audioReady) {
                 speakHere(engine, text)
                 gate("圆屏刚刚断开了，这句先在手机上念了")
-                return
+                return null
             }
             _source.value = "system"
-            val frames = AudioChunks.commands(turnId, pcm, System.currentTimeMillis())
+            val frames = AudioChunks.commands(turnId, pcm, System.currentTimeMillis(), seqStart, bytesBefore + pcm.size)
             if (frames.isEmpty()) {
                 speakHere(engine, text)
                 gate("这句有点长，圆屏一次放不下，先在手机上念了")
-                return
+                return null
             }
             live.broadcast(frames)
+            nextSeq = seqStart + frames.size
+            turnBytes = bytesBefore + pcm.size
             // 这一句真送出去了：清掉上一次的原因，设置页上那行红字跟着消失
             _issue.value = null
             lastGate = null
             log("屏幕语音：${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
+            return pcm.size
         } finally {
             file.delete()
         }
@@ -582,13 +694,20 @@ class ScreenVoice(
     private enum class NetResult { ScreenOnly, PhoneOnly, Nothing }
 
     /**
+     * [NetResult] 的账本：[bytes] 是这次真的推给屏的 PCM 字节数（0 = 屏一个帧都没收到），
+     * [frames] 是推出去的 audio_chunk 块数。屏没收到时 bytes=0，调用方必须停 ——
+     * 后半句的 seq 会接在一段屏根本没收到的账上。
+     */
+    private data class NetVoiceResult(val where: NetResult, val bytes: Int, val frames: Int)
+
+    /**
      * 网络合成分支。拿到 MP3 后按**发声落点**决定去处：
      * - [screenOnly]（起头在圆屏，或手机起头但用户选了圆屏）：只推屏，本机一声不出；
      * - 本机落点：只在手机放，**屏一个音频帧都不收**（一句 27 字 ≈ 75 帧 / 262 KB，不该为
      *   "反正屏也听不见"往链路上灌）；
      * - 两个都不落点才退回旧行为（不会发生：设置只有圆屏/这台手机两档）。
      *
-     * 返回值：null = 网络这条整个不通（调用方退本机引擎）；[NetResult] 说清到底谁听见了 ——
+     * 返回值：null = 网络这条整个不通（调用方退本机引擎）；[NetVoiceResult] 说清到底谁听见了 ——
      * "手机响了"和"屏收到了"是两件事，混成一个布尔就把"解码失败"报成成功。
      */
     private fun playNetAnswer(
@@ -596,11 +715,15 @@ class ScreenVoice(
         text: String,
         link: ScreenLinkServer?,
         screenOnly: Boolean,
-    ): NetResult? {
+        seqStart: Int,
+        bytesBefore: Int,
+    ): NetVoiceResult? {
         val mp3 = NetVoice.fetch(text, _tone.value) ?: return null
         // 这一句的声音来源此刻就定了：后面不管送屏还是本机放，都是网络合成那一份
         _source.value = NetVoice.lastSource
         var screenGot = false
+        var sentBytes = 0
+        var sentFrames = 0
 
         // 落点此刻就定死：屏起头=屏；手机起头=按设置，但屏没连/没升 v3 落回手机
         val wantScreen = !screenOnly && !answerHere()
@@ -611,7 +734,7 @@ class ScreenVoice(
             } else {
                 // commands() 超帧上限会抛：那是一句"编不进 4096"的硬错，别让它把整句吞掉
                 val frames = runCatching {
-                    AudioChunks.commands(turnId, pcm, System.currentTimeMillis())
+                    AudioChunks.commands(turnId, pcm, System.currentTimeMillis(), seqStart, bytesBefore + pcm.size)
                 }.onFailure {
                     log("屏幕语音：语音切块失败（${it.message}），这句只在本机响")
                 }.getOrDefault(emptyList())
@@ -619,6 +742,8 @@ class ScreenVoice(
                     link.broadcast(frames)
                     log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
                     screenGot = true
+                    sentBytes = pcm.size
+                    sentFrames = frames.size
                 }
             }
         }
@@ -650,10 +775,9 @@ class ScreenVoice(
             }
         }
         return when {
-            screenGot -> NetResult.ScreenOnly
-            phoneGot -> NetResult.PhoneOnly
-            wantScreen -> NetResult.Nothing
-            else -> NetResult.Nothing
+            screenGot -> NetVoiceResult(NetResult.ScreenOnly, sentBytes, sentFrames)
+            phoneGot -> NetVoiceResult(NetResult.PhoneOnly, 0, 0)
+            else -> NetVoiceResult(NetResult.Nothing, 0, 0)
         }
     }
 

@@ -4,6 +4,8 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     kotlin("android")
+    // Room 注解处理。KSP 版本锁在根 build.gradle.kts，跟 Kotlin 1.9.24 配对
+    id("com.google.devtools.ksp")
 }
 
 /**
@@ -20,14 +22,13 @@ plugins {
 android {
     namespace = "com.carpet.satdemo.app"
     compileSdk = 34
-
     defaultConfig {
         applicationId = "com.carpet.satdemo.app"
         // 星历 SDK 要 26（基础通信 SDK 只要 24），装到 24/25 上是 native 库起不来，不是少个功能
         minSdk = 26
         targetSdk = 34
-        versionCode = 12910
-        versionName = "1.29.1"
+        versionCode = 12920
+        versionName = "1.29.2"
 
         // 星历 aar 只带 arm64-v8a 的 libdecodeutil.so。真机都是 arm64，
         // 但别在这里加 abiFilters 之外的假设：换了 SoC 就得回来改
@@ -143,6 +144,15 @@ dependencies {
     implementation("io.reactivex.rxjava3:rxjava:3.1.12")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // 对话台账落盘（APP-OPENSOURCE-BASICS.md §2，THIRD-PARTY.md 有记账）。
+    // room-ktx 的 suspend DAO 扩展不缺它也编得过，但 loadRecent 走 Flow 的口径要它，一并声明
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+
+    // 配置键值落盘（MaintStore 的 SharedPreferences 退役，§2，THIRD-PARTY.md 有记账）
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     // §5.2 选型：Compose + Material 3。BOM 统一版本，别在单个 artifact 上写版本号（写了也不生效）
     implementation(platform("androidx.compose:compose-bom:2024.05.00"))
