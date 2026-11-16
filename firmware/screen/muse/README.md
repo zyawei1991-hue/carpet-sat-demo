@@ -30,9 +30,10 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 36 个文件、7343 行新增 / 98 行删，其中一份是 267,276 字节的字库
-  （`muse-carpet.patch`，12,280 行 / 663,730 字节，`git diff --binary` 打的，字库在里面是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-16（星轨守护钟面这一版）实读的。
+- 我们的全部改动 = 37 个文件、7296 行新增 / 98 行删，两份是二进制素材：267,276 字节的字库
+  和 445,568 字节的星轨钟面底图（`muse-carpet.patch`，13,751 行 / 763,615 字节，`git diff --binary` 打的，
+  两份二进制在里面都是 base85 段。）
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-16（星轨底图这一版）实读的。
   下面逐文件表的首列数字这一轮也按 `git diff --numstat` 全表重读了一遍（往轮只改总数没改表，有过漂移）。
   **划动「完全不可用」这一轮（11-14）**：台架四方向判定引擎 + 全部互斥闸（熄屏/SOS/控件/对话）都称过是好的，
   `>touch` 也回读真触摸 indev 解析得到（`type=1 mode=1`，POINTER/TIMER）。台架不走 indev，唯一没称过的就是
@@ -90,10 +91,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   （下面每一行的两个数是实读的「新增行数 + / 删除行数 -」，只写一个数的是整份新文件；
   上一版这张表用的是 diffstat 那一列合成数，和 5291/86 对不上，从这一轮起改成分开写）
-  esp32/components/muse/CMakeLists.txt       |  29 + /   1 -   (11-12 唤醒词：carpet_wake.c 进 srcs + **按 Kconfig 分叉**的 `espressif__esp-sr` 进 PRIV_REQUIRES（它是带 rule 的托管组件，无条件写会让别的板子 configure 阶段就找不到组件）；原有：+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行)
+  esp32/components/muse/CMakeLists.txt       |  33 + /   1 -   (11-12 唤醒词：carpet_wake.c 进 srcs + **按 Kconfig 分叉**的 `espressif__esp-sr` 进 PRIV_REQUIRES（它是带 rule 的托管组件，无条件写会让别的板子 configure 阶段就找不到组件）；原有：+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行 + 11-16 星轨底图：embed 里 `carpet/carpet_clock_bg.rgb565` 那行)
   esp32/components/muse/Kconfig              |  30 + /   1 -   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
   esp32/components/muse/idf_component.yml    |  10 +   (11-12 唤醒词新入列：`espressif/esp-sr` 钉死 `==2.4.7`，带 rule `if: "$CONFIG{MUSE_CARPET_CARDS} == True"`。**右边必须是 `True` 不是 `"y"`** —— MUSE_CARPET_CARDS 是真 bool，组件管理器的 `IfClause` 对 bool 只走 `eval_bool`（只认 True/False），写 `"y"` 当场 `Invalid boolean ""y"" in "if" clause` 构建失败；隔壁 mdns 那条能写 `"y"` 是因为 MUSE_VIDEO_MDNS 是 string。别的板子上这个符号不存在 ⇒ `MissingKconfigError` 被 manifest/models.py 吃掉 = 跳过这条依赖，不是报错，所以不影响任何非 carpet 构建)
-  esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 261748   (新，字库；页面上 28/22 两档的词表)
+  esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 267276   (新，字库；页面上 28/22 两档的词表)
+  esp32/components/muse/carpet/carpet_clock_bg.rgb565 | Bin 0 -> 445568   (新，11-16 星轨钟面整屏底图：472×472 RGB565 裸像素，比 466 每边大 3px 是给烧屏 ±3px 位移留的黑边；由本仓库 `tools/muse/` 那套路从 demo 底图烤出，存底副本在 `firmware/screen/muse/bg/`，构建前拷进 carpet/，缺文件 configure 当场失败)
   esp32/components/muse/carpet/carpet_lang_zh.c | 315 +   (新，「英文串→中文」那张表 **163 条**（实数，上一版这里写的 166 是旧数）+ `>zh` 的命中计数；11-12 唤醒词 +1 条 `Wake word`→`语音唤醒词`；11-08 补进 w.detail / h.detail 那两句整句，折叠那轮再加 `Muse 云`/那句说明/`已折叠`/`已展开`/`电池诊断` 五条，11-09 加 `熄屏后保持联网` + 那句说明两条)
   esp32/components/muse/carpet/carpet_lang_zh.h |  58 +   (新)
   esp32/components/muse/carpet/carpet_audio.c | 493 +   (新，v3 音频环：base64→PSRAM 线性缓冲→实时放音，缺块丢整段；缓冲 2 MB。383 → 493 是这两轮涨的：11-11 下午播放任务从 `xTaskCreate` 换成 `xTaskCreateWithCaps` + MallocCaps 栈（内部 RAM 拿不到 16 KB 连续块，那条任务**从来没起来过**，这就是"圆屏不出声"的真因），prebuffer 从永久闸门改成只在开口前生效；11-11 晚上再加 `carpet_audio_live()`，给上行那句"对着屏说话先掐掉在播的答句"用)
@@ -104,7 +106,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_link.h | 174 +   (新)
   esp32/components/muse/carpet/carpet_mic.c | 516 +   (新，11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口)
   esp32/components/muse/carpet/carpet_mic.h | 120 +   (新，那十个入口（含 11-13 下午 P0 的 `talk_request/talk_take`）+ `carpet_mic_mode_t` 三档)
-  esp32/components/muse/carpet/carpet_page.c | 1505 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次；**11-14 外页划动回中心这一版再加 28 行**：`gesture_settle` 的 `G_SWIPE_X/G_SWIPE_Y` 从绝对方向→落点改成中心枢纽 —— `s_tile!=0`（任何外格）横滑/竖滑一律 `nav_to(PG_FACE)` 回中心，只有脸格（`s_tile==0`）按四方向发散；唯一例外氛围格右滑仍轮换 clock→gallery→photo；判定引擎未动。台架 `bench_gesture(dx,dy,hold,reset_face)` 抽出公共体，`carpet_page_gesture_bench` 传 true（每次前回脸）、新增 `carpet_page_gesture_bench_from` 传 false（从当前格起判）；**11-16 星轨守护钟面这一版再加 140 行**：`build_clock_orbit()` 在时钟列底下铺整页装饰层 —— 28 颗固定种子星点 + 实心暗盘夜地球 + 三层轨道环（`lv_arc` 满环、去 knob）+ 四方位刻度 + 16px 卫星点 `lv_anim` 60s 无限绕轨（`orbit_sat_anim` 算 sin/cos 走 `lv_obj_set_pos`，不用 align 免得和布局打架）；`apply()` 里装饰层跟时钟列同显隐，别的页不漏)
+  esp32/components/muse/carpet/carpet_page.c | 1454 +   (新，第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次；**11-14 外页划动回中心这一版再加 28 行**：`gesture_settle` 的 `G_SWIPE_X/G_SWIPE_Y` 从绝对方向→落点改成中心枢纽 —— `s_tile!=0`（任何外格）横滑/竖滑一律 `nav_to(PG_FACE)` 回中心，只有脸格（`s_tile==0`）按四方向发散；唯一例外氛围格右滑仍轮换 clock→gallery→photo；判定引擎未动。台架 `bench_gesture(dx,dy,hold,reset_face)` 抽出公共体，`carpet_page_gesture_bench` 传 true（每次前回脸）、新增 `carpet_page_gesture_bench_from` 传 false（从当前格起判）；**11-16 星轨守护钟面这一版再加 140 行**：`build_clock_orbit()` 在时钟列底下铺整页装饰层 —— 28 颗固定种子星点 + 实心暗盘夜地球 + 三层轨道环（`lv_arc` 满环、去 knob）+ 四方位刻度 + 16px 卫星点 `lv_anim` 60s 无限绕轨（`orbit_sat_anim` 算 sin/cos 走 `lv_obj_set_pos`，不用 align 免得和布局打架）；`apply()` 里装饰层跟时钟列同显隐，别的页不漏；**11-16 星轨底图这一版（owner「你现在做的这个钟面和之前你给我看的demo效果不一样…能搬开源就搬开源」）把程序化装饰层换成整屏 RGB565 底图**：`build_clock_orbit()` 重写为 stage（`LV_PCT(100)`）+ `lv_image`（运行期拼 `lv_image_dsc_t`，cf=RGB565、stride=944，数据就是 rodata 里那份 `_binary_carpet_clock_bg_rgb565_start`）+ 卫星点沿**画出来的椭圆** rx193/ry178 绕轨（两张不复位快照落点回代 (189/193)²+(38/178)²≈1.0 证贴环）；星点/夜地球/三环/刻度那些程序化件全删，数字和日期还是 SNTP 真值、离线还是诚实「--:-- / 时间同步中 / 等首帧」；同版**钟面页返回药丸撤掉**（owner「很突兀，滑屏也能找到其他功能」，别的内页留着）。机制搬的是 Round-Clock 的 `main/assets/default.rgb565`（整屏壁纸图 + 叠加数字），图是我们自己的 demo 底图，不是它的素材)
   esp32/components/muse/carpet/carpet_page.h |  67 +   (新；11-13 B §3 +`carpet_page_scene_bench()` 台架口；11-14 +`carpet_page_gesture_bench_from()` 声明 —— 和 `carpet_page_gesture_bench()` 同一条判定路但不先回脸，从当前露着那格起判，为称「外格划动回中心」)
   esp32/components/muse/carpet/carpet_wake.c | 229 +   (新，11-12 语音唤醒词：只用 esp-sr 的 **WakeNet**，不上 AFE/AEC/MultiNet。`esp_srmodel_init("model")` → filter(ESP_WN_PREFIX) → `create(name, DET_MODE_90)`；喂的是 `idle_capture()` 那**唯一**的 20 ms/320 样本块，内部用累加器重切成引擎要的 512 样本/32 ms（**绝不新开第二个麦克风读者**，§16 那条坑）。`init()` 校验 chunk∈(0,1024]、单声道、16000 Hz，不对就 destroy 退出 —— 块长错了引擎会**静默永不命中**。三道不检测：设置关 / `carpet_audio_live()` 在念 / 一轮还没完（`s_inhibit`），命中后 62 块≈2 s 不应期。`>wake` 回读三行 `@wake`：ready/词/blocks/hits/dropped + detect 平均与最坏耗时 + 内部与 PSRAM 余量。**一个只有实读模型才发现的坑**：`esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段原文，四个候选里只有「你好小安」那份写的是拼音 `nihaoxiaoan` ⇒ 屏上会教人念拼音，已加一行 strcmp 译回中文)
   esp32/components/muse/carpet/carpet_wake.h |  67 +   (新，那七个入口：init / ready / feed / take / inhibit / word / dump)
@@ -128,7 +130,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/partitions_muse.csv                  |   8 +   (11-12 唤醒词新入列：**只往尾巴上加一行** `model, data, spiffs, 0x822000, 0x300000,`（3 MB）。上面每一行的偏移一个都没动 ⇒ NVS(0x11000) 里的 Wi-Fi、`link_url`、`mic_mode`、`wake_on` 全保住，换这张表不用重新配网（用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对过，不是看着 csv 推的）。**分区名必须就叫 `model`**：esp-sr 的 CMakeLists 用 `partition_table_get_partition_info("--partition-name model")` 找它，找不到就只打印一句提示、不生成 `srmodels.bin`，运行期 `esp_srmodel_init("model")` 返回空 —— 现象是"编译刷机全成功、唤醒词永远不灵"。16 MB flash 到 0x1000000，这张表到 0xB22000，后面还空约 4.8 MB)
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 20 份被改文件的
-  原样副本，再 `git apply`，36 个文件全落对，字库解出来字节数一致），不是"看着应该能打上"。
+  原样副本，再 `git apply`，37 个文件全落对，字库和底图两份二进制解出来字节数都一致），不是"看着应该能打上"。
   验法脚本：`D:/dev/tmp/verify_carpet_patch.py <patch> <muse_root> cdc169d <空目录>`，
   它同时做两件事 —— ① 在 baseline 空仓上 `git apply --check` + 真 apply；
   ② 把 apply 出来的每一份和**工作树**（就是真正编译刷机那份）逐字节比。
@@ -487,6 +489,23 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     青色轨道环 + 星点 + 76px 白时间 16:27 + 真日期 2026-11-15（SNTP 真时路径顺带复称）+ 返回 pill；
     gallery 截图实看装饰层不漏（只有原有紫主题条目和导航圆点）。
     **没称到**：60s 整圈肉眼（两张快照证位移，整圈靠 `lv_anim` INFINITE 语义）；owner 真屏肉眼炫酷度待他看。
+  - **11-16（星轨底图：owner「钟面和 demo 效果不一样，你是复刻还是搬开源，能搬就搬」+「返回按钮很突兀」）**：
+    先说实话：上一版星轨是我照 demo 图**程序化复刻**，Round-Clock 里根本没有星轨表盘；但它钟面的**机制**是现成的
+    —— `main/assets/default.rgb565`（434,312 B 整屏 RGB565 壁纸图）+ 同板叠加大数字。这轮搬的就是这个机制，
+    图换成 owner 挑过的那张 demo 星轨底图（ImageGen 洗掉图上的文字/pill/卫星后烤成 472×472 RGB565、445,568 B，
+    每边比 466 多 3px 正好接住烧屏 ±3px 位移；外圈本来黑，裁掉看不出）。
+    `carpet_page.c` 净 -51 行：程序化星点/夜地球/三环/刻度删干净，`build_clock_orbit()` = 底图 `lv_image`
+    （运行期 `lv_image_dsc_t`，cf=RGB565、stride=944）+ 数字/日期/问候叠加 + 卫星点椭圆轨道（rx193/ry178，
+    从底图四向亮度扫描量出来：R418/L420/D387，上方 263 是夜地球辉光不是环）；钟面页返回药丸撤掉
+    （别的内页留着）。素材进 `EMBED_FILES`（和字库同一条路），存底副本 `firmware/screen/muse/bg/`。
+    重打 patch：**37 文件 / 7296+ / 98- / 13,751 行 / 763,615 字节**。
+    `verify_carpet_patch.py` 全新 scratch：`baseline copies restored: 20` / `git apply: OK (37 sections)` /
+    **`byte-compare: 37/37 identical`**。
+    **已编已刷已称**（IDF_RC=0 / `Hash of data verified.`，app 镜像 0x3b1000 = 3,870,720 B / 4M 槽余 323,584（8%））：
+    真板截图实看 orbit-bg-1/2.png —— 底图干净无渐变竖条纹、无返回 pill、离线三档诚实回退都在；
+    两张不复位快照卫星右上→右中且落点回代 (189/193)²+(38/178)²≈1.0 ⇒ 绕轨动画活着、贴的是画出来的环；
+    `>page face` 截图实看脸页不漏底图（装饰层和时钟列同显隐）。
+    **没称到**：owner 真屏肉眼对 demo 的满意度；备用板（B1:71:C0）也刷了同一版但没单独截图验。
   - 重打命令（**`components/screen_link` 必须排除**，
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
@@ -518,9 +537,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 ```bash
 # 1) 解 zip 得到上游树，做个 baseline 提交，然后打补丁
 git apply muse-carpet.patch                       # 冲突就 git apply -3
-#    patch 里带那份字库（carpet/carpet_font.ttf）。不想打整份补丁、只搬我们的目录时，
-#    这一份必须单独拷过去 —— CMakeLists 里那行 embed 指的就是它，缺了直接 configure 失败：
+#    patch 里带那两份二进制（carpet/carpet_font.ttf 和 carpet/carpet_clock_bg.rgb565）。
+#    不想打整份补丁、只搬我们的目录时，这两份必须单独拷过去 —— CMakeLists 里那两行 embed
+#    指的就是它们，缺了直接 configure 失败：
 cp firmware/screen/muse/font/carpet_font.ttf <muse>/esp32/components/muse/carpet/
+cp firmware/screen/muse/bg/carpet_clock_bg.rgb565 <muse>/esp32/components/muse/carpet/
 
 # 2) 搬 Screen-Link 客户端组件
 cp -r firmware/screen/components/screen_link  <muse>/esp32/components/screen_link
@@ -837,8 +858,11 @@ I (2692) carpet_page: tiny_ttf 154528 字节 → 28/22/30px
 要一整块连续的 —— 我们原来给它 8192，真机上直接 `Error create websocket task`。
 处理见 §9.5，别把它当成"调调参数就好了"的事：**新加一个用内部 RAM 的东西之前，先算这一本账**。
 
-镜像尺寸这笔账要盯着：app 分区 4M（0x400000），v3 这一版 `muse-gadget.bin` 是 **3,346,432 字节
-（0x331000），余 847,872（20%）** —— 这个数是构建日志里 `Smallest app partition` 那一行给的，
+镜像尺寸这笔账要盯着：app 分区 4M（0x400000），11-16 星轨底图这一版 `muse-gadget.bin` 是 **3,870,720 字节
+（0x3b1000），余 323,584（0x4f000，8%）** —— 比唤醒词那版（3,346,432 / 余 20%）涨的 524,288 里大头就是那份
+445,568 底图进 rodata，其余是 11-13~16 几轮代码（导航/钟面/情绪/划动修复）。**8% 是本产品迄今最薄的一次，
+再往 embed 里塞大图前必须先算这一本账。**
+—— 这些数是构建日志里 `Smallest app partition` 那一行给的，
 别拿 4,194,304 减出来的数当分区大小（分区表留了尾部对齐，减错就得一个假余量）。
 字库那份 154,528 是直接从整片 Noto 里裁出来的；**整片子集（2.18MB）这条路是走不通的**，
 装不进这个分区，所以才要工具。
