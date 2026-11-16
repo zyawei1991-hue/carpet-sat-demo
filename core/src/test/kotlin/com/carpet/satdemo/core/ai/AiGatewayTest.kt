@@ -20,7 +20,7 @@ class AiGatewayTest {
         val seen = mutableListOf<String>()
         override val label = "test-model"
         override val live: Boolean get() = reply != null
-        override suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String? {
+        override suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona): String? {
             seen += facts
             return reply
         }
@@ -131,7 +131,7 @@ class AiGatewayTest {
         val quiet = object : AiProvider {
             override val label = "glm-test"
             override val live = true
-            override suspend fun complete(facts: String, history: List<ChatTurn>, question: String): String? = null
+            override suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona): String? = null
         }
         val lines = mutableListOf<String>()
         val r = AiGateway(provider = quiet, log = { lines += it }).ask("链路", base)

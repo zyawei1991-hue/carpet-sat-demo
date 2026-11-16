@@ -35,4 +35,33 @@ object AnswerMood {
 
     fun of(text: String): UiEmotion =
         TABLE.firstOrNull { (_, keys) -> keys.any { text.contains(it) } }?.first ?: UiEmotion.neutral
+
+    /**
+     * 2026-11-15 §3：情绪跟场景走。卫星那套词（「过境了」「离线」「发不出去」）
+     * 在亲子/助手那两页不是好消息也不是坏消息 —— 是人家根本没在聊的东西。
+     * 判法不变，只是先按场景把词表滤一遍：亲子页把卫星专属的那几个词摘掉，
+     * 落不进剩下词表就是中性，不硬安一张紧张的脸。
+     *
+     * [satelliteWords] = 这一页还认不认卫星词表（[satelliteWords]）；true = 照旧全表判。
+     */
+    fun of(text: String, satelliteWords: Boolean): UiEmotion {
+        if (satelliteWords) return of(text)
+        val hits = TABLE.mapNotNull { (emotion, keys) ->
+            val kept = keys.filterNot { it in SATELLITE_ONLY }
+            if (kept.isEmpty()) null else emotion to kept
+        }
+        return hits.firstOrNull { (_, keys) -> keys.any { text.contains(it) } }?.first ?: UiEmotion.neutral
+    }
+
+    /** 只在车载守护语境里有表情价值的关键词。亲子/助手页碰到它们不该变脸 */
+    val SATELLITE_ONLY: Set<String> = setOf(
+        "离线", "不在线", "发不出", "没发出去", "没收到", "没信号",
+        "过境了", "到顶了", "窗口开了", "在线", "已送达", "送达", "可以发",
+    )
+
+    /**
+     * 这一页还认不认卫星词表。屏自己报的亲子/助手页不认；
+     * 屏没报过页就照旧全表 —— 没信息的时候别自作聪明把脸都滤平了。
+     */
+    fun satelliteWords(page: ScreenPage?): Boolean = page != ScreenPage.kids && page != ScreenPage.avatar
 }

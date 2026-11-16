@@ -24,26 +24,26 @@ import kotlinx.coroutines.flow.StateFlow
 enum class TurnFrom { Me, Ai }
 
 /**
- * 一句话归手机上的哪一页。
+ * 一句话归手机上的哪一页，以及这句话该用哪副"对话人格"。
  *
- * 只有两个取值，因为手机上有独立对话的页面就这两个（车辆、家人）：
- * 首页那条是**总时间线**，什么都不归、什么都显示；「我的」页不问话。
+ * [vehicle] 车载守护、[family] 亲子陪伴、[assistant] 屏的 avatar/对话页 —— 通用助手。
  * null = 归不进任何一页 —— 比如屏报它在「时钟」页时说的话，那种句子只属于总时间线。
  *
  * 这一刀是"不同场景的功能页面还是应该区分开"和"所有对话整合成一份"的接缝：
  * 记录**永远只有一份**（[ConversationLog]），页面上按 scene 各取各的视图，
  * 不是每页存一份再想办法对齐 —— 存两份就一定会有对不上的那一天。
  */
-enum class TurnScene { vehicle, family }
+enum class TurnScene { vehicle, family, assistant }
 
 /**
- * 屏报上来的那一页换算成手机的一页。**只有两条映射得上**，其余一律 null：
- * 亲子/车载那两页在两边指的是同一件事，时钟、图片、选场景那种页上的话没有对应的手机页面，
- * 猜一个反而会让车主在错误的页里看见别人的对话。
+ * 屏报上来的那一页换算成手机的一页。avatar/对话页映射到助手态（owner 2026-11-15：
+ * "对话应该是在不同场景下要有不同的内容"，屏上跟数字分身聊天不该满嘴卫星）；
+ * 时钟、图片、选场景那种页上的话没有对应的手机页面，null 只归总时间线。
  */
 fun screenSceneOf(page: ScreenPage?): TurnScene? = when (page) {
     ScreenPage.vehicle -> TurnScene.vehicle
     ScreenPage.kids -> TurnScene.family
+    ScreenPage.avatar -> TurnScene.assistant
     else -> null
 }
 

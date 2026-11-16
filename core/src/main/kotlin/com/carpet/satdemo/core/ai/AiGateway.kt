@@ -38,31 +38,34 @@ class AiGateway(
         log("AI 权限档 → ${tier.label}")
     }
 
-    suspend fun ask(question: String, ctx: SkillContext): AiReply {
+    suspend fun ask(question: String, ctx: SkillContext, scene: TurnScene? = null): AiReply {
         val q = question.trim()
         if (q.isEmpty()) return AiReply("想说点什么？", skill = null, source = ReplySource.LocalRule)
+        val persona = Persona.of(scene)
 
         val skill = skills.match(q)
         if (skill == null) {
-            // 没命中关键词也要能答：走模型，但事实表里只有状态机给得出的东西
-            val facts = summarize(ctx)
-            val out = if (provider.live) provider.complete(facts, history.toList(), q) else null
+            // 没命中关键词也要能答：走模型，但事实表里只有状态机给得出的东西。
+            // 事实表按人格取材 —— 亲子/助手态不喂卫星，模型手里没卫星料就绕不回卫星
+            val facts = summarize(ctx, persona)
+            val out = if (provider.live) provider.complete(facts, history.toList(), q, persona) else null
             if (provider.live && out == null) log("${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}）")
             return record(
                 if (out != null) AiReply(guard(out), skill = null, source = ReplySource.Model)
-                else AiReply(NO_MATCH, skill = null, source = ReplySource.LocalFallback),
+                else AiReply(noMatch(persona), skill = null, source = ReplySource.LocalFallback),
                 q,
             )
         }
 
         if (!PermissionTier.allows(granted, skill.needs)) {
             log("拦截 ${skill.id}：需要「${skill.needs.label}」，当前只到「${granted.label}」")
+            // 被拦的技能不跑 handle —— handle 是取数，出网的技能没拿到授权就不能出网
+            val line = skill.deniedLine?.invoke(ctx) ?: skill.handle(ctx).line ?: "这条我不做。"
             return record(
                 AiReply(
-                    skill.handle(ctx).line ?: "这条我不做。",
+                    line,
                     skill = skill.id,
                     source = ReplySource.Denied,
-                    mocked = skill.handle(ctx).mocked,
                 ),
                 q,
             )
@@ -73,7 +76,7 @@ class AiGateway(
             append("技能 ").append(skill.id).append("（").append(result.intent).append("）\n")
             result.fields.forEach { (k, v) -> append("· ").append(k).append("=").append(v).append('\n') }
         }
-        val model = if (provider.live) provider.complete(facts + summarize(ctx), history.toList(), q) else null
+        val model = if (provider.live) provider.complete(facts + summarize(ctx, persona), history.toList(), q, persona) else null
         // 真模型没答上来时这行是唯一说得清「屏上那句到底是谁写的」的痕迹。
         // 不打出来的话，现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错。
         // 原因必须带上 —— "HTTP 404"和"域名解析不了"要用户做的事完全不同。
@@ -119,24 +122,35 @@ class AiGateway(
         return "这句话我不能替平台说 —— 我只能确认卫星这一侧的状态。"
     }
 
+    /** 亲子和助手态不谈卫星 —— 兜底话术也分场景，别说"可以说链路"给人指到卫星上去 */
+    private fun noMatch(persona: Persona): String = when (persona) {
+        Persona.Guardian -> NO_MATCH
+        else -> "这件事我现在没有数据，不能凭印象答。天气、聊天、讲故事都可以问我。"
+    }
+
     companion object {
         private const val MAX_TURNS = 20
 
         private const val NO_MATCH =
             "这件事我现在没有数据，不能凭印象答。可以说「链路」「过境」「额度」「圆屏配对」「车在哪」。"
 
-        /** 发给模型的事实表。null 一律写成「未知」，不留给模型自由发挥的空位 */
-        fun summarize(c: SkillContext): String = buildString {
+        /** 发给模型的事实表。null 一律写成「未知」，不留给模型自由发挥的空位。
+         *  卫星/链路那一组只在守护人格下进表（owner 11-15：对话别全绕着卫星） */
+        fun summarize(c: SkillContext, persona: Persona = Persona.Guardian): String = buildString {
             append("场景=").append(c.scene)
-            append(" 相位=").append(c.phase ?: "未知")
-            append(" 距下次过顶=").append(c.secondsToNextPass?.toString() ?: "未知").append("秒")
-            append(" 终端=").append(when (c.moduleOnline) { true -> "在线"; false -> "离线"; null -> "未知" })
-            append(" 待发=").append(c.queueWaiting?.toString() ?: "未知")
-            append(" 槽位=").append(c.queueCapacity?.toString() ?: "未知")
-            append(" 已交核心网=").append(c.handedOver?.toString() ?: "未知")
+            if (persona.satelliteFacts) {
+                append(" 相位=").append(c.phase ?: "未知")
+                append(" 距下次过顶=").append(c.secondsToNextPass?.toString() ?: "未知").append("秒")
+                append(" 终端=").append(when (c.moduleOnline) { true -> "在线"; false -> "离线"; null -> "未知" })
+                append(" 待发=").append(c.queueWaiting?.toString() ?: "未知")
+                append(" 槽位=").append(c.queueCapacity?.toString() ?: "未知")
+                append(" 已交核心网=").append(c.handedOver?.toString() ?: "未知")
+                append(" 围栏=").append(if (c.fenceActive == true) (if (c.fenceInside == true) "在内" else "越界") else "未开")
+            }
             append(" 定位=").append(if (c.gnssLat != null && c.gnssLon != null) "%.5f,%.5f".format(c.gnssLat, c.gnssLon) else "无")
-            append(" 围栏=").append(if (c.fenceActive == true) (if (c.fenceInside == true) "在内" else "越界") else "未开")
-            append(" 在线圆屏=").append(c.screensOnline?.toString() ?: "未知").append("台")
+            if (persona.satelliteFacts) {
+                append(" 在线圆屏=").append(c.screensOnline?.toString() ?: "未知").append("台")
+            }
             append(" 手机电量=").append(c.phoneBattery?.toString() ?: "未知").append("%")
             // 屏上那几句原话必须一起给模型：不给的话"娃在屏上说了啥"到了真模型那一侧只能编，
             // 而编出来的那句会以"远端模型"的名义永久留在车主的对话记录里

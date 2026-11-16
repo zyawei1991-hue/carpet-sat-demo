@@ -883,9 +883,15 @@ class AppRuntime(private val host: Application) {
         aiLoop = scope.launch {
             while (true) {
                 delay(AI_SCAN_MS)
-                dialog.scanProactive()
+                dialog.scanProactive(sceneForHeartbeat())
             }
         }
+    }
+
+    /** 主动提醒跟当前手机场景走：亲子页开着就不播卫星链路那几条（§2） */
+    private fun sceneForHeartbeat(): TurnScene = when (_scene.value) {
+        Scene.Kids -> TurnScene.family
+        else -> TurnScene.vehicle
     }
 
     /** 额度与队列水位。**现场读模组**，不是写死的数（§9 #12/#16 那两个口径未定，所以只能读） */

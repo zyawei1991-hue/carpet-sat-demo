@@ -87,7 +87,7 @@ class DialogBridge(
         }
         _thinking.value = true
         try {
-            say(gateway.ask(q, context(id)), via, id, to)
+            say(gateway.ask(q, context(id), to), via, id, to)
         } finally {
             _thinking.value = false
         }
@@ -127,8 +127,12 @@ class DialogBridge(
     }
 
     /** 主动播报。宿主按自己的节奏调（App 是 10 秒一轮）。**不归任何一页**：它不是谁在那一页问出来的 */
-    fun scanProactive() {
+    fun scanProactive(scene: TurnScene? = null) {
+        val persona = Persona.of(scene)
         heartbeat.scan(facts()).forEach { tip ->
+            // 亲子/助手态不播卫星链路那几条（§2）：家长听着「星历过期」只会困惑。
+            // 电量和队列是通用提醒，保留；围栏本来就是亲子态的主卡，也保留
+            if (persona != Persona.Guardian && tip.skill in Heartbeat.SATELLITE_RULE_IDS) return@forEach
             // id 必须带时间戳：主动提醒有冷却但会再来一轮，复用同一个 turn_id 会被去重当成重复丢掉
             say(
                 gateway.recordProactive(tip.text, skill = tip.skill),

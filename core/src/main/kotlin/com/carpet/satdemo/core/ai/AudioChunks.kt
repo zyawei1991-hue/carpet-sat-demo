@@ -44,11 +44,22 @@ object AudioChunks {
      *
      * 每帧都带 `total`，屏靠它判"收齐了"；`seq` 从 0 连续，缺一块屏就把整段丢掉（同样不挡文字）。
      */
-    fun commands(turnId: String, pcm: ByteArray, tsMs: Long): List<ScreenMessage> {
+    fun commands(turnId: String, pcm: ByteArray, tsMs: Long): List<ScreenMessage> =
+        commands(turnId, pcm, tsMs, seqStart = 0, totalBytes = pcm.size)
+
+    /**
+     * §4（2026-11-15 owner 拍板的妥协案）：长答按句分段合成，同一轮的各段**接续编号**。
+     *
+     * [seqStart] 是这一段第一块的 seq —— 第二句从第一句断掉的地方接着数；
+     * [totalBytes] 是**整轮**的字节数 —— 屏判"收齐了"看的是 total，每句各报各的长度
+     * 会把前面那句已经播完的缓冲判成残帧。传 null = 单句自成一轮，行为跟旧的一样。
+     */
+    fun commands(turnId: String, pcm: ByteArray, tsMs: Long, seqStart: Int, totalBytes: Int?): List<ScreenMessage> {
         if (turnId.isEmpty() || pcm.isEmpty() || pcm.size > MAX_TOTAL_BYTES) return emptyList()
+        val total = totalBytes ?: pcm.size
         val b64 = Base64.getEncoder()
         val out = ArrayList<ScreenMessage>((pcm.size + BYTES_PER_CHUNK - 1) / BYTES_PER_CHUNK)
-        var index = 0
+        var index = seqStart
         var offset = 0
         while (offset < pcm.size) {
             val end = minOf(offset + BYTES_PER_CHUNK, pcm.size)
@@ -63,7 +74,7 @@ object AudioChunks {
                     args = buildJsonObject {
                         put("turn_id", JsonPrimitive(turnId))
                         put("seq", JsonPrimitive(index))
-                        put("total", JsonPrimitive(pcm.size))
+                        put("total", JsonPrimitive(total))
                         put("rate", JsonPrimitive(SAMPLE_RATE))
                         put("b64", JsonPrimitive(b64.encodeToString(part)))
                     },
