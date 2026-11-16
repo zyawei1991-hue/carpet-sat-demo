@@ -77,6 +77,12 @@ class DialogBridge(
         if (q.isEmpty()) return
         val id = turnId ?: newTurnId()
         val to = if (via == DialogOrigin.screen) screenScene() else scene
+        // **人格跟着说话的设备走，页归属跟着屏报的页走 —— 两件事**。屏起头还没归页的那一轮
+        // （中心脸/时钟/相册都算）用助手人格：Persona.of(null)=Guardian 是给手机首页和主动播报的，
+        // 屏上的对话掉进去，模型手里整张事实表全是卫星，问什么它都绕到过顶
+        // （owner 2026-11-16 两条：「答话全绕卫星」+「场景技能没体现」—— 屏常停在 face 页，
+        // 每一轮都判给了守护人格）。入账归页照旧是 null：那句只在总时间线，不许假造页归属。
+        val personaScene = if (via == DialogOrigin.screen) to ?: TurnScene.assistant else to
         val asked = log.append(
             Turn(from = TurnFrom.Me, text = q, source = ReplySource.LocalRule, via = via, turnId = id, scene = to),
         ) ?: return
@@ -87,7 +93,7 @@ class DialogBridge(
         }
         _thinking.value = true
         try {
-            say(gateway.ask(q, context(id), to), via, id, to)
+            say(gateway.ask(q, context(id), personaScene), via, id, to)
         } finally {
             _thinking.value = false
         }

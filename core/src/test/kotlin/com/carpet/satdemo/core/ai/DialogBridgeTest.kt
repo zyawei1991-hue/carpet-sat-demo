@@ -27,12 +27,13 @@ class DialogBridgeTest {
         initialGranted: PermissionTier = PermissionTier.ReadLocal,
         /** 屏报上来的那一页换算出来的手机页。默认 null = 屏还没报过页 */
         screenScene: () -> TurnScene? = { null },
+        provider: AiProvider = LocalRuleProvider(),
     ) {
         val pushed = mutableListOf<DialogPayload>()
         val notes = mutableListOf<String>()
         var clock = 1_795_200_000_000L
         val gateway = AiGateway(
-            provider = LocalRuleProvider(),
+            provider = provider,
             initialGranted = initialGranted,
             log = { notes += it },
         )
@@ -257,6 +258,42 @@ class DialogBridgeTest {
         page = ScreenPage.clock
         h.bridge.onScreenFrame(h.frame(up("几点了", "s-22")))
         assertEquals(null, h.bridge.log.turns.value.takeLast(2).first().scene, "时钟页在手机上没有对应的那一页")
+    }
+
+    /** 记下网关把每一轮判给了谁：人格这一刀看不见摸不着，只能这样钉住 */
+    private class PersonaSpy : AiProvider {
+        override val label = "spy"
+        override val live = true
+        val seen = mutableListOf<Persona>()
+        override suspend fun complete(
+            facts: String,
+            history: List<ChatTurn>,
+            question: String,
+            persona: Persona,
+        ): String? {
+            seen += persona
+            return "spy：$persona"
+        }
+    }
+
+    @Test
+    fun `屏起头没归页的那一轮用助手人格 手机上没归页的照旧是守护`() = runBlocking {
+        // 屏常停在中心脸页，换算出来没归页。归页照旧是 null（上一条钉住），但**人格**不能掉进
+        // Persona.of(null)=Guardian：模型手里整张表全是卫星，问月亮都答过顶
+        // （owner 2026-11-16「答话全绕卫星」）。手机首页/主动播报没有设备可推断，照旧守护
+        val spy = PersonaSpy()
+        val h = Harness(provider = spy)
+        h.bridge.onScreenFrame(h.frame(up("给我讲讲月亮", "s-40")))
+        h.bridge.ask("心情不太好", DialogOrigin.phone)
+        assertEquals(listOf(Persona.Assistant, Persona.Guardian), spy.seen)
+        // 归页那格没被人格带着改：答句记录仍旧不归任何一页
+        assertEquals(listOf<TurnScene?>(null, null, null, null), h.bridge.log.turns.value.map { it.scene })
+
+        val kids = PersonaSpy()
+        val hk = Harness(provider = kids, screenScene = { screenSceneOf(ScreenPage.kids) })
+        hk.bridge.onScreenFrame(hk.frame(up("给我讲个故事", "s-41")))
+        // 归了页的照页面走人格：亲子页不许被"屏起头=助手"这条盖掉
+        assertEquals(listOf(Persona.Family), kids.seen)
     }
 
     @Test

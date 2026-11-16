@@ -143,8 +143,11 @@ class ScreenVoice(
      */
     private val engineWaitMs = 2500L
 
-    /** 播放这条试听/答句的 MediaPlayer。下一句来时先停旧的，两句不叠 */
+    /** 正在手机上放的答句。§4 按句念时下一句**先等这句放完**再 start，不掐半句 */
     private var phonePlayer: MediaPlayer? = null
+
+    /** 和 [phonePlayer] 配对的"放完了"闩：完成/出错回调、被主动 stop 都落闩，等的人不悬死 */
+    private var phoneDone: CountDownLatch? = null
 
     /**
      * 上一次没把声音送出去的原因（null = 最近一次是好的，或者还没念过）。
@@ -462,6 +465,9 @@ class ScreenVoice(
     }
 
     private fun stopPhonePlayer() {
+        // 主动掐 = 这句不会再有完成回调：落闩，别让下一句白等 30 秒保险丝
+        phoneDone?.countDown()
+        phoneDone = null
         phonePlayer?.let { p ->
             runCatching { if (p.isPlaying) p.stop() }
             runCatching { p.release() }
@@ -725,8 +731,10 @@ class ScreenVoice(
         var sentBytes = 0
         var sentFrames = 0
 
-        // 落点此刻就定死：屏起头=屏；手机起头=按设置，但屏没连/没升 v3 落回手机
-        val wantScreen = !screenOnly && !answerHere()
+        // 落点此刻就定死：屏起头=屏（owner 拍板「屏上对话只由圆屏念」，原来这里写成
+        // `!screenOnly && !answerHere()`，把屏起头整类判成"不落屏"，语音全从手机出来了）；
+        // 手机起头=按设置，选了"这台手机"才归本机
+        val wantScreen = screenOnly || !answerHere()
         if (wantScreen && link != null && link.audioReady) {
             val pcm = NetVoice.pcm16k(mp3)
             if (pcm == null) {
@@ -749,18 +757,33 @@ class ScreenVoice(
         }
 
         var phoneGot = false
-        if (!wantScreen) {
+        // 屏一个字节都没收到时本机照样接住（落点定的是"该谁"，不是"谁聋了还硬等"）；
+        // 屏收着了就不许再放，两只嘴念同一句是红线
+        if (!wantScreen || !screenGot) {
             val player = NetVoice.playerFor(mp3)
             if (player != null) {
+                // §4 按句念：这句要排在上一句**之后**放。原来直接 stopPhonePlayer()，
+                // 第一句念到一半就被第二句掐死（owner 2026-11-16「第一句只会念一半」的手机喇叭版）。
+                // 这条是串行 worker 线程，等放完再起下一句不挡任何人；30 秒封顶是防
+                // 完成回调没来的保险丝，不是正常路径
+                val prev = phonePlayer
+                val prevDone = phoneDone
+                if (prev != null && prevDone != null && !prevDone.await(30, TimeUnit.SECONDS)) {
+                    log("屏幕语音：上一句 30 秒没放完，这句不等了")
+                }
                 stopPhonePlayer()
+                val done = CountDownLatch(1)
+                phoneDone = done
                 phonePlayer = player
                 player.setOnCompletionListener { mp ->
                     runCatching { mp.release() }
                     if (phonePlayer === mp) phonePlayer = null
+                    done.countDown()
                 }
                 player.setOnErrorListener { mp, _, _ ->
                     runCatching { mp.release() }
                     if (phonePlayer === mp) phonePlayer = null
+                    done.countDown()
                     true
                 }
                 try {
@@ -770,6 +793,7 @@ class ScreenVoice(
                 } catch (e: Exception) {
                     runCatching { player.release() }
                     phonePlayer = null
+                    done.countDown()
                     log("屏幕语音：本机播放器起不来（${e.message}）")
                 }
             }

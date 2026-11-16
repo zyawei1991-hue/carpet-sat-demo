@@ -41,8 +41,14 @@ internal object NetVoice {
         .followRedirects(true)
         .build()
 
-    /** 一句答话的上限。答句已压到 ≤30 字（拍板口径）；再长的输入按 30 字截断 —— 300 字 ≈ 2.13 MB PCM 会撞穿屏侧 2 MB 缓冲整段不接 */
-    private const val MAX_CHARS = 30
+    /**
+     * **一句**的上限。§4 之后答句先按句拆开、每句单独进来合成，这个数管的是一句而不是整轮。
+     * 原来是 30：那是"整轮 ≤30 字"时代的数，按句拆分后长答案的第一句照样超 30 字，
+     * `take(30)` 把话拦腰砍断（owner 2026-11-16「长对话第一句只会念一半」的手机侧之一）。
+     * 120 字 ≈ 27 秒 ≈ 860 KB PCM(16k)：单句撞不穿屏侧 2 MB 缓冲，整轮的账由
+     * core 的 `AudioChunks.MAX_TOTAL_BYTES` 在切块时兜底。
+     */
+    private const val MAX_CHARS = 120
 
     /** 晓伊的基频，把音色档的音高倍数换算成 prosody 的赫兹偏移 */
     private const val XIAOYI_BASE_HZ = 324.0

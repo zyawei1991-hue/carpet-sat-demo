@@ -1077,7 +1077,14 @@ class AppRuntime(private val host: Application) {
                     }
                     return@launch
                 }
+                val t0 = System.currentTimeMillis()
                 val r = SiliconFlowAsr.transcribe(MicUplink.pcmToWav(seg.pcm))
+                // 掐表给 #1「到手机的时间好长」：这一段（攒齐+转写）是唯一能量化的屏→字延迟，
+                // 屏侧判尾 ~0.9 秒和爆发上传 ~0.7 秒另有屏日志，三段加起来才说得出慢在哪
+                runtime.log(
+                    "上行一轮：${seg.frames} 帧 / ${seg.pcm.size} B / " +
+                        "${"%.1f".format(seg.seconds)} 秒语音 → 转写耗时 ${System.currentTimeMillis() - t0} ms",
+                )
                 when (r) {
                     is SiliconFlowAsr.AsrResult.Text -> {
                         withContext(Dispatchers.Main) { say("屏上说了：「${r.text}」") }
