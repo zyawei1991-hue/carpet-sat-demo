@@ -6971,10 +6971,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..3a19b93
+index 0000000..c12c1ab
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1365 @@
+@@ -0,0 +1,1524 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -7110,6 +7110,19 @@ index 0000000..3a19b93
 +/* 这一句属于哪一轮。v3 的语音帧带着同一个 turn_id，所以"这句有没有声音、放到哪了"
 + * 是拿它对出来的 —— 不是拿时间猜。空串 = 这一轮没有 id（`>say` 之外不该出现）。 */
 +static char s_face_turn[40];
++
++/* ---- B §1 守护灯点的未读事件 ----
++ * 组件已按 event_id 去重、ack、丢弃过期帧才回调到这里（screen_link.h:100-106），
++ * 屏侧只剩"记住这一条 + 画点 + 点击播报"。回调在链路任务里跑：不碰 LVGL、不排长活，
++ * 只把拼好的一句话和 id 拷进下面这几格（都在 .bss，约 140 字节，不动内部 RAM 的
++ * 连续块账）。灯点亮了就一直亮到被点掉 —— 帧里的 ttl 管的是"收到时还弹不弹"，
++ * 不是"点之前多久作废"：越界事件亮十几秒自己灭掉，现场看着和屏坏了没两样。
++ * left_ms 只进日志。新事件顶掉还没念的旧事件：守护的时效性大于旧的未读。 */
++#define EVT_TEXT_CAP 96
++static char s_evt_text[EVT_TEXT_CAP];
++static char s_evt_id[40];
++static bool s_evt_unread;
++static bool s_evt_talk;   /* 事件已开口在念：念完（hold 到期）自动请求进对话 */
 +
 +/* 刚见过的轮次。契约里 turn_id 由起头那一方生成、问和答共用同一个，所以"这一轮我们
 + * 是不是已经见过一句"在这里问一句就知道 —— 见过的那一轮（也就是答句）能挤掉正在念的
@@ -7448,7 +7461,16 @@ index 0000000..3a19b93
 +        muse_state_set_progress(0);
 +        muse_state_set_caption("%s", "");
 +        face_set_mode(MUSE_MODE_IDLE);
++        bool evt_done = s_evt_talk;
++        s_evt_talk = false;
 +        xSemaphoreGive(s_lock);
++        /* B §1「先播报事件再进对话」兑现点：事件那句念完、脸收回 idle 之后，
++         * 和点 Avatar 同一条 carpet_mic_talk_request()（一道闸都不放宽）。
++         * 从 LVGL 任务调，正是那条 tap 分支平时走的任务。 */
++        if (evt_done) {
++            ESP_LOGI(TAG, "evt 播报完 → 进对话");
++            carpet_mic_talk_request();
++        }
 +        return;
 +    }
 +
@@ -7615,6 +7637,142 @@ index 0000000..3a19b93
 +        const char *action = str_of(dialog, "action");
 +        if (action) carpet_page_goto(action);
 +    }
++}
++
++/* ---- B §1 守护事件：收帧拼句 ----
++ * 链路任务里跑：去重、ack、过期过滤组件已经做完，这里只剩把 kind + payload 拼成
++ * 一句中文、记成未读。句子对齐 App 日志的口径（DemoRuntime.kt 推 fence 推送时
++ * 写的就是「已越界{name}，距边界{dist}米」这一路）。
++ * 只有守护类（sos_* / fence_* / sentinel_motion / downlink_msg）点亮灯；
++ * link_switched / sat_visible / track_reset 是信息帧，亮灯就成了假造 —— 只留日志。 */
++static void on_event(const cJSON *ev, const char *event_id, uint32_t left_ms)
++{
++    if (!s_lock) return;
++    const char *kind = str_of(ev, "kind");
++    if (!kind) return;
++    const cJSON *pl = cJSON_GetObjectItemCaseSensitive(ev, "payload");
++    const char *nm = pl ? str_of(pl, "name") : NULL;
++    const char *msg = pl ? str_of(pl, "text") : NULL;
++    const cJSON *dist = pl ? cJSON_GetObjectItemCaseSensitive(pl, "dist_m") : NULL;
++    char dist_s[24] = "";
++    if (cJSON_IsNumber(dist)) snprintf(dist_s, sizeof dist_s, "%d米", (int)lround(dist->valuedouble));
++
++    char line[EVT_TEXT_CAP];
++    line[0] = '\0';
++    if (!strcmp(kind, "fence_exit")) {
++        if (dist_s[0]) snprintf(line, sizeof line, "已越界%s，距边界%s", nm ? nm : "围栏", dist_s);
++        else           snprintf(line, sizeof line, "已越界%s", nm ? nm : "围栏");
++    } else if (!strcmp(kind, "fence_enter")) {
++        snprintf(line, sizeof line, "回到围栏%s", nm ? nm : "内");
++    } else if (!strcmp(kind, "sos_triggered")) {
++        snprintf(line, sizeof line, "求救已发出");
++    } else if (!strcmp(kind, "sos_acked")) {
++        snprintf(line, sizeof line, "平台已确认求救");
++    } else if (!strcmp(kind, "sos_failed")) {
++        snprintf(line, sizeof line, "求救发送失败");
++    } else if (!strcmp(kind, "sos_cancelled")) {
++        snprintf(line, sizeof line, "求救已取消");
++    } else if (!strcmp(kind, "sentinel_motion")) {
++        snprintf(line, sizeof line, "哨兵检测到移动");
++    } else if (!strcmp(kind, "downlink_msg")) {
++        snprintf(line, sizeof line, "平台下行：%s", msg ? msg : "收到一条消息");
++    }
++
++    if (!line[0]) {
++        ESP_LOGI(TAG, "evt %s：非守护类，不点灯（id=%s left=%ums）", kind,
++                 event_id ? event_id : "?", (unsigned)left_ms);
++        return;
++    }
++
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    snprintf(s_evt_text, sizeof s_evt_text, "%s", line);
++    snprintf(s_evt_id, sizeof s_evt_id, "%s", event_id ? event_id : "");
++    s_evt_unread = true;
++    xSemaphoreGive(s_lock);
++    /* 打句不截断：台架比对播报内容就看这一行（句子最长也就 cap 那么宽）。 */
++    ESP_LOGI(TAG, "evt 未读 id=%s kind=%s left=%ums: %s",
++             event_id ? event_id : "?", kind, (unsigned)left_ms, line);
++}
++
++bool carpet_link_event_pending(void)
++{
++    /* 单 bool 跨任务读不撕裂；写侧的成套拷贝都在 s_lock 里。 */
++    return s_evt_unread;
++}
++
++bool carpet_link_event_broadcast(void)
++{
++    if (!s_lock) return false;
++    char line[EVT_TEXT_CAP];
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (!s_evt_unread) {
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    /* 正念着别人的一句（半句）：不挤 —— 灯留着，再点一次。face_offer 里那套
++     * 同轮挤占的判断对 turn "evt" 同样成立，这里先挡住是为了"没念就不清未读"。 */
++    if (s_face_live && s_face_text && s_face_at < strlen(s_face_text)) {
++        ESP_LOGI(TAG, "face 正念半句，事件先不播报: %s", s_evt_text);
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    snprintf(line, sizeof line, "%s", s_evt_text);
++    s_evt_unread = false;
++    s_evt_talk = true;   /* hold 到期那句念完 → face_tick 里自动进对话 */
++    xSemaphoreGive(s_lock);
++    face_offer(line, true, "evt");
++    return true;
++}
++
++void carpet_link_event_clear(void)
++{
++    if (!s_lock) return;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    s_evt_unread = false;
++    s_evt_talk = false;
++    s_evt_text[0] = '\0';
++    s_evt_id[0] = '\0';
++    xSemaphoreGive(s_lock);
++    ESP_LOGI(TAG, "evt 已清空（台架复位）");
++}
++
++void carpet_link_event_dump(void)
++{
++    char text[EVT_TEXT_CAP], id[40];
++    bool unread, talk;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    snprintf(text, sizeof text, "%s", s_evt_text);
++    snprintf(id, sizeof id, "%s", s_evt_id);
++    unread = s_evt_unread;
++    talk = s_evt_talk;
++    xSemaphoreGive(s_lock);
++    printf("@evt unread=%d talk=%d id=%s text=%s\n", (int)unread, (int)talk,
++           id[0] ? id : "-", text[0] ? text : "-");
++    fflush(stdout);
++}
++
++/* `>event <kind>`：本机造一条事件帧走同一条 on_event()，为的是不联网也能称
++ * 灯点、播报、"念完自动进对话"整条。payload 用一组固定演示值，对齐真帧的形状
++ * （name/dist_m/text，见 DemoRuntime.kt:921-948）。 */
++void carpet_link_bench_event(const char *kind)
++{
++    if (!kind || !*kind) return;
++    cJSON *ev = cJSON_CreateObject();
++    cJSON_AddStringToObject(ev, "kind", kind);
++    cJSON *pl = cJSON_CreateObject();
++    if (!strcmp(kind, "fence_enter") || !strcmp(kind, "fence_exit")) {
++        cJSON_AddStringToObject(pl, "name", "学校");
++        cJSON_AddNumberToObject(pl, "dist_m", 120);
++    } else if (!strcmp(kind, "downlink_msg")) {
++        cJSON_AddStringToObject(pl, "hex", "6E62");
++        cJSON_AddStringToObject(pl, "text", "演示下行");
++    }
++    cJSON_AddItemToObject(ev, "payload", pl);
++    char id[40];
++    static int n;
++    snprintf(id, sizeof id, "evt-bench-%d", ++n);
++    on_event(ev, id, 30000);
++    cJSON_Delete(ev);
 +}
 +
 +/* 把"叫醒屏"递给 carpet_cmd 那条任务去落地，不在 ws 回调里办（原因见 CMD_WAKE 那段）。
@@ -8090,6 +8248,7 @@ index 0000000..3a19b93
 +    s_cb.on_dialog = on_dialog;
 +    s_cb.on_command = on_command;
 +    s_cb.on_ack = on_ack;      /* v4 上行那道闸读的就是这一句 */
++    s_cb.on_event = on_event;  /* B §1 守护灯点：去重/ack/过期都由组件做完，这里只记未读 */
 +
 +    /* 开不出去就阶梯再来一次，而不是印一条 E 然后把这条任务删掉。
 +     * 删掉那一种的代价是 2026-11-10 真机称出来的：t=27s 关联上热点、t=29s
@@ -8342,10 +8501,10 @@ index 0000000..3a19b93
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..b86d94a
+index 0000000..88c2ebe
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,196 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -8520,6 +8679,28 @@ index 0000000..b86d94a
 + * 情绪才上脸（muse_pixel 只在 IDLE 且没摸头时画情绪）。回读 `>carpet` 那行 emotion 同源。
 + */
 +void carpet_link_bench_emotion(const char *name);
++
++/*
++ * B §1 守护灯点（屏侧这一半）。App 侧事件帧（t=event）已实装；去重、ack、过期过滤
++ * 都在 screen_link 组件里做完了（screen_link.h:100-106 的契约），屏侧只剩：记一条
++ * 未读的守护事件、Avatar 头顶画点、点击先念、念完自动进对话。
++ * `carpet_link_event_pending()` 给 LVGL 任务判灯点亮不亮；
++ * `carpet_link_event_broadcast()` 点 Avatar 时调：有未读就把那条当答句交 face_offer
++ * 并立"念完进对话"的记号（face_tick 的 hold 到期处兑现），返回 false = 没事件可念、
++ * 或正念着别人的半句（点不动，灯继续亮着，再点一次）。
++ */
++bool carpet_link_event_pending(void);
++bool carpet_link_event_broadcast(void);
++
++/*
++ * 开发口 `>event`：`>event <kind>` 本机造一条守护事件帧，交链路同一条 on_event()
++ * （不联网也能称灯点和那条播报）；`>event` 回读；`>event clear` 清掉未读和记号。
++ * kind：sos_triggered / sos_acked / sos_failed / sos_cancelled / fence_enter /
++ * fence_exit / sentinel_motion / downlink_msg。
++ */
++void carpet_link_bench_event(const char *kind);
++void carpet_link_event_clear(void);
++void carpet_link_event_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
 new file mode 100644
 index 0000000..cbee44e
@@ -9170,10 +9351,10 @@ index 0000000..b77731c
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..2fd827f
+index 0000000..9856a6f
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1454 @@
+@@ -0,0 +1,1477 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -9470,6 +9651,9 @@ index 0000000..2fd827f
 +static lv_obj_t *s_func_tile;
 +static lv_obj_t *s_ring_tile;
 +static lv_obj_t *s_amb_tile;
++/* B §1 守护灯点：挂在脸那格顶上的一枚琥珀点（make_dot 同款）。有未读守护事件才亮；
++ * 它在脸那格上，露别的格时 tileview 自然把它带出画面，不用额外管页。 */
++static lv_obj_t *s_guard_dot;
 +static lv_obj_t *s_scene_card[3];   /* 场景环那三张卡：apply() 按当前场景给谁描边 */
 +static lv_obj_t *s_shown_col;       /* 上一次露出的列：只在它变了时播入场动效，不每帧重播 */
 +
@@ -10036,11 +10220,17 @@ index 0000000..2fd827f
 +            nav_to(PG_FACE);
 +            ESP_LOGI(TAG, "单击空处 → 回脸");
 +        } else if (s_tile == 0) {
-+            /* B §1 的唯一兜底：点 Avatar 进对话。立记号，采集任务下一拍走和唤醒词
-+             * 同一条 talk_to_phone（闸一道都不放宽）。脸那格没有本组件控件，点击
-+             * 干净地落到这里（active_tile_obj 返回 NULL → s_on_control=false）。 */
-+            carpet_mic_talk_request();
-+            ESP_LOGI(TAG, "点 Avatar → 进对话");
++            /* B §1：点 Avatar。有未读守护事件 → 先播报那一句，念完由 carpet_link
++             * 的 hold 到期处自动请求进对话；没事件（或正念半句念不动）→ 直接进对话。
++             * 立记号，采集任务下一拍走和唤醒词同一条 talk_to_phone（闸一道都不放宽）。
++             * 脸那格没有本组件控件，点击干净地落到这里（active_tile_obj 返回 NULL →
++             * s_on_control=false）。 */
++            if (carpet_link_event_broadcast())
++                ESP_LOGI(TAG, "点 Avatar → 先念守护事件，念完自动进对话");
++            else {
++                carpet_mic_talk_request();
++                ESP_LOGI(TAG, "点 Avatar → 进对话");
++            }
 +        }
 +        break;
 +    }
@@ -10465,7 +10655,8 @@ index 0000000..2fd827f
 +    lv_obj_set_flag(col, LV_OBJ_FLAG_HIDDEN, true);
 +}
 +
-+void carpet_page_build(lv_obj_t *func_tile, lv_obj_t *ring_tile, lv_obj_t *amb_tile)
++void carpet_page_build(lv_obj_t *func_tile, lv_obj_t *ring_tile, lv_obj_t *amb_tile,
++                       lv_obj_t *face_tile)
 +{
 +    if (!func_tile || !ring_tile || !amb_tile) return;
 +    fonts_init();
@@ -10473,6 +10664,14 @@ index 0000000..2fd827f
 +    s_func_tile = func_tile;
 +    s_ring_tile = ring_tile;
 +    s_amb_tile = amb_tile;
++
++    /* B §1 守护灯点：Avatar 头顶正上方一枚琥珀点（y=84 按头部顶端 ≈106 的实拍估的，
++     * 刷完截图校正）。make_dot 自带不可点击 + 默认藏 —— 灯是示警不是按钮，
++     * 脸那格的点击仍干净地落到 tap 分支。 */
++    if (face_tile) {
++        s_guard_dot = make_dot(face_tile);
++        lv_obj_align(s_guard_dot, LV_ALIGN_TOP_MID, 0, 84);
++    }
 +
 +    for (int i = PG_PICKER; i < PG_COUNT; i++) {
 +        const int t = tile_for_page(i);
@@ -10519,6 +10718,11 @@ index 0000000..2fd827f
 +    /* 首屏的答句先翻 —— 露的正是脸那一格时下面那句 return 不会跑到，
 +     * 而那一格才是这句答句该出现的地方。 */
 +    carpet_link_face_tick();
++
++    /* 守护灯点跟未读走：这半截在 s_tile 判断之前，脸那格露着时也要刷。
++     * 点被念掉（broadcast 清未读）下一拍自然灭。 */
++    if (s_guard_dot)
++        lv_obj_set_flag(s_guard_dot, LV_OBJ_FLAG_HIDDEN, !carpet_link_event_pending());
 +
 +    /* 台架那一下先回脸：四方向都从默认态（脸）起判才称得准（串口任务不许动 LVGL 对象）。 */
 +    if (s_bench_nav) {
@@ -10630,10 +10834,10 @@ index 0000000..2fd827f
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_page.h b/esp32/components/muse/carpet/carpet_page.h
 new file mode 100644
-index 0000000..bd038d9
+index 0000000..86266ca
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,69 @@
 +/*
 + * 场景页（L1 选场景 / L2 场景 / L3 功能详情）住在 muse_ui.c 建的那格 tile 里。
 + *
@@ -10654,8 +10858,10 @@ index 0000000..bd038d9
 +#include "lvgl.h"
 +
 +/* LVGL task only: builds the page tree across the three carpet tiles muse_ui.c
-+ * created — func（上滑功能层）/ ring（下拉场景环）/ amb（右滑氛围）. */
-+void carpet_page_build(lv_obj_t *func_tile, lv_obj_t *ring_tile, lv_obj_t *amb_tile);
++ * created — func（上滑功能层）/ ring（下拉场景环）/ amb（右滑氛围）.
++ * face_tile 那一格本组件照旧一个字都不画，只把 B §1 的守护灯点挂上去。 */
++void carpet_page_build(lv_obj_t *func_tile, lv_obj_t *ring_tile, lv_obj_t *amb_tile,
++                       lv_obj_t *face_tile);
 +
 +/* LVGL task only: pulls the link state onto the labels, at the chrome tick. */
 +void carpet_page_tick(void);
@@ -11047,7 +11253,7 @@ index d27f69e..ccc566a 100644
          muse_ble_apply();
          break;
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..93a8bf0 100644
+index 7c579bb..03da758 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,26 @@
@@ -11251,7 +11457,7 @@ index 7c579bb..93a8bf0 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +992,351 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +992,370 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -11384,6 +11590,25 @@ index 7c579bb..93a8bf0 100644
 +        const char *rest = line + 3;
 +        while (*rest == ' ') rest++;
 +        carpet_link_bench_emotion(rest);
++        return true;
++    }
++    /* B §1 守护灯点的台架口。`>event <kind>` 本机造一条守护事件帧，走链路同一条
++     * on_event()（不联网也能称：灯亮、点 Avatar 念那句、念完自动进对话）；
++     * `>event` 回读未读；`>event clear` 清空。
++     * kind：sos_triggered / sos_acked / sos_failed / sos_cancelled /
++     * fence_enter / fence_exit / sentinel_motion / downlink_msg。 */
++    if (!strncmp(line, "event", 5) && (line[5] == '\0' || line[5] == ' ')) {
++        const char *rest = line + 5;
++        while (*rest == ' ') rest++;
++        if (!*rest) {
++            carpet_link_event_dump();
++        } else if (!strcmp(rest, "clear")) {
++            carpet_link_event_clear();
++            carpet_link_event_dump();
++        } else {
++            carpet_link_bench_event(rest);
++            carpet_link_event_dump();
++        }
 +        return true;
 +    }
 +    /* 本机造一次触摸，走和真手指同一条手势判定路（契约那四条：左右滑切卡、
@@ -11603,7 +11828,7 @@ index 7c579bb..93a8bf0 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1371,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1390,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -11616,7 +11841,7 @@ index 7c579bb..93a8bf0 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1479,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1498,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -12669,7 +12894,7 @@ index 20c46d3..5d45ee1 100644
  }
  #endif
 diff --git a/esp32/components/muse/muse_ui.c b/esp32/components/muse/muse_ui.c
-index 4a98f64..0325b59 100644
+index 4a98f64..e1487da 100644
 --- a/esp32/components/muse/muse_ui.c
 +++ b/esp32/components/muse/muse_ui.c
 @@ -43,6 +43,9 @@
@@ -13035,7 +13260,7 @@ index 4a98f64..0325b59 100644
      }
 +#if CONFIG_MUSE_CARPET_CARDS
 +    if (s_carpet && s_scene && s_amb) {
-+        carpet_page_build(s_carpet, s_scene, s_amb);
++        carpet_page_build(s_carpet, s_scene, s_amb, s_face);
 +    }
 +#endif
      build_overlays();
