@@ -320,12 +320,17 @@ private fun AlbumPushCard(app: AppRuntime, acceptScreens: Boolean, petName: Stri
     }
 }
 
+/**
+ * 它会做什么（权限 + 技能清单合一）。上一版这是两张卡：「它能帮到什么程度」管档位，
+ * 「这 N 件事它能做吗」管逐条准入 —— 同一个问题（"它到底能干什么"）被拆到两个圆角里，
+ * 用户得在两张卡之间来回对。现在一张卡讲完：先定放手多少，再看每件事准不准，
+ * 拦下的那几条直接说清差在哪一档。端点与密钥不摆出来（V1.18）：出包时就配好了。
+ */
 @Composable
 private fun AssistantSettings(vm: MeViewModel, s: MeAssistantUi) {
     InkCard(icon = MIcons.agent, tone = if (s.endpoint.configured) Tone.Sat else Tone.Neutral) {
-        // 端点与密钥不再摆出来（V1.18）：出包时就配好了，车主没有需要填的东西
-        CardTitle("它能帮到什么程度", trailing = if (s.endpoint.configured) s.endpoint.model else "只用手上的信息回答")
-        // 档位标题必须大过它管的三枚芯片。之前这里用 11sp 的 SectionLabel，
+        CardTitle("它会做什么", trailing = if (s.endpoint.configured) s.endpoint.model else "只用手上的信息回答")
+        // 档位标题必须大过它管的那排芯片。之前这里用 11sp 的 SectionLabel，
         // 而下面的芯片是 12.5sp —— 屏幕上是小字在领读，标题在当注脚
         SectionHead("放手交给它多少", "现在停在「${s.granted.label}」")
         // 五档一行装不下，横向滚的话最后一枚「不可逆动作」只剩半个词 —— 这是权限档，
@@ -333,14 +338,6 @@ private fun AssistantSettings(vm: MeViewModel, s: MeAssistantUi) {
         ChipBand(PermissionTier.entries.map { t ->
             ChipSpec(t.label, selected = t === s.granted) { vm.setGranted(t) }
         })
-        Text(
-            "「发求救」它不会自己发，只会提醒你长按那颗按钮。",
-            style = Type.Caption,
-            color = Ink.TextLow,
-        )
-    }
-    InkCard(icon = MIcons.task) {
-        CardTitle("这 ${s.skills.size} 件事它能做吗", trailing = "${s.skills.count { it.allowed }} 件可以做")
         s.skills.forEach { r ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -353,5 +350,10 @@ private fun AssistantSettings(vm: MeViewModel, s: MeAssistantUi) {
                 Badge(if (r.allowed) "可以做" else "被拦下", if (r.allowed) Tone.Ok else Tone.Wait)
             }
         }
+        Text(
+            "「发求救」它不会自己发，只会提醒你长按那颗按钮。",
+            style = Type.Caption,
+            color = Ink.TextLow,
+        )
     }
 }

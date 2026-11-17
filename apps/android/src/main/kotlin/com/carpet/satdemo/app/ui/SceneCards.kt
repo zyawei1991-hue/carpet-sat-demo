@@ -89,11 +89,16 @@ private fun fuelLine(fraction: Double): String {
     return if (n == 4) "满箱" else if (n == 0) "见底" else "$n/4 箱"
 }
 
-/** 四轮胎压一行报完。分开四行会让这张卡只剩下胎压这一件事 */
+/** 四轮胎压一行报完。高低档结论比 bar 数字好读：车主要做的是"要不要补气"，不是单位换算 */
 private fun ReadingBoard.tireLine(): String? {
     val ts = TIRE_KEYS.mapNotNull { of(it) }
     if (ts.isEmpty()) return null
-    return ts.joinToString(" / ") { "%.1f".format(it.value) } + if (ts.size == 4) " bar" else " bar（缺 ${4 - ts.size} 只）"
+    val low = ts.count { it.value < 2.2 }
+    return when {
+        low == 0 -> "四只胎压都正常"
+        ts.size == 4 -> "有 $low 只偏低，去补口气"
+        else -> "读到了 ${ts.size} 只，有 $low 只偏低"
+    }
 }
 
 /** 一条读数按格式念出来。没有就是没有，不补一个看起来像数的 0 */
@@ -117,9 +122,9 @@ fun VehicleFindCard(s: CardScope) {
         // 说三遍不只啰嗦，还会让卡片看着像填不满的表（真机照片里"终端电量 --"是同一条 bug）
         ValueRow("车位编号", "B2-073")
         if (fix != null) {
-            ValueRow("记录时间", fix.fixAgeS?.let { "%.0f 秒前".format(it) })
-            // 经纬度是"复制进地图"用的，不是给人读的：排最后、降一档字号，不跟上面两行抢
-            Text("经纬度 %.5f, %.5f".format(fix.lat, fix.lon), style = Type.Mono, color = Ink.TextLow)
+            ValueRow("记录时间", fix.fixAgeS?.let {
+                if (it >= 60) "%.0f 分钟前".format(it / 60) else "%.0f 秒前".format(it)
+            })
         } else {
             Text("还没有定位，寻车只能靠上一次记下的车位", style = Type.Caption, color = Ink.TextLow)
         }
@@ -208,11 +213,17 @@ private fun OrderSection(s: CardScope, maint: MaintStore, picked: List<Suggestio
     val order = maint.order(picked)
     val bytes = WorkOrderCodec.encode(order)
     val clip = LocalClipboardManager.current
-    Text(
-        WorkOrderCodec.describe(WorkOrderCodec.decode(bytes)),
-        style = Type.Mono,
-        color = Ink.TextMid,
-    )
+    // 工单原文（Mono 那一行）收进展开区：那是给维修厂机器读的编码，车主核对勾选项
+    // 用的是上面那几行人话。展开才出现，日常这卡不再挂一串编码
+    var detail by rememberSaveable { mutableStateOf(false) }
+    GhostAction(if (detail) "收起工单原文" else "看工单原文") { detail = !detail }
+    if (detail) {
+        Text(
+            WorkOrderCodec.describe(WorkOrderCodec.decode(bytes)),
+            style = Type.Mono,
+            color = Ink.TextMid,
+        )
+    }
     Text(
         if (WorkOrderCodec.fits(s.app.usage().budget)) "这张保养单能一次发出去"
         else "这张保养单太长了，卫星一次发不完，少勾几项",
@@ -633,8 +644,8 @@ fun DeviceManagerCard(s: CardScope) {
             Switch(checked = acceptScreens.acceptScreens, onCheckedChange = { s.app.setFlag(acceptScreens.copy(acceptScreens = it)) })
         }
         // **接入点必须直给**（V1.18 那条理由仍然成立）：同一个路由器下接不上，
-        // 唯一要动手的就是把这一行抄到屏上
-        ValueRow("接入点", st.localIp?.let { "ws://$it:${ScreenLinkServer.PORT}" }, mono = true)
+        // 唯一要动手的就是把这一行抄到屏上。ws:// 前缀车主抄的时候用不上，留纯地址
+        ValueRow("接入点", st.localIp?.let { "$it:${ScreenLinkServer.PORT}" }, mono = true)
         if (allowed.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(Grid.x8)) {
                 SectionHead("白名单", "点一下移出，并立刻断开")
@@ -703,9 +714,9 @@ fun DeviceManagerCard(s: CardScope) {
         CollapsableNote(
             "配对怎么做",
             "两种接法，选一种：\n" +
-                "① 常用：手机开 2.4GHz 热点，圆屏出厂就拨 ws://192.168.43.1:8443（手机在热点里的固定地址），屏上什么都不用填。\n" +
-                "② 同一个路由器：手机和圆屏连同一个 Wi-Fi 也行 —— 服务器监听所有网卡，只是圆屏出厂不知道手机被路由分到了哪个地址，所以第一次要在屏上「设置→WI-FI→接入点」把上面那行的地址原样打进去（之后屏自己记住，不用再填）。\n" +
-                "拨不通先看两点：路由器有没有开「AP 隔离」（开了两台设备互相看不见，换 ① 或关掉它）；手机上是不是同时开着热点（那样接入点那行可能报的是热点地址，屏走路由器时用不上）。",
+                "① 常用：手机开 2.4GHz 热点，圆屏出厂就找手机（屏上什么都不用填）。\n" +
+                "② 同一个路由器：手机和圆屏连同一个 Wi-Fi 也行，第一次要在屏上「设置→WI-FI→接入点」把上面那行的地址原样打进去（之后屏自己记住，不用再填）。\n" +
+                "拨不通先看两点：路由器有没有开「AP 隔离」（开了两台设备互相看不见，换 ① 或关掉它）；手机上是不是同时开着热点。",
         )
     }
 }
@@ -757,5 +768,9 @@ private fun uiTone(t: CoreTone): Tone = when (t) {
 private fun elapsed(ms: Long): String {
     val sec = (ms / 1000).coerceAtLeast(0)
     val m = sec / 60
-    return if (m > 0) "$m 分 ${sec % 60} 秒" else "$sec 秒"
+    return when {
+        m >= 60 -> "${m / 60} 小时 ${m % 60} 分"
+        m > 0 -> "$m 分多"
+        else -> "$sec 秒"
+    }
 }

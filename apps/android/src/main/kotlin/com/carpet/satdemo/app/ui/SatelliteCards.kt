@@ -23,6 +23,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -119,6 +122,10 @@ private fun clock(sec: Long): String {
 /** 图例里的时间只到"分"：精确秒数已经在那个大数字上了，这里再说一遍就是抢位置 */
 private fun minuteOnly(sec: Long): String = if (sec >= 60) "${sec / 60} 分" else "${sec} 秒"
 
+/** 字节给车主读的口径：KB 就别再念 B 了 */
+private fun humanBytes(b: Int): String =
+    if (b >= 1024) "%.1f KB".format(b / 1024f).removeSuffix(".0") else "$b 字节"
+
 /**
  * 方位角 → 车主看得懂的方向。数字给的是精确值，汉字给的是"我该往哪边转车身"，
  * 两个都要：只写 45° 得先想一下东北是多少度（§5.2 第 4 条：形和数都要能读）。
@@ -140,24 +147,34 @@ fun LinkCard(s: CardScope) {
     val st = s.status
     val snap = s.snap
     val tone = phaseTone(st.phase)
+    var detail by rememberSaveable { mutableStateOf(false) }
     InkCard(icon = MIcons.signal, tone = tone, emphasis = true) {
-        CardTitle("链路", trailing = st.localIp?.let { "接入点 $it" })
+        CardTitle("链路", trailing = null)
         Text(linkWord(st.phase), style = Type.Hero.copy(color = tone.color))
         Text(phaseLine(st.phase, st.clients), style = Type.Body)
-        if (snap == null) {
-            // 三条灰条，不是"稍等一下"那一行字。标签先给全、值位留同高的条，
-            // 第一条状态落地时这张卡一行都不位移 —— 而且"还没到"从此和"取不到"长得不一样
-            ValueRow("主路", null, warming = true)
-            ValueRow("卫星终端", null, warming = true)
-            ValueRow("载噪比", null, warming = true)
-        } else {
-            ValueRow("现在走哪条", if (snap.link.primary.name == "cell") "手机信号" else "卫星", if (snap.link.cellOk) Tone.Ok else Tone.Wait)
-            ValueRow(
-                "卫星终端",
-                if (snap.sat.moduleOk) "在线" else "离线",
-                if (snap.sat.moduleOk) Tone.Ok else Tone.Alert,
-            )
-            ValueRow("载噪比", snap.sat.cnr?.let { "%.1f dB".format(it) })
+        // 接入点 IP、主路选择、载噪比是排障数据，不是车主每天要读的数。
+        // 混在状态正文里，等于让用户在三条工程参数里找那一句人话。收进"详情"
+        GhostAction(if (detail) "收起详情" else "看详情") { detail = !detail }
+        if (detail) {
+            if (snap == null) {
+                ValueRow("主路", null, warming = true)
+                ValueRow("卫星终端", null, warming = true)
+                ValueRow("载噪比", null, warming = true)
+            } else {
+                ValueRow("现在走哪条", if (snap.link.primary.name == "cell") "手机信号" else "卫星", if (snap.link.cellOk) Tone.Ok else Tone.Wait)
+                ValueRow(
+                    "卫星终端",
+                    if (snap.sat.moduleOk) "在线" else "离线",
+                    if (snap.sat.moduleOk) Tone.Ok else Tone.Alert,
+                )
+                // 载噪比翻译成强弱的结论，dB 数字本身是工程口径。有数才下结论，没有就承认没测到
+                ValueRow(
+                    "卫星信号",
+                    snap.sat.cnr?.let { if (it >= 10.0) "不错" else "偏弱，开阔处会更好" } ?: "还没测到",
+                    if ((snap.sat.cnr ?: -99.0) >= 10.0) Tone.Ok else Tone.Wait,
+                )
+                st.localIp?.let { ValueRow("接入点", it, mono = true) }
+            }
         }
     }
 }
@@ -458,10 +475,8 @@ fun PassWindowCard(s: CardScope) {
         // 等待 : 窗口 = 从现在到窗口结束这一整段时间的两段
         if (left != null && !inWindow && dur > 0) {
             StackedBar(listOf(left.toInt().coerceAtLeast(1) to Ink.Track, dur.toInt() to c))
-            Row(horizontalArrangement = Arrangement.spacedBy(Grid.x16)) {
-                LegendDot(Ink.Track, "还要等", minuteOnly(left))
-                LegendDot(c, "窗口能发", minuteOnly(dur))
-            }
+            // "还要等"不再重复念一遍：上面的大数字就是它。图例只解释第二段是什么
+            LegendDot(c, "之后窗口能发", minuteOnly(dur))
         }
         // 仰角和"够不够用"合成一句：分开写的话没人会分别读它们
         maxEl?.let { el ->
@@ -609,9 +624,14 @@ fun PositionCard(s: CardScope) {
         return
     }
     InkCard(icon = MIcons.position, tone = Tone.Ok) {
+        var detail by rememberSaveable { mutableStateOf(false) }
         CardTitle("位置", trailing = sourceLabel(g.source))
-        ValueRow("经纬度", "%.5f, %.5f".format(g.lat, g.lon), mono = true)
-        ValueRow("精度 HDOP", g.hdop?.let { "%.1f".format(it) }, mono = true)
+        // 经纬度和 HDOP 是对表用的原始读数，徒步核对坐标时才需要。日常那张脸只说"新不新"
+        GhostAction(if (detail) "收起坐标" else "看坐标") { detail = !detail }
+        if (detail) {
+            ValueRow("经纬度", "%.5f, %.5f".format(g.lat, g.lon), mono = true)
+            ValueRow("精度 HDOP", g.hdop?.let { "%.1f".format(it) }, mono = true)
+        }
         ValueRow(
             "新鲜度",
             g.fixAgeS?.let { if (it > 30) "%.0f 秒前（已过期）".format(it) else "%.0f 秒前".format(it) },
@@ -653,8 +673,9 @@ fun SentinelCard(s: CardScope) {
     val armed = sn?.armed == true
     InkCard(icon = MIcons.sentry, tone = if (armed) Tone.Ok else Tone.Neutral, mock = s.mock(Capability.Sentinel)) {
         CardTitle("哨兵模式", trailing = if (armed) "布防中" else "未布防")
+        // trailing 已经说了布防/未布防，正文不再重复那两个字，只讲布了防之后会发生什么
         Text(
-            if (armed) "布防中：车停稳一阵会报个平安，动过就留一个轨迹点" else "未布防",
+            if (armed) "车停稳一阵会报个平安，动过就留一个轨迹点" else "打开后，车停稳一阵会报个平安",
             style = Type.Body,
         )
         // 这里原来直接把 epoch 毫秒念上屏（一串 1730…）。那不是"时间"，那是我们内部的数：
@@ -675,7 +696,7 @@ fun DockCard(s: CardScope) {
             else "它还没连上来。首页那张「它」卡里配对",
             style = Type.Body,
         )
-        ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)
+        // ws:// 是排障口径，车主不需要认这个地址；出问题时开发者模式里有
     }
 }
 
@@ -697,23 +718,27 @@ fun UsageCard(s: CardScope) {
         else -> Tone.Neutral
     }
     InkCard(icon = MIcons.quota, tone = tone) {
+        var detail by rememberSaveable { mutableStateOf(false) }
         CardTitle("卫星用量", trailing = u.model?.name)
         if (u.invalidCard) {
             // 无效卡的时候连额度都不能信：那组数是从没就绪的模组里读出来的
             Text("这张卡没读出来，下面的数都不可信。先看看卡是不是插反了", style = Type.Body, color = Ink.Alert)
         }
-        ValueRow("长度等级", u.level?.let { "${it.level} · ${it.maxBytes} B" }, mono = true)
-        ValueRow("一条最多发多长", "${u.budget.dataFieldBytes} B（按最保守的一档）")
+        ValueRow("一条最多发多长", humanBytes(u.budget.dataFieldBytes) + "（按最保守的一档）")
         ValueRow(
             "回执",
             u.service?.let { if (it == AccessService.LONG) "终端自己收" else "要主动去查" },
         )
         ValueRow("卡号", u.cardId?.takeIf { it != "1" }, mono = true)
         ProgressBar(u.pressure, if (u.pressure >= 0.9f) Tone.Alert else Tone.Wait)
-        ValueRow("交给终端 / 总额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 还不知道")
-        ValueRow("还在手机里排队", "${u.waiting} 条")
-        ValueRow("没发出去丢掉的", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
-        ValueRow("过境后收回来", "${u.reclaimed} 条")
+        // 台账三行是排障口径：演示要核对账目时点开"明细"才出现，日常只留水位条和一句人话
+        GhostAction(if (detail) "收起明细" else "看明细") { detail = !detail }
+        if (detail) {
+            ValueRow("交给终端 / 总额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 还不知道")
+            ValueRow("还在手机里排队", "${u.waiting} 条")
+            ValueRow("没发出去丢掉的", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
+            ValueRow("过境后收回来", "${u.reclaimed} 条")
+        }
         Text(
             if (u.model == null) "还没认出台端型号，总额度先空着"
             else "「交给终端」只是交到了终端手上，还不算发出去",

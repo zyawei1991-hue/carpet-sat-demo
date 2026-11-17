@@ -639,7 +639,8 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
         Text(
             when {
                 moduleOff -> "补发等终端回来"
-                cnr != null -> "CNR %.1f dB".format(cnr)
+                // CNR 是工程口径；圆里留给车主的是强弱结论
+                cnr != null -> if (cnr >= 10f) "信号不错" else "信号偏弱"
                 else -> "未锁定"
             },
             style = Type.Caption.copy(color = if (live) Ink.TextHigh else Ink.TextMid),
@@ -647,15 +648,8 @@ private fun MirrorText(snap: StatePayload, moduleOff: Boolean, left: Int?, size:
             softWrap = false,
             overflow = TextOverflow.Clip,
         )
-        // 等宽：坐标有一位小数错位会被读成"位置变了"，而这行恰恰是拿来核对的。
-        // 11sp 是这一摞里唯一在字号 1.3 下仍装得下的写法 —— 再大一号就会被圆裁掉尾巴
-        Text(
-            "%.4f, %.4f".format(snap.gnss.lat, snap.gnss.lon),
-            style = Type.Mono.copy(fontSize = 11.sp, color = if (live) Ink.TextLow else Ink.TextLow.copy(alpha = 0.7f)),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // 经纬度是对表用的原始读数，圆里那摞字是给车主看的状态 —— 坐标留在位置卡
+        // 的「看坐标」里。少这一行，其余各行不再顶着弦长的极限排版
     }
 }
 

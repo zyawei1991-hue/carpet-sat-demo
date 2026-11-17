@@ -43,7 +43,7 @@ class PhotoPush(
      */
     fun push(context: Context, uri: android.net.Uri): Boolean {
         if (!screenReady()) {
-            log("圆屏不在线，照片没推 —— 连上并升到 v3 固件后再试")
+            log("圆屏还没连上，照片没推；连上后再试一次")
             return false
         }
         worker.execute {
@@ -55,11 +55,11 @@ class PhotoPush(
                 }
                 val frames = PhotoChunks.commands("p-${UUID.randomUUID()}", jpeg, System.currentTimeMillis())
                 if (frames.isEmpty()) {
-                    log("这张压完还是太大（${jpeg.size} 字节），圆屏一次放不下")
+                    log("这张照片太大了，圆屏一次放不下；换一张小点的试试")
                     return@execute
                 }
                 server()?.broadcast(frames)
-                log("照片已推给圆屏：${jpeg.size / 1024} KB JPEG，${frames.size} 块")
+                log("照片已经推过去了，它现在就能看到")
             } catch (e: Exception) {
                 log("推图失败：${e.message ?: e.javaClass.simpleName}")
             }
