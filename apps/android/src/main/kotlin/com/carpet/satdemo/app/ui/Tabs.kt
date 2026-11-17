@@ -17,12 +17,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -188,7 +193,8 @@ fun MeTab(
             }
         }
         AssistantSettings(vm, ready.assistant)
-        AlbumPushCard(app, ready.flags.acceptScreens)
+        PetNameCard(vm, ready.assistant.petName)
+        AlbumPushCard(app, ready.flags.acceptScreens, ready.assistant.petName)
         RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
@@ -233,21 +239,72 @@ private fun ToggleRow(title: String, checked: Boolean, hint: String, onChange: (
  * 中间那道缝就是这两件事的分界。
  */
 /**
+ * 起名卡。产品从"工具"变成"关系"的那一步就落在这一张上：
+ * 没起名时它是「我的」页最上面的一张 —— 先有名字，后面所有"它怎么怎么样"的文案才有主语；
+ * 起完名这张卡退到助手设置下面，变成改名入口，不再抢第一眼。
+ */
+@Composable
+private fun PetNameCard(vm: MeViewModel, current: String) {
+    val named = current.isNotBlank()
+    var editing by rememberSaveable { mutableStateOf(!named) }
+    var draft by rememberSaveable(current) { mutableStateOf(current) }
+    InkCard(icon = MIcons.photo, tone = if (named) Tone.Neutral else Tone.Sat) {
+        CardTitle(
+            if (named) "它的名字" else "给它起个名字",
+            trailing = if (named) current else "还没起名",
+        )
+        if (editing) {
+            InkField(
+                value = draft,
+                onValueChange = { draft = it.take(12) },
+                placeholder = "叫它什么好？最多 12 个字",
+                onSubmit = {
+                    vm.setPetName(draft)
+                    editing = false
+                },
+                trailing = {
+                    IconButton(onClick = {
+                        vm.setPetName(draft)
+                        editing = false
+                    }) {
+                        Icon(MIcons.send, contentDescription = "就这样叫它", tint = Ink.Sat)
+                    }
+                },
+            )
+            Text(
+                "起了名，App 和圆屏上都会用它来称呼这个小家伙。",
+                style = Type.Caption,
+                color = Ink.TextLow,
+            )
+        } else {
+            GhostAction("改个名") { editing = true }
+        }
+    }
+}
+
+/**
  * 相册推图（11-11 清单 §8.3 / B §5）：从手机相册现选一张推给圆屏的相册页。
  * 照片不打包进 APK —— 每一张都是推的那一刻从相册现读现压的。
  * 屏侧 JPEG 解码还在等固件：推过去没反应时先看 App 日志有没有"照片已推给圆屏"，
  * 有 = App 这边通了，屏上不显示是固件还没跟上（老固件静默忽略，不掉线）。
+ *
+ * 文案走它的视角：给车主的不是"推图成功 N 帧"，是"给它看你拍的照片"。
+ * 名字从 [MeAssistantUi.petName] 带进来，起了名就称呼名字，没起名兜"它"。
  */
 @Composable
-private fun AlbumPushCard(app: AppRuntime, acceptScreens: Boolean) {
+private fun AlbumPushCard(app: AppRuntime, acceptScreens: Boolean, petName: String) {
     // PickVisualMedia 不申请存储权限（Photo Picker 系统组件）；老系统退回 GetContent
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) app.setAlbumPick(uri)
     }
+    val called = petName.ifEmpty { "它" }
     InkCard(icon = MIcons.photo) {
-        CardTitle("圆屏相册", trailing = if (app.runtime.status.value.screenPage == ScreenPage.photo) "屏在相册页" else null)
+        CardTitle(
+            "给它看你拍的照片",
+            trailing = if (app.runtime.status.value.screenPage == ScreenPage.photo) "$called 正在看相册" else null,
+        )
         Text(
-            "选一张手机相册里的照片推到圆屏轮播。照片现选现推，不占 App 的体积；圆屏翻到相册页时也会自动推最近选的这张。",
+            "选一张照片，$called 会立刻看到。照片现选现推，不占手机的体积；$called 翻到相册页时也会把最近这张再看一遍。",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -259,7 +316,7 @@ private fun AlbumPushCard(app: AppRuntime, acceptScreens: Boolean) {
             enabled = acceptScreens && screenOnline,
             colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
             modifier = Modifier.fillMaxWidth(),
-        ) { Text(if (screenOnline) "选照片推给圆屏" else "圆屏不在线") }
+        ) { Text(if (screenOnline) "选一张给它看" else "$called 还没连上") }
     }
 }
 

@@ -26,6 +26,8 @@ sealed interface MeUiState {
         val fence: Boolean,
         val guardRunning: Boolean,
         val assistant: MeAssistantUi,
+        /** 它现在的名字。空 = 还没起名，界面上先给起名入口 */
+        val petName: String = "",
     ) : MeUiState
 }
 
@@ -40,6 +42,8 @@ data class MeAssistantUi(
     val granted: PermissionTier = PermissionTier.ReadLocal,
     /** 「它能不能做这 N 件事」的逐条判定。granted 一变就得重算，原来靠 remember(granted) 兜 */
     val skills: List<SkillRowUi> = emptyList(),
+    /** 它的名字，从 [AppRuntime.petName] 带上来，起名卡和文案层都读这一份 */
+    val petName: String = "",
 )
 
 data class SkillRowUi(val title: String, val needs: PermissionTier, val allowed: Boolean)
@@ -60,11 +64,12 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
         )
     }
 
-    private val assistantFlow = combine(app.aiEndpoint, app.aiGranted) { ep, g ->
+    private val assistantFlow = combine(app.aiEndpoint, app.aiGranted, app.petName) { ep, g, name ->
         MeAssistantUi(
             endpoint = ep,
             granted = g,
             skills = app.aiSkills().map { SkillRowUi(it.title, it.needs, it.allowed) },
+            petName = name,
         )
     }
 
@@ -75,6 +80,7 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
             fence = r.fence,
             guardRunning = r.running,
             assistant = a,
+            petName = a.petName,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MeUiState.Loading)
 
@@ -89,4 +95,6 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
     fun setFence(on: Boolean, name: String) = app.setFence(on, name)
 
     fun setGranted(tier: PermissionTier) = app.setAiGranted(tier)
+
+    fun setPetName(name: String) = app.setPetName(name)
 }

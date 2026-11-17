@@ -693,12 +693,12 @@ fun MirrorCaption(
             Dot(if (serverError != null) Tone.Alert else if (online) Tone.Ok else Tone.Neutral)
             Text(
                 when {
-                    serverError != null -> "圆屏这一帧还没接上，稍等一下"
-                    mirroring -> "屏上此刻就是这一页 · ${screenPageLabel(page!!)}"
-                    online -> "屏还没说自己在哪一页，圆里先按默认画"
-                    // 不再写"还没有屏接入"：卡标题右边那格已经写着"未连接"，下面那行又给做法，
+                    serverError != null -> "它这一帧还没接上，稍等一下"
+                    mirroring -> "它此刻看着的就是这一页 · ${screenPageLabel(page!!)}"
+                    online -> "它还没说自己在哪一页，圆里先按默认画"
+                    // 不再写"还没有屏接入"：卡标题右边那格已经写着"不在场"，下面那行又给做法，
                     // 同一屏三次陈述同一个负状态，第三句就是噪音。这句只负责承认数据来源
-                    else -> "这是手机上的预览，还没连屏"
+                    else -> "这是手机上的预览，它还没连上"
                 },
                 style = Type.Caption,
                 color = if (serverError != null) Ink.Alert else Ink.TextMid,

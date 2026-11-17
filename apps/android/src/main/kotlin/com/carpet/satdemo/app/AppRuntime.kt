@@ -197,6 +197,24 @@ class AppRuntime(private val host: Application) {
         _scene.value = next
     }
 
+    /**
+     * 它的名字。空 = 还没起名。起名是产品从"工具"变成"关系"的那一步：
+     * 起完之后全 App 的人格化文案（推图、对话、守护）都用这个名字称呼它，
+     * 所以这里只有一个 setter 和一个流，文案层各处自己拼。
+     */
+    private val _petName = MutableStateFlow(prefs.getString(KEY_PET_NAME, "") ?: "")
+    val petName: StateFlow<String> = _petName
+
+    /** 给它起名 / 改名。空串 = 清掉（文案退回"它"这种中性称呼） */
+    fun setPetName(name: String) {
+        val trimmed = name.trim().take(12)
+        _petName.value = trimmed
+        prefs.edit().putString(KEY_PET_NAME, trimmed).apply()
+    }
+
+    /** 文案层用的称呼：起了名用名字，没起名兜一个中性代词 */
+    fun petCalled(): String = _petName.value.ifEmpty { "它" }
+
     fun toggleCard(key: String, hidden: Boolean) {
         _hidden.value = if (hidden) _hidden.value + key else _hidden.value - key
     }
@@ -1160,6 +1178,7 @@ class AppRuntime(private val host: Application) {
         private const val KEY_VOICE_TONE = "voice_tone"
         private const val KEY_VOICE_FACE = "voice_face"
         private const val KEY_ANSWER_DEVICE = "answer_device"
+        private const val KEY_PET_NAME = "pet_name"
 
         /** 主动扫描的间隔。比 1Hz 慢一个量级：提醒是"这事值得说一句"，不是刷屏 */
         private const val AI_SCAN_MS = 10_000L

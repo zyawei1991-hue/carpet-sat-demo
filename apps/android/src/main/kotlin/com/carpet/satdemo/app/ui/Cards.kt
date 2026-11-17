@@ -47,7 +47,7 @@ object Cards {
             CardDescriptor("position", "位置", CardGroup.Guard, setOf(Capability.PositionSource)) { PositionCard(it) },
             CardDescriptor("fence", "电子围栏", CardGroup.Guard, setOf(Capability.Geofence)) { FenceCard(it) },
             CardDescriptor("sentinel", "哨兵模式", CardGroup.Guard, setOf(Capability.Sentinel)) { SentinelCard(it) },
-            CardDescriptor("dock", "圆屏", CardGroup.Inline, setOf(Capability.Dock)) { DockCard(it) },
+            CardDescriptor("dock", "它", CardGroup.Inline, setOf(Capability.Dock)) { DockCard(it) },
 
             // 用车养车
             CardDescriptor("vehicle.status", "整车状态", CardGroup.Vehicle, setOf(Capability.VehicleBus), hero = true) { VehicleStatusCard(it) },

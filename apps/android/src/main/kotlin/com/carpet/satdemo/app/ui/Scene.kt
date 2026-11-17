@@ -143,6 +143,30 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
     companion object {
         /** 首页那个切换器只放常切的三个，其余走"更多"。全塞顶上就成了横向滚动的迷宫 */
         val quick: List<Scene> get() = listOf(Vehicle, Offgrid, Kids)
+
+        /**
+         * 圆屏 picker 那一页格子 ↔ App 场景的对应（「变装统一」）。
+         *
+         * 圆屏的场景切换器（屏自己驱动的那棵页树，见 [ScreenPage.picker]）格子上挂的名字
+         * 和 App 切换器上的必须讲同一套话：同一场景两端用同一个词（车载/亲子/数字分身），
+         * 变装变的是脸和页面皮，**不变的是名字和它这个人** —— 起了名之后两端都用
+         * [AppRuntime.petCalled] 称呼，情绪 [UiEmotion] 也由 App 统一下行。
+         *
+         * 对不上头的三格是有意的，不是没对齐：
+         * - `clock` / `gallery` / `photo` 是屏自己的功能页（看钟、看照片），不是场景，
+         *   App 不给它们造场景 —— ContextPin 也不会把它们钉到卡片流上。
+         * - App 的 [Offgrid] / [Health] 屏上没有对应页：屏的 1.75" 圆面画不下
+         *   卫星排队/体征那几串卡，这两个场景的主屏就是手机，屏只继续当脸和嘴。
+         *
+         * 契约纪律不变：**页由屏定，内容由手机定**。这张表只用于把屏报上来的页
+         * 翻译成 App 这边的说法（ContextPin、镜像注脚），不是遥控切页的通道。
+         */
+        fun fromScreenPage(page: com.carpet.satdemo.core.protocol.ScreenPage): Scene? = when (page) {
+            com.carpet.satdemo.core.protocol.ScreenPage.vehicle -> Vehicle
+            com.carpet.satdemo.core.protocol.ScreenPage.kids -> Kids
+            com.carpet.satdemo.core.protocol.ScreenPage.avatar -> Social
+            else -> null
+        }
     }
 }
 

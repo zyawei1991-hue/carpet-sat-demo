@@ -99,7 +99,7 @@ fun HomeShell(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier = 
         // 屏在车辆页 = 车里有人正在看它，那一张就是现在最要紧的事
         val pinned = contextKey(status.screenPage)
         if (pinned != null) ContextPin(scope, pinned)
-        DockStatusCard(status, ready.dock, onManage = { vm.openDeviceCenter() })
+        DockStatusCard(app, status, ready.dock, onManage = { vm.openDeviceCenter() })
         SatelliteStrip(app, status, open = satOpen, onToggle = { satOpen = !satOpen }, cancelLine = ready.cancelLine)
         // 那两张卡默认收着。兜底条上那句"展开完整链路卡"必须真能点开，否则它是一句谎
         AnimatedVisibility(visible = satOpen, enter = Motion.expandIn(reduce), exit = Motion.expandOut(reduce)) {
@@ -186,7 +186,7 @@ private fun HomeRail(app: AppRuntime, st: DemoRuntime.Status, guardOn: Boolean) 
     }
     StatusRail(
         listOf(
-            RailItem("圆屏", if (st.clients > 0) "${st.clients} 台" else "未连", dockTone),
+            RailItem("它", if (st.clients > 0) "在场" else "不在", dockTone),
             RailItem(
                 "卫星",
                 when {
@@ -276,7 +276,7 @@ private fun AssistantHero(app: AppRuntime, vm: HomeViewModel, s: AssistantUiStat
         }
         // 只有真接通了才说这句。它是一条能力，不是一句故障报告
         if (s.screenDialog && s.chat.isEmpty()) {
-            Text("圆屏上说的话也会出现在这里", style = Type.Caption, color = Ink.Ok)
+            Text("它说的话也会出现在这里", style = Type.Caption, color = Ink.Ok)
         }
 
         InkField(
@@ -443,7 +443,7 @@ internal fun SceneAsk(
             ThinkingBubble()
         }
         if (screenOnThisPage) {
-            Text("圆屏此刻就在这一页 · 它说的话落在这串里", style = Type.Caption, color = Ink.Ok)
+            Text("它此刻就在这一页 · 它说的话落在这串里", style = Type.Caption, color = Ink.Ok)
         }
         InkField(
             value = draft,
@@ -632,7 +632,7 @@ internal fun Bubble(app: AppRuntime, line: Turn, modelConfigured: Boolean) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(MIcons.dock, contentDescription = null, tint = Ink.Wait, modifier = Modifier.size(13.dp))
-                    Text("圆屏", style = Type.Caption, color = Ink.Wait)
+                    Text("它", style = Type.Caption, color = Ink.Wait)
                 }
             }
             Text(line.text, style = Type.Body)
@@ -697,6 +697,7 @@ private fun sourceLabel(line: Turn, modelConfigured: Boolean): String = when {
 private fun contextKey(page: ScreenPage?): String? = when (page) {
     ScreenPage.vehicle -> "vehicle.status"
     ScreenPage.kids -> "fence"
+    ScreenPage.avatar -> "social.avatar"
     else -> null
 }
 
@@ -708,7 +709,7 @@ private fun contextKey(page: ScreenPage?): String? = when (page) {
 private fun ContextPin(scope: CardScope, key: String) {
     Column(verticalArrangement = Arrangement.spacedBy(Grid.x4)) {
         Text(
-            "圆屏此刻在看" + Cards.registry.title(key),
+            "它此刻在看" + Cards.registry.title(key),
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -725,7 +726,7 @@ private fun ContextPin(scope: CardScope, key: String) {
  * **但镜像是真镜像**：连着的时候它仍是手机推给屏的那一帧，只是不再配一整卡的操作。
  */
 @Composable
-private fun DockStatusCard(st: DemoRuntime.Status, s: DockUiState, onManage: () -> Unit) {
+private fun DockStatusCard(app: AppRuntime, st: DemoRuntime.Status, s: DockUiState, onManage: () -> Unit) {
     val online = st.clients > 0
     // 圆屏从无到有连上的那一下给触觉确认（UX #27）：演示时人的注意力在路上，
     // "连上了"这件事靠震一下感知，不必回头盯屏幕
@@ -743,7 +744,7 @@ private fun DockStatusCard(st: DemoRuntime.Status, s: DockUiState, onManage: () 
             else -> Tone.Neutral
         },
     ) {
-        CardTitle("圆屏", trailing = if (online) "${st.clients} 台在线" else "未连接")
+        CardTitle("它", trailing = if (online) "在场" else "不在场")
         if (online) {
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 ScreenMirror(
@@ -769,8 +770,8 @@ private fun DockStatusCard(st: DemoRuntime.Status, s: DockUiState, onManage: () 
             Text(
                 when {
                     st.serverError != null -> "接入服务起不来：${st.serverError}"
-                    st.attempts > 0 -> "圆屏来过 ${st.attempts} 次但没握上手，去设备中心检查编号和开关"
-                    else -> "还没有圆屏连进来。配对方法在「我的 → 设备与底座」；连上后下滑换场景、点那张脸就能对话"
+                    st.attempts > 0 -> "${app.petCalled()}来过 ${st.attempts} 次但没握上手，去设备中心检查编号和开关"
+                    else -> "还没见过${app.petCalled()}。配对方法在「我的 → 设备与底座」；连上后下滑换场景、点那张脸就能说话"
                 },
                 style = Type.Body,
                 color = Ink.TextMid,

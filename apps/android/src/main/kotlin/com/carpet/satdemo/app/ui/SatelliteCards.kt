@@ -69,7 +69,7 @@ private fun phaseTone(p: LinkPhase): Tone = when (p) {
 }
 
 private fun phaseLine(p: LinkPhase, clients: Int): String = when (p) {
-    LinkPhase.CELL -> "手机信号正常，卫星在旁边等着（圆屏 $clients 台）"
+    LinkPhase.CELL -> "手机信号正常，卫星在旁边等着（它的圆屏 $clients 台在场）"
     LinkPhase.PROBE -> "手机没信号了，正在试卫星能不能发出去"
     LinkPhase.SAT -> "已经改用卫星发送，不再依赖手机信号"
     LinkPhase.RECOVER -> "手机信号回来了，正在把离线时攒下的消息补发出去"
@@ -210,7 +210,7 @@ fun SosCard(s: CardScope) {
             // 「圆屏侧键长按同样能触发」。三句是同一条操作，卡片因此三百多 dp 高，
             // 而家人页那屏上，重复的正文比它要回答的"现在什么状态"长得多
             Text(
-                "还没触发过。按住底部中间那颗红色 SOS 三秒才生效，中途松手就取消；长按圆屏侧键同样能触发",
+                "还没触发过。按住底部中间那颗红色 SOS 三秒才生效，中途松手就取消；长按它侧边的键同样能触发",
                 style = Type.Body,
                 color = Ink.TextMid,
             )
@@ -604,7 +604,7 @@ fun PositionCard(s: CardScope) {
         EmptyCard(
             title = "位置",
             icon = MIcons.position,
-            hint = "还没有定位。圆屏那块板不带 GPS，位置由手机供；进屋、车里、高楼之间会拿不到",
+            hint = "还没有定位。它随身那块板不带 GPS，位置由手机供；进屋、车里、高楼之间会拿不到",
         )
         return
     }
@@ -664,15 +664,15 @@ fun SentinelCard(s: CardScope) {
     }
 }
 
-/** 圆屏接入卡。这一张全是真数据：连了几台、接入点是什么 */
+/** 它在不在场的设备卡。这一张全是真数据：连了几台、接入点是什么 */
 @Composable
 fun DockCard(s: CardScope) {
     val st = s.status
     InkCard(icon = MIcons.dock, tone = if (st.clients > 0) Tone.Ok else Tone.Neutral) {
-        CardTitle("圆屏", trailing = if (st.clients > 0) "已连接" else "未连接")
+        CardTitle("它", trailing = if (st.clients > 0) "在场" else "不在场")
         Text(
-            if (st.clients > 0) "${st.clients} 台圆屏在线"
-            else "还没有圆屏连上来。首页那张「圆屏」卡里配对",
+            if (st.clients > 0) "${st.clients} 台圆屏在线，就是它的那张脸"
+            else "它还没连上来。首页那张「它」卡里配对",
             style = Type.Body,
         )
         ValueRow("接入点", st.localIp?.let { "ws://$it" }, mono = true)
