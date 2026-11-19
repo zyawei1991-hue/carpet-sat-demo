@@ -7316,10 +7316,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..8948129
+index 0000000..cde520c
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1535 @@
+@@ -0,0 +1,1538 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -8667,7 +8667,8 @@ index 0000000..8948129
 +     * 但**别再拿"它需要 24 KB"当理由**；真要腾内部 RAM，这一档是可以压回 4096 的候选，
 +     * 压之前重跑三次 nap → 叫醒看剩余。
 +     * 没往 PSRAM 放：这条任务要写 flash，写的时候 cache 会关，栈在 PSRAM 的任务不能干这个
-+     * （muse_voice.c:1305 给语音任务用 MUSE_BIG_CAPS 时特意注明"this task never writes flash"）。 */
++     * （muse_voice.c 给语音任务用 MUSE_BIG_CAPS 时注明：PSRAM 栈的任务碰不得 flash，
++     * 读写都不行 —— 读 NVS 关 cache 那一下栈就不可访问，2026-11-19 实测过）。 */
 +    if (xTaskCreate(cmd_task, "carpet_cmd", 6144, NULL, 4, &s_cmd_task) != pdPASS) {
 +        s_cmd_task = NULL;
 +        ESP_LOGE(TAG, "cmd task out of memory");
@@ -8679,7 +8680,9 @@ index 0000000..8948129
 +    /* 上行那两只 256 KB 段缓冲 + 那条发送任务在这儿要，不在按下那一刻要：
 +     * 开机这几十秒是 PSRAM 最整的一段时间，等手机把链路和语音缓冲都铺开之后再要
 +     * 256 KB **连续** PSRAM，就是"按下没反应"那种现场最难查的死法。
-+     * 这里不碰 NVS（那一步还没跑 muse_settings_init()），开关第一次读发生在按下那一刻。 */
++     * 这里不碰 NVS（那一步还没跑 muse_settings_init()）；开关那一格由
++     * muse_app_run() 里的 carpet_mic_preload() 在 NVS 挂载后读掉 —— 不能拖到
++     * 按下那一刻：voice_task 的栈在 PSRAM，读 NVS 关 cache 会当场 assert。 */
 +    carpet_mic_init();
 +    /* 唤醒词同理，而且更挑时候：create() 要一块 12,288 B **连续内部**（实测），
 +     * 开机这会儿内部 RAM 最整。等 Wi-Fi/TLS/LVGL 铺开之后再要，就是"总量够、连续不够"
@@ -9059,10 +9062,10 @@ index 0000000..88c2ebe
 +void carpet_link_event_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
 new file mode 100644
-index 0000000..593a208
+index 0000000..54007b4
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.c
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,530 @@
 +/*
 + * 契约 v4 上行「对着屏说话」的屏侧那半：攒段 → 组帧 → 发。
 + *
@@ -9197,6 +9200,18 @@ index 0000000..593a208
 +{
 +    mic_mode_load();
 +    return s_mode;
++}
++
++/* 必须在内部栈的任务里、NVS 挂载之后、voice_task 起来之前调一次（muse_app_run）。
++ * voice_task 的栈在 PSRAM（腾内部 RAM），而 mic_mode_load 读 NVS 要关 flash cache ——
++ * cache 一关 PSRAM 栈不可访问，esp_task_stack_is_sane_cache_disabled() 当场 assert：
++ * 2026-11-19 实测「冷开机第一次点 Avatar 就重启」，backtrace 停在 mic_mode_load。
++ * 在这儿先读掉，voice_task 之后走的 mic_mode_load 只碰 s_mode_loaded 这个 RAM 标记。 */
++void carpet_mic_preload(void)
++{
++    mic_mode_load();
++    ESP_LOGI(TAG, "上行开关预读 = %s（内部栈上读掉，PSRAM 栈的语音任务不再碰 flash）",
++             carpet_mic_mode_name());
 +}
 +
 +const char *carpet_mic_mode_name(void)
@@ -9583,10 +9598,10 @@ index 0000000..593a208
 +}
 diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
 new file mode 100644
-index 0000000..b77731c
+index 0000000..57c626e
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,124 @@
 +/*
 + * 契约 v4 的上行：「对着屏说话」。
 + *
@@ -9648,10 +9663,14 @@ index 0000000..b77731c
 + * 要不到就把这一路判成永久不可用，日志打四个内存数。 */
 +void carpet_mic_init(void);
 +
++/* NVS 挂载之后、voice_task 起来之前，在内部栈的任务里调一次（muse_app_run）。
++ * 把 mic_mode 那一格先读掉：voice_task 的栈在 PSRAM，读 NVS 关 cache 时 PSRAM 栈
++ * 不可访问，懒读挪到它头上就是「第一次点 Avatar 当场 assert 重启」（2026-11-19 实测）。 */
++void carpet_mic_preload(void);
++
 +/* 这一次按下该不该由我们收。true = `muse_voice.c` 不许再走 Muse 云端那一路。
-+ * 里面会顺手做一件事：NVS 里那一格**第一次走到这行代码时才读** —— `carpet_link_start()`
-+ * 跑在 `muse_settings_init()` 之前，那时候 NVS 还没挂载（这条坑 carpet_diag.c 顶部记过：
-+ * 第一版没绕，开机那两条诊断当场静默丢失）。按下永远晚于开机，所以读得到。 */
++ * mic_mode 那一格由 carpet_mic_preload() 在开机时读掉（voice_task 的 PSRAM 栈
++ * 碰不得 flash）；这里只碰 RAM。 */
 +bool carpet_mic_armed(void);
 +/* 链路现在连着没有。给 `muse_voice.c` 那句"该说什么"用：连着手机的时候，
 + * Muse 原来那句 "SET UP MUSE FIRST"（要人装 Muse 官方 App）在这个产品里是一句假指令。 */
@@ -12402,10 +12421,20 @@ index 62f5f85..3e97a8e 100644
    espressif/mdns:
      version: "^1.8"
 diff --git a/esp32/components/muse/muse_app.c b/esp32/components/muse/muse_app.c
-index d27f69e..ccc566a 100644
+index d27f69e..6345222 100644
 --- a/esp32/components/muse/muse_app.c
 +++ b/esp32/components/muse/muse_app.c
-@@ -54,6 +54,9 @@ static void on_setting(muse_setting_t what)
+@@ -32,6 +32,9 @@
+ #include "muse_ui.h"
+ #include "muse_voice.h"
+ #include "muse_wifi.h"
++#if CONFIG_MUSE_CARPET_CARDS
++#include "carpet/carpet_mic.h"
++#endif
+ #if CONFIG_MUSE_VIDEO_WIFI
+ #include "muse_video_wifi.h"
+ #endif
+@@ -54,6 +57,9 @@ static void on_setting(muse_setting_t what)
      case MUSE_SETTING_WIFI:
          muse_wifi_apply();
          break;
@@ -12415,6 +12444,18 @@ index d27f69e..ccc566a 100644
      case MUSE_SETTING_BLE:
          muse_ble_apply();
          break;
+@@ -73,6 +79,11 @@ void muse_app_run(const muse_board_t *board)
+     ESP_LOGI(TAG, "board: %s", board->name);
+     ESP_ERROR_CHECK(board->init());
+     ESP_ERROR_CHECK(muse_settings_init());
++#if CONFIG_MUSE_CARPET_CARDS
++    /* NVS 刚挂载、voice_task（PSRAM 栈）还没起：在这儿把上行开关那一格读掉。
++     * 拖到第一次点 Avatar 才懒读，就是 cache 一关 PSRAM 栈不可访问、当场 assert。 */
++    carpet_mic_preload();
++#endif
+     muse_settings_set_listener(on_setting);
+     muse_state_init();
+ #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
 index 7c579bb..d49c363 100644
 --- a/esp32/components/muse/muse_input.c
@@ -14519,7 +14560,7 @@ index a671bbc..a56b3dc 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..18ea2f2 100644
+index 000104e..bd07f46 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -38,6 +38,10 @@
@@ -14781,6 +14822,19 @@ index 000104e..18ea2f2 100644
          if (!can_record()) {
              pending_down = false;
              continue;
+@@ -1301,7 +1508,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
+         muse_state_set_caption("AUDIO INIT FAILED");
+         return ESP_FAIL;
+     }
+-    /* Stack in PSRAM if there is any (this task never writes flash) to spare internal RAM for Wi-Fi/BLE. */
++    /* Stack in PSRAM if there is any, to spare internal RAM for Wi-Fi/BLE.
++     * This task must never touch flash — reads included: an NVS read disables
++     * the cache and a PSRAM stack is unreachable then (assert, reboot).
++     * NVS-backed values it needs are preloaded on an internal stack at boot
++     * (carpet_mic_preload in muse_app_run). */
+     if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", 6144, NULL, 6, NULL, MUSE_AUDIO_CORE,
+                                         MUSE_BIG_CAPS) != pdPASS) {
+         /* Without the task nothing would ever rest the codecs, which
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
 index 0000000..3cf853a
