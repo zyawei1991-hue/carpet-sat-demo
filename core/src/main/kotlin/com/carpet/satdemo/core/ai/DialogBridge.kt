@@ -92,8 +92,13 @@ class DialogBridge(
             return
         }
         _thinking.value = true
+        val t0 = nowMs()
         try {
-            say(gateway.ask(q, context(id), personaScene), via, id, to)
+            val reply = gateway.ask(q, context(id), personaScene)
+            // 一轮到底等了多久要在日志里看得见：现场说"AI 变慢了"时，
+            // 分不清是模型慢、取数慢还是合成慢，这三种要改的地方完全不同
+            note("一轮 $id：问 → 答 ${nowMs() - t0} ms（${reply.skill ?: reply.source.name}）")
+            say(reply, via, id, to)
         } finally {
             _thinking.value = false
         }
@@ -119,17 +124,45 @@ class DialogBridge(
     fun onScreenFrame(msg: ScreenMessage) {
         if (msg.t != MsgType.dialog) return
         val d = msg.dialog ?: return
+        // 这一整个回调是链路读线程来的（不是主 scope），而 [ConversationLog] 只许主 scope 动。
+        // 所以连"只补记录"的两条也得一起交给 launch —— 直接 record 会从两个线程改同一个 list
         if (d.dir == DialogDir.down) {
             // 屏把自己那一轮回显回来（真固件重连后可能这么发），只补记录不触发
-            log.record(d, screenScene())
+            launch {
+                log.record(d, screenScene())
+            }
             return
         }
         if (d.source.foreignCloud) {
-            log.record(d, screenScene())
-            note("屏侧云代答一句话：只入账，不触发技能，也不回镜（那句话屏上已经显示过了）")
+            launch {
+                log.record(d, screenScene())
+                note("屏侧云代答一句话：只入账，不触发技能，也不回镜（那句话屏上已经显示过了）")
+            }
             return
         }
         launch { ask(d.text, DialogOrigin.screen, d.turnId) }
+    }
+
+    /**
+     * 一条**屏上要看得见、但不出声**的说明。fail 在屏起头那一侧时用：
+     * 语音没配 key、转写没连上、屏上那段没拼齐 —— 这些只有手机知道，
+     * 只丢进手机日志的话，站在屏前面的人看到的就是"我说了话，屏没反应"。
+     *
+     * 跟 [say] 的区别只在最后一步：不回调 [onAnswer]，所以没有 TTS。
+     * 入账照旧走 [ConversationLog.append]（要过文案闸，也就在手机记录里留得下）。
+     */
+    fun notice(text: String, turnId: String = newTurnId()) {
+        val stored = log.append(
+            Turn(
+                from = TurnFrom.Ai,
+                text = text,
+                source = ReplySource.LocalRule,
+                via = DialogOrigin.screen,
+                turnId = turnId,
+                scene = screenScene(),
+            ),
+        ) ?: return
+        mirror(stored)
     }
 
     /** 主动播报。宿主按自己的节奏调（App 是 10 秒一轮）。**不归任何一页**：它不是谁在那一页问出来的 */

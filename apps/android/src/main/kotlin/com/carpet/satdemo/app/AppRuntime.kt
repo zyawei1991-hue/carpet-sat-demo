@@ -489,6 +489,9 @@ class AppRuntime(private val host: Application) {
         initialEngine = prefs.getString(KEY_VOICE_ENGINE, null),
         initialTone = VoiceTone.of(prefs.getString(KEY_VOICE_TONE, null)),
         initialFace = prefs.getString(KEY_VOICE_FACE, null),
+        // 发声落点同样要跨进程活着：只回灌界面、不回灌语音层的话，重启后界面写着「这台手机」，
+        // 路由却按默认「圆屏」走 —— 手机一声不出，用户只会说"设了手机发声还是没声"
+        initialDevice = savedAnswerDevice(),
     )
 
     /**
@@ -647,13 +650,13 @@ class AppRuntime(private val host: Application) {
     val voiceTone: StateFlow<VoiceTone> = _voiceTone
 
     /** 手机起头那一轮由哪个设备发声（owner 2026-11-11 拍的规矩）。默认圆屏，落盘 */
-    private val _answerDevice = MutableStateFlow(
-        run {
-            val saved = prefs.getString(KEY_ANSWER_DEVICE, null)
-            ScreenVoice.ScreenDevice.entries.firstOrNull { it.name == saved } ?: ScreenVoice.ScreenDevice.screen
-        },
-    )
+    private val _answerDevice = MutableStateFlow(savedAnswerDevice())
     val answerDevice: StateFlow<ScreenVoice.ScreenDevice> = _answerDevice
+
+    private fun savedAnswerDevice(): ScreenVoice.ScreenDevice {
+        val saved = prefs.getString(KEY_ANSWER_DEVICE, null)
+        return ScreenVoice.ScreenDevice.entries.firstOrNull { it.name == saved } ?: ScreenVoice.ScreenDevice.screen
+    }
 
     fun setAnswerDevice(next: ScreenVoice.ScreenDevice) {
         _answerDevice.value = next
@@ -1090,8 +1093,12 @@ class AppRuntime(private val host: Application) {
             scope.launch(Dispatchers.IO) {
                 // 和手机按键那条同一条闸（屏侧交接 §0.9）：key 没配就直接说，别让它冒充"没听清"
                 if (!SiliconFlowAsr.configured) {
+                    val line = "语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包"
                     withContext(Dispatchers.Main) {
-                        say("语音输入没配 key：local.properties 里加 siliconflow.asrKey 再打包")
+                        say(line)
+                        // 只进手机日志的话，站在屏前的人看到的是"我说了话，屏没反应"。
+                        // 沿用它那一轮的 turn_id：这是对屏那一次问话的答复，屏那边靠 id 把它钉回原来那一轮
+                        dialog.notice(line, seg.turnId)
                     }
                     return@launch
                 }
@@ -1127,12 +1134,28 @@ class AppRuntime(private val host: Application) {
                     else -> {}
                 }
                 if (r !is SiliconFlowAsr.AsrResult.Text) {
-                    withContext(Dispatchers.Main) { say(asrFailLine(r)) }
+                    val line = asrFailLine(r)
+                    withContext(Dispatchers.Main) {
+                        say(line)
+                        dialog.notice(line, seg.turnId)
+                    }
                 }
             }
         }
-        // 拼段失败（缺号/越界/采样率）也要屏上可见，不能只留日志（§0.7 第 4 条）
-        runtime.onMicReject = { reason -> say("屏上那段语音没拼齐：$reason") }
+        // 拼段失败（缺号/越界/采样率）也要屏上可见，不能只留日志（§0.7 第 4 条）。
+        // 这条回调在链路读线程上，而 dialog 只许主 scope 动 —— say/notice 都跳回主线程再做
+        runtime.onMicReject = { reason ->
+            val line = "屏上那段语音没拼齐：$reason"
+            scope.launch {
+                say(line)
+                dialog.notice(line)
+            }
+        }
+        // 护闸（11-18 交接单第 2 条）：屏开新一轮录音，手机立刻闭嘴 ——
+        // 不然上一句答话会从手机喇叭录进这一句问话里。这一步**不能排队**：
+        // 串行 worker 那时正卡在上一句的 await 上，排队的停止要等放完才执行，等于没停。
+        // stopForNewScreenTurn 自己加锁、只碰播放器，从这条读线程直接调是安全的
+        runtime.onMicTurnStart = { turnId -> voice.stopForNewScreenTurn(turnId) }
         runtime.onCancelResult = { r -> _cancelLine.value = SosCopy.cancelLine(r.send, r.alreadyHanded) }
         runtime.onCommand = { msg ->
             // 屏上按出来的呼救和手机上按的是同一件事，那首页就不许留着上一条"撤销中"

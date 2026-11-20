@@ -699,6 +699,16 @@ class DemoRuntime(
      */
     var onMicReject: (reason: String) -> Unit = {}
 
+    /**
+     * 屏开始**新的一轮**录音（本帧是某个新 turn_id 的第 0 帧）。宿主拿它把本机嘴闭上：
+     * 屏上起轮是无条件的，人已经在说下一句了，手机喇叭还在放上一句答话就录进去了。
+     * core 不知道"谁在放音"，只报事实。
+     */
+    var onMicTurnStart: (turnId: String) -> Unit = {}
+
+    /** 上一个收到第一帧的 turn_id。只在同一线程（WebSocket 读线程）上读写，不用加锁 */
+    private var lastMicTurnId: String? = null
+
     private fun ingestMicChunk(args: JsonObject?): Boolean {
         val turnId = args?.stringOf("turn_id")
         val b64 = args?.stringOf("b64")
@@ -709,6 +719,12 @@ class DemoRuntime(
         val seq = args.intOf("seq") ?: -1
         val total = args.intOf("total") ?: -1
         val rate = args.intOf("rate") ?: -1
+        // 新一轮的判据是"第 0 帧"：屏侧每轮 seq 都从 0 起，缺号那帧会被拼段器判废、不会走到这儿。
+        // 先报给宿主再进拼段器 —— 转写还要一两秒，让手机喇叭早上这一秒就少录一秒答话
+        if (seq == 0 && turnId != lastMicTurnId) {
+            lastMicTurnId = turnId
+            onMicTurnStart(turnId)
+        }
         val chunk = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrElse {
             log("mic_chunk 的 b64 解不开，这一帧扔掉")
             return false

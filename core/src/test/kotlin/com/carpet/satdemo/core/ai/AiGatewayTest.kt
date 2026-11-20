@@ -414,6 +414,34 @@ class AiGatewayTest {
     }
 
     @org.junit.jupiter.api.Test
+    fun `否定的那一句不把技能拉起来`() {
+        // 没有这一刀，「别问我天气」会被 weather 命中，然后一本正经地报明天的天气 ——
+        // 用户刚说过不要，AI 反而追着说，比答不出来更糟
+        val r = BuiltinSkills.registry()
+        assertEquals(null, r.match("别问天气"))
+        assertEquals(null, r.match("不要说额度的事"))
+        // 只判关键词**前面**：「冷不冷」里的"不"是词的一部分
+        assertEquals("weather", r.match("冷不冷")?.id)
+        assertEquals("dock.pair", r.match("圆屏连不上")?.id)
+        // 同一句里另一次没被否定的出现照样算
+        assertEquals("link.status", r.match("别说网络，卫星网络到底通不通")?.id)
+        // 「要不要」是在问，不是"不要"；不能因为多了个"不"字就闭嘴
+        assertEquals("quota.check", r.match("要不要查一下额度")?.id)
+    }
+
+    @org.junit.jupiter.api.Test
+    fun `常见问法各自落到自己那一格`() {
+        val r = BuiltinSkills.registry()
+        // 「热不冷」是表里的错字，现场说「热不热」才是常态
+        assertEquals("weather", r.match("明天热不热")?.id)
+        // 「家里」宽得会把额度问题抢成屏对话回看
+        assertEquals("quota.check", r.match("家里还剩多少额度")?.id)
+        // 「网络」「信号」宽到任何一句都命中，只留带卫星的那两个
+        assertEquals("weather", r.match("手机网络能查天气吗")?.id)
+        assertEquals("link.status", r.match("卫星信号还在吗")?.id)
+    }
+
+    @org.junit.jupiter.api.Test
     fun `事实表里未知就是未知`() {
         val bare = SkillContext(scene = "户外无网")
         val s = AiGateway.summarize(bare)

@@ -7,7 +7,9 @@ import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.protocol.ScreenPage
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -30,6 +32,7 @@ class DialogBridgeTest {
         provider: AiProvider = LocalRuleProvider(),
     ) {
         val pushed = mutableListOf<DialogPayload>()
+        val answered = mutableListOf<DialogPayload>()
         val notes = mutableListOf<String>()
         var clock = 1_795_200_000_000L
         val gateway = AiGateway(
@@ -46,6 +49,7 @@ class DialogBridgeTest {
             // 每取一次时间往前走 1ms：同一轮里问和答不能撞 turn_id，第二轮的 id 也不能撞上旧轮
             nowMs = { clock++ },
             screenScene = screenScene,
+            onAnswer = { answered += it },
         )
         fun texts() = bridge.log.turns.value.map { it.text }
         fun frame(d: DialogPayload) = ScreenMessage(t = MsgType.dialog, seq = 1, ts = clock, dialog = d)
@@ -324,5 +328,73 @@ class DialogBridgeTest {
         assertContains(answer.text, "今天放学下雨了")
         assertFalse(answer.text.contains("娃在屏上说了啥"), answer.text)
         assertContains(answer.text, "有 1 句")
+    }
+
+    @Test
+    fun `主动播报和忙时那句不占模型历史`() = runBlocking {
+        // 心跳最短 60 秒一条，发给模型只取最后 6 条。主动提醒要是也记进去，
+        // 连着几句「围栏越界」就把车主真问过的那几轮挤出窗口，下一轮的模型前面没有来由
+        val h = Harness()
+        val full = SkillContext(scene = "车", queueWaiting = 49, queueCapacity = 50, fenceActive = true, fenceInside = false)
+        val bridge = DialogBridge(
+            gateway = h.gateway,
+            facts = { full },
+            push = { _ -> },
+            launch = { body -> runBlocking { body() } },
+            nowMs = { h.clock++ },
+        )
+        bridge.scanProactive()
+        assertTrue(h.gateway.history.isEmpty(), "主动播报进了模型历史：${h.gateway.history}")
+
+        // 真问一轮：历史里只该多出一问一答这两条，主动播报绝不混进来
+        bridge.ask("链路", DialogOrigin.phone)
+        assertEquals(2, h.gateway.history.size, "${h.gateway.history}")
+        assertEquals(listOf("user", "assistant"), h.gateway.history.map { it.role })
+    }
+
+    @Test
+    fun `屏上的失败说明要上屏但不出声`() = runBlocking {
+        // 语音没配 key / 转写没连上：只有手机知道，只丢进日志的话站在屏前的人看到的是
+        // "我说了话，屏没反应"。但这件事没有一句"回答"可念 —— 出声会把事故演成对话
+        val h = Harness()
+        h.bridge.notice("语音输入没配 key", "m-42")
+        val line = h.bridge.log.turns.value.single()
+        assertEquals("语音输入没配 key", line.text)
+        assertEquals(DialogOrigin.screen, line.via)
+        assertEquals(TurnFrom.Ai, line.from)
+        assertEquals("m-42", line.turnId)
+        assertEquals(1, h.pushed.size)
+        assertEquals("m-42", h.pushed[0].turnId)
+        assertTrue(h.answered.isEmpty(), "失败说明不该合成语音：${h.answered}")
+    }
+
+    @Test
+    fun `忙时那句仍然要入账和上屏`() = runBlocking {
+        // 不进模型历史（上一条），但对用户来说它还是一句话：屏上要看得见，
+        // 不然车主按第二次时屏幕一动不动，只能再按第三次
+        val slow = object : AiProvider {
+            override val label = "slow"
+            override val live = true
+            override suspend fun complete(
+                facts: String,
+                history: List<ChatTurn>,
+                question: String,
+                persona: Persona,
+            ): String {
+                kotlinx.coroutines.delay(50)
+                return "答一"
+            }
+        }
+        val h = Harness(provider = slow)
+        // 同一个 runBlocking 线程：第一条挂在 provider 里，第二条才看得到 _thinking=true，
+        // 也才不违反 ConversationLog 的"只从一个线程动"
+        val first = launch { h.bridge.ask("车在哪", DialogOrigin.phone) }
+        yield()
+        h.bridge.ask("额度", DialogOrigin.phone)
+        first.join()
+        assertTrue(h.bridge.log.turns.value.any { it.text.contains("我在想上一条") }, h.texts().toString())
+        assertTrue(h.pushed.any { it.text.contains("我在想上一条") })
+        // 忙时那一句也没进模型历史：下一轮发给模型的两条仍然只是第一轮的问答
+        assertEquals(listOf("user", "assistant"), h.gateway.history.map { it.role })
     }
 }

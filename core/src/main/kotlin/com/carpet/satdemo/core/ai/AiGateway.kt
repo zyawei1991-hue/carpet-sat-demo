@@ -1,6 +1,8 @@
 package com.carpet.satdemo.core.ai
 
 import com.carpet.satdemo.core.link.SosCopy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 网关：**路由 → 取数 → 权限判定 → 生成**。顺序不许换。
@@ -13,6 +15,7 @@ class AiGateway(
     private val provider: AiProvider = LocalRuleProvider(),
     initialGranted: PermissionTier = PermissionTier.ReadLocal,
     private val log: (String) -> Unit = {},
+    private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
     /** 授予档。默认只读本机 —— 出网和不可逆动作要在设置里明确开（§6 第 3 条同一条思路：取更严的） */
     @Volatile
@@ -48,8 +51,7 @@ class AiGateway(
             // 没命中关键词也要能答：走模型，但事实表里只有状态机给得出的东西。
             // 事实表按人格取材 —— 亲子/助手态不喂卫星，模型手里没卫星料就绕不回卫星
             val facts = summarize(ctx, persona)
-            val out = if (provider.live) provider.complete(facts, history.toList(), q, persona) else null
-            if (provider.live && out == null) log("${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}）")
+            val out = model(facts, q, persona)
             return record(
                 if (out != null) AiReply(guard(out), skill = null, source = ReplySource.Model)
                 else AiReply(noMatch(persona), skill = null, source = ReplySource.LocalFallback),
@@ -60,7 +62,7 @@ class AiGateway(
         if (!PermissionTier.allows(granted, skill.needs)) {
             log("拦截 ${skill.id}：需要「${skill.needs.label}」，当前只到「${granted.label}」")
             // 被拦的技能不跑 handle —— handle 是取数，出网的技能没拿到授权就不能出网
-            val line = skill.deniedLine?.invoke(ctx) ?: skill.handle(ctx).line ?: "这条我不做。"
+            val line = skill.deniedLine?.invoke(ctx) ?: withContext(Dispatchers.IO) { skill.handle(ctx) }.line ?: "这条我不做。"
             return record(
                 AiReply(
                     line,
@@ -71,23 +73,22 @@ class AiGateway(
             )
         }
 
-        val result = skill.handle(ctx)
+        // handle 是当场取数：天气那一路是同步 HTTP（缓存过期时要真的等一个往返）。
+        // 调用方在 Main 上，摊在主线程里会直接 NetworkOnMainThreadException，
+        // 又被 Weather 的 runCatching 吞掉 —— 手机上天气就永远取不到，彩排台却一切正常
+        val result = withContext(Dispatchers.IO) { skill.handle(ctx) }
         val facts = buildString {
             append("技能 ").append(skill.id).append("（").append(result.intent).append("）\n")
             result.fields.forEach { (k, v) -> append("· ").append(k).append("=").append(v).append('\n') }
         }
-        val model = if (provider.live) provider.complete(facts + summarize(ctx, persona), history.toList(), q, persona) else null
-        // 真模型没答上来时这行是唯一说得清「屏上那句到底是谁写的」的痕迹。
-        // 不打出来的话，现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错。
-        // 原因必须带上 —— "HTTP 404"和"域名解析不了"要用户做的事完全不同。
-        if (provider.live && model == null) {
-            log("${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}），用技能自己的话术兜底")
-        }
+        // 没回来时这行是唯一说得清「屏上那句到底是谁写的」的证据：不打的话，
+        // 现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错
+        val out = model(facts + summarize(ctx, persona), q, persona, fallbackNote = "用技能自己的话术兜底")
         return record(
             AiReply(
-                text = model?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",
+                text = out?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",
                 skill = skill.id,
-                source = if (model != null) ReplySource.Model else if (provider.live) ReplySource.LocalFallback else ReplySource.LocalRule,
+                source = if (out != null) ReplySource.Model else if (provider.live) ReplySource.LocalFallback else ReplySource.LocalRule,
                 mocked = result.mocked,
             ),
             q,
@@ -101,11 +102,40 @@ class AiGateway(
         return reply
     }
 
-    /** 主动播报也进历史，否则用户会看到 AI 突然开口而前面没有来由 */
-    fun recordProactive(text: String, skill: String?): AiReply {
-        turns.addLast(ChatTurn("assistant", text))
-        while (turns.size > MAX_TURNS) turns.removeFirst()
-        return AiReply(text, skill = skill, source = ReplySource.LocalRule, proactive = true)
+    /**
+     * 主动播报**不进模型历史**。它进的是 [ConversationLog]（用户时间线），不是这里。
+     *
+     * 为什么分开：心跳最短的冷却 60 秒，一条提醒就是历史里的一轮，发给模型只取最后 6 条 ——
+     * 连着几条「围栏越界」「额度快满」就把用户真正问过的那几轮挤出窗口，
+     * 模型接着答的时候前面没有来由，答非所问。忙时那句「我在想上一条」走的也是这条，
+     * 它更不该出现在下一轮的事实里。
+     */
+    fun recordProactive(text: String, skill: String?): AiReply =
+        AiReply(text, skill = skill, source = ReplySource.LocalRule, proactive = true)
+
+    /**
+     * 真模型那一趟。两个调用点只差兜底那句的措辞，所以失败日志在这里统一带上耗时和原因。
+     * 没有这行，"屏上这句到底是模型写的还是本机话术"在日志里就分不出来（同 2026-11-06 那条）。
+     */
+    private suspend fun model(
+        facts: String,
+        question: String,
+        persona: Persona,
+        fallbackNote: String? = null,
+    ): String? {
+        if (!provider.live) return null
+        val t0 = nowMs()
+        val out = provider.complete(facts, history.toList(), question, persona)
+        val ms = nowMs() - t0
+        if (out == null) {
+            log(
+                "${provider.label} 这句没回来（${provider.lastError ?: "原因未知"}），用时 $ms ms" +
+                    (fallbackNote?.let { "，$it" } ?: ""),
+            )
+        } else {
+            log("${provider.label} 用时 $ms ms")
+        }
+        return out
     }
 
     /**

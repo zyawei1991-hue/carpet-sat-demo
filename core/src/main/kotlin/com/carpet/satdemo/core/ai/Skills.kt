@@ -34,11 +34,41 @@ class SkillRegistry(skills: List<Skill>) {
     fun match(text: String): Skill? {
         val q = text.lowercase()
         return list
-            .filter { s -> s.keywords.any { q.contains(it.lowercase()) } }
-            .maxByOrNull { s -> s.keywords.filter { q.contains(it.lowercase()) }.maxOfOrNull { it.length } ?: 0 }
+            .filter { s -> s.keywords.any { hit(q, it.lowercase()) } }
+            .maxByOrNull { s -> s.keywords.filter { hit(q, it.lowercase()) }.maxOfOrNull { it.length } ?: 0 }
     }
 
     fun byId(id: String): Skill? = list.firstOrNull { it.id == id }
+}
+
+/** 明说"不要提"的那几种说法。只在关键词前面那一小段里找，不做分词 —— 表里写什么就判什么 */
+private val NEGATIONS = setOf("别问", "不问", "别说", "不说", "不要")
+
+/** 关键词前面看多远。「别问我天气」里那个"我"要跨得过去 */
+private const val NEGATION_WINDOW = 6
+
+/** 否定管不到分句另一头：「别说网络，卫星网络到底通不通」后半句是真在问。空格不算断句 */
+private const val CLAUSE_BREAK = "，。！？、；：,.!?;:"
+
+/**
+ * 关键词这次出现算不算数：同一小句里、它在前面被"别问/不说"这类说法否定过，那一次出现就作废。
+ *
+ * 为什么值得这么一刀：没有它，「别问我天气」「不要说额度的事」会把技能拉起来，
+ * 而技能会一本正经地答天气/报额度 —— 用户刚说过不要，AI 反而追着说，那比答不出来更糟。
+ * **只判关键词前面**：「冷不冷」「连不上」里的"不"是词的一部分，不走这条。
+ * 同一句里另一次没被否定的出现照样算（「别说网络，卫星网络到底通不通」问的还是链路）。
+ */
+private fun hit(q: String, kw: String): Boolean {
+    var from = 0
+    while (true) {
+        val i = q.indexOf(kw, from)
+        if (i < 0) return false
+        val before = q.substring(maxOf(0, i - NEGATION_WINDOW), i).takeLastWhile { it !in CLAUSE_BREAK }
+        // 「要不要查额度」是在问，不是"不要"；先把它抹掉再判否定
+        val probe = before.replace("要不要", "")
+        if (NEGATIONS.none { probe.contains(it) }) return true
+        from = i + 1
+    }
 }
 
 /** 已经锁上星、正在窗口里的相位。这些时候"距下次过顶"这个数已经没有意义了 */
@@ -91,7 +121,9 @@ object BuiltinSkills {
             Skill(
                 id = "link.status",
                 title = "链路现在什么样",
-                keywords = listOf("链路", "网络", "有网", "信号", "现在能发吗", "能不能发"),
+                // 「网络」「信号」两个单字级词太宽，任何一句都命中；留带卫星的，外加首页那颗
+                // 「有信号吗」的整句（demo 的黄金路径，收了会把建议词变成答不上的那种）
+                keywords = listOf("链路", "卫星网络", "有网", "卫星信号", "有信号吗", "现在能发吗", "能不能发"),
                 needs = PermissionTier.ReadLocal,
             ) { c ->
                 val module = when (c.moduleOnline) {
@@ -233,7 +265,7 @@ object BuiltinSkills {
             Skill(
                 id = "weather",
                 title = "明天天气",
-                keywords = listOf("天气", "下雨", "气温", "冷不冷", "热不冷", "冷吗", "热吗", "带伞", "多少度"),
+                keywords = listOf("天气", "下雨", "气温", "冷不冷", "热不热", "冷吗", "热吗", "带伞", "多少度"),
                 needs = PermissionTier.ReadCloud,
                 deniedLine = { "天气要出网查，得先在设置里把 AI 权限开到「读云端」—— 开之前我不拿你的定位去问外面。" },
             ) { c ->
@@ -281,7 +313,9 @@ object BuiltinSkills {
             Skill(
                 id = "kids.recap",
                 title = "屏上说了啥",
-                keywords = listOf("说了啥", "说了什么", "屏上", "孩子", "娃", "家里", "听了什么"),
+                // 「家里」曾经也在这张表里：它把「家里还剩多少额度」抢成了屏对话回看。
+                // 屏上那几个关键词（说了啥/屏上/孩子/娃）已经够区分，宽的那个只留在歧义上赢
+                keywords = listOf("说了啥", "说了什么", "屏上", "孩子", "娃", "听了什么"),
                 needs = PermissionTier.ReadLocal,
             ) { c ->
                 val said = c.screenTalk

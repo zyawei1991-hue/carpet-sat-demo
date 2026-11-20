@@ -70,7 +70,9 @@ object Weather {
             "?latitude=${"%.2f".format(lat)}&longitude=${"%.2f".format(lon)}" +
             "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
             "&forecast_days=2&timezone=auto"
-        return runCatching {
+        // 只吞 Exception：runCatching 连 Throwable 一起吞，等于把"在 Main 上做网络"
+        // 这种编程错误也静默成"没取到"——那正是天气在手机上永远失败、彩排台却好的原因
+        return try {
             val body = client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 resp.body?.string() ?: return null
@@ -91,6 +93,8 @@ object Weather {
             ).also {
                 cacheLat = la; cacheLon = lo; cacheValue = it
             }
-        }.getOrNull()
+        } catch (_: Exception) {
+            null
+        }
     }
 }
