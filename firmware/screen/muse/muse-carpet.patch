@@ -419,7 +419,7 @@ index de2542f..c95df09 100644
      draw_sparkles(p, j.cx, j.cy, true, spk_speed, spk_count);
  
 diff --git a/esp32/components/muse/CMakeLists.txt b/esp32/components/muse/CMakeLists.txt
-index b478d5e..6e194d2 100644
+index b478d5e..7be64ea 100644
 --- a/esp32/components/muse/CMakeLists.txt
 +++ b/esp32/components/muse/CMakeLists.txt
 @@ -46,6 +46,31 @@ if(CONFIG_MUSE_ENABLED)
@@ -454,7 +454,16 @@ index b478d5e..6e194d2 100644
      if(CONFIG_MUSE_HATCH)
          list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
          list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
-@@ -192,8 +217,19 @@ set(muse_priv_requires
+@@ -92,6 +117,8 @@ if(CONFIG_MUSE_ENABLED)
+         list(APPEND srcs "boards/board_waveshare_s3_206.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_185C)
+         list(APPEND srcs "boards/board_waveshare_s3_185c.c" "boards/muse_lcd_bands.c")
++    elseif(CONFIG_MUSE_BOARD_SPOTPEAR_S3_18)
++        list(APPEND srcs "boards/board_spotpear_s3_18.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_143C)
+         list(APPEND srcs "boards/board_waveshare_s3_143c.c" "boards/muse_lcd_bands.c")
+     elseif(CONFIG_MUSE_BOARD_WAVESHARE_S3_143)
+@@ -192,8 +219,19 @@ set(muse_priv_requires
      esp_driver_pcnt efuse
      # The Sticky's microSD (CONFIG_MUSE_STICKY_SD). Requirements are resolved
      # before Kconfig values exist, so these can't depend on it; only the code does.
@@ -476,10 +485,29 @@ index b478d5e..6e194d2 100644
  idf_component_register(
      SRCS ${srcs}
 diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
-index 588d7c6..9c454d0 100644
+index 588d7c6..bc7df3e 100644
 --- a/esp32/components/muse/Kconfig
 +++ b/esp32/components/muse/Kconfig
-@@ -297,6 +297,20 @@ menu "Muse"
+@@ -55,6 +55,10 @@ menu "Muse"
+             bool "Waveshare ESP32-S3-Touch-LCD-1.85C"
+             depends on IDF_TARGET_ESP32S3
+ 
++        config MUSE_BOARD_SPOTPEAR_S3_18
++            bool "Spotpear ESP32-S3-1.8-Touch-LCD (360x360 ST77916, JC3636W518)"
++            depends on IDF_TARGET_ESP32S3
++
+         config MUSE_BOARD_WAVESHARE_S3_143C
+             bool "Waveshare ESP32-S3-Touch-AMOLED-1.43C"
+             depends on IDF_TARGET_ESP32S3
+@@ -181,6 +185,7 @@ menu "Muse"
+         default "waveshare_s3_216" if MUSE_BOARD_WAVESHARE_S3_216
+         default "waveshare_s3_206" if MUSE_BOARD_WAVESHARE_S3_206
+         default "waveshare_s3_185c" if MUSE_BOARD_WAVESHARE_S3_185C
++        default "spotpear_s3_18" if MUSE_BOARD_SPOTPEAR_S3_18
+         default "waveshare_s3_143c" if MUSE_BOARD_WAVESHARE_S3_143C
+         default "waveshare_s3_143" if MUSE_BOARD_WAVESHARE_S3_143
+         default "waveshare_s3_146" if MUSE_BOARD_WAVESHARE_S3_146
+@@ -297,6 +302,20 @@ menu "Muse"
              rarer characters and Korean show as boxes. Takes about 910 KB of
              flash, against about 1.2 MB.
  
@@ -500,7 +528,7 @@ index 588d7c6..9c454d0 100644
      config MUSE_LATIN_FONT
          bool "Show Vietnamese and other accented letters in captions"
          depends on MUSE_ENABLED && !MUSE_UI_FREEINK
-@@ -319,7 +333,7 @@ menu "Muse"
+@@ -319,7 +338,7 @@ menu "Muse"
              language you speak to it, and the serial console stays in
              English for the tools that read it. The button menu and the
              pairing card are translated; the touch boards' settings pages
@@ -509,7 +537,7 @@ index 588d7c6..9c454d0 100644
  
          config MUSE_UI_LANG_EN
              bool "English"
-@@ -327,6 +341,21 @@ menu "Muse"
+@@ -327,6 +346,21 @@ menu "Muse"
          config MUSE_UI_LANG_VI
              bool "Vietnamese"
              select MUSE_LATIN_FONT
@@ -531,6 +559,563 @@ index 588d7c6..9c454d0 100644
      endchoice
  
      choice MUSE_JC3248W535_MIC
+diff --git a/esp32/components/muse/boards/board_spotpear_s3_18.c b/esp32/components/muse/boards/board_spotpear_s3_18.c
+new file mode 100644
+index 0000000..8b6b7bf
+--- /dev/null
++++ b/esp32/components/muse/boards/board_spotpear_s3_18.c
+@@ -0,0 +1,550 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * Spotpear (斑梨) ESP32-S3-1.8inch-Touch-LCD, JC3636W518 module: round 360 px
++ * ST77916 QSPI panel + CST816 touch, both resets on plain GPIOs (no I/O
++ * expander on this carrier). Audio is a PCM5100A I2S DAC (line out to a 3.5 mm
++ * jack and a pin header — NO speaker amp on board) plus an MSM261 I2S MEMS mic
++ * on its own bus, the 1.46 board's arrangement. No PMU, no battery divider:
++ * power reads report "no battery" honestly. BOOT (GPIO0) is the talk button;
++ * holding a finger on the face tile also talks.
++ * Pins from the vendor schematic (spotpear.cn wiki, 1_P1/2_S3R8/3_DAC/4_lcd).
++ */
++#include <math.h>
++
++#include "driver/gpio.h"
++#include "driver/i2c_master.h"
++#include "driver/i2s_std.h"
++#include "driver/ledc.h"
++#include "driver/spi_master.h"
++#include "driver/usb_serial_jtag.h"
++#include "esp_check.h"
++#include "esp_codec_dev_defaults.h"
++#include "esp_lcd_panel_io.h"
++#include "esp_lcd_panel_ops.h"
++#include "esp_lcd_panel_vendor.h"
++#include "esp_log.h"
++#include "esp_lv_adapter.h"
++#include "esp_sleep.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++
++#include "muse_audio.h"
++#include "muse_board.h"
++#include "muse_ui.h"
++#include "muse_lcd_bands.h"
++#include "muse_mem.h"
++
++#include "esp_lcd_st77916.h"
++#include "esp_lcd_touch_cst816s.h"
++/* Same 360x360 ST77916 QSPI module family as the 1.85C; if this carrier's
++ * panel ever needs its own gamma/power table, swap the init cmds here. */
++#include "waveshare_s3_185c/st77916_init_185c.h"
++
++static const char *TAG = "board";
++
++/* Pins (vendor schematic 2_S3R8 / 4_lcd). */
++#define LCD_SCLK GPIO_NUM_9
++#define LCD_D0 GPIO_NUM_11
++#define LCD_D1 GPIO_NUM_12
++#define LCD_D2 GPIO_NUM_13
++#define LCD_D3 GPIO_NUM_14
++#define LCD_CS GPIO_NUM_10
++#define LCD_RST GPIO_NUM_47
++#define LCD_BL GPIO_NUM_15
++#define LCD_RES 360
++
++#define I2C_SDA GPIO_NUM_7
++#define I2C_SCL GPIO_NUM_8
++#define TOUCH_INT GPIO_NUM_41
++#define TOUCH_RST GPIO_NUM_40
++
++/* Speaker: PCM5100A on I2S1, no control interface; XSMT unmutes it. */
++#define SPK_MCLK GPIO_NUM_21
++#define SPK_BCLK GPIO_NUM_18
++#define SPK_WS GPIO_NUM_16
++#define SPK_DOUT GPIO_NUM_17
++#define DAC_XSMT GPIO_NUM_48
++/* Mic: MSM261S4030H0R on I2S0, L/R tied low => left slot. */
++#define MIC_BCLK GPIO_NUM_42
++#define MIC_WS GPIO_NUM_45
++#define MIC_DIN GPIO_NUM_46
++
++#define MIC_GAIN_OFFSET_DB 0
++
++#define DRAW_BUF_LINES 72      /* five bands to the screen (muse_lcd_bands.h) */
++#define LCD_CHUNK_BYTES (LCD_RES * 8 * 2)
++
++static i2c_master_bus_handle_t s_i2c;
++static esp_lcd_panel_handle_t s_panel;
++static esp_lcd_panel_io_handle_t s_io;
++static esp_lcd_touch_handle_t s_tp;
++static lv_indev_t *s_touch_indev;
++static muse_gpio_button_t s_boot;
++static i2s_chan_handle_t s_tx, s_rx;
++static i2s_std_slot_config_t s_rx_slot;
++static int32_t s_mic_dc[2];
++static int s_mic_gain_q8 = 256;
++
++/* The ST77916 needs even-aligned update windows over the QSPI command path. */
++static void round_area(lv_event_t *e)
++{
++    lv_area_t *a = lv_event_get_param(e);
++    a->x1 &= ~1;
++    a->y1 &= ~1;
++    a->x2 |= 1;
++    a->y2 |= 1;
++}
++
++static esp_err_t init(void)
++{
++    const i2c_master_bus_config_t i2c_cfg = {
++        .i2c_port = I2C_NUM_0,
++        .sda_io_num = I2C_SDA,
++        .scl_io_num = I2C_SCL,
++        .clk_source = I2C_CLK_SRC_DEFAULT,
++        .glitch_ignore_cnt = 7,
++        .flags.enable_internal_pullup = true,
++    };
++    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &s_i2c), TAG, "i2c");
++
++    ESP_RETURN_ON_ERROR(muse_gpio_button_init(&s_boot, GPIO_NUM_0), TAG, "boot button");
++    /* BOOT is held at flashing time; don't count a held button as a press. */
++    s_boot.pressed = gpio_get_level(GPIO_NUM_0) == 0;
++
++    const gpio_config_t xsmt = {
++        .pin_bit_mask = 1ULL << DAC_XSMT,
++        .mode = GPIO_MODE_OUTPUT,
++    };
++    ESP_RETURN_ON_ERROR(gpio_config(&xsmt), TAG, "xsmt");
++    ESP_RETURN_ON_ERROR(gpio_set_level(DAC_XSMT, 1), TAG, "dac unmute");
++    return ESP_OK;
++}
++
++/* muse_lcd_bands_register takes over the panel IO's color-done callback and,
++ * with the bands, needs the bus set up on the same core as the UI task. */
++static lv_display_t *display_start(lv_indev_t **touch)
++{
++    const ledc_timer_config_t bl_timer = {
++        .speed_mode = LEDC_LOW_SPEED_MODE,
++        .duty_resolution = LEDC_TIMER_10_BIT,
++        .timer_num = LEDC_TIMER_0,
++        .freq_hz = 20000,
++        .clk_cfg = LEDC_AUTO_CLK,
++    };
++    const ledc_channel_config_t bl_ch = {
++        .gpio_num = LCD_BL,
++        .speed_mode = LEDC_LOW_SPEED_MODE,
++        .channel = LEDC_CHANNEL_0,
++        .timer_sel = LEDC_TIMER_0,
++        .duty = 0,
++    };
++    if (ledc_timer_config(&bl_timer) != ESP_OK || ledc_channel_config(&bl_ch) != ESP_OK) {
++        ESP_LOGE(TAG, "backlight pwm");
++        return NULL;
++    }
++
++    const spi_bus_config_t bus = {
++        .sclk_io_num = LCD_SCLK,
++        .data0_io_num = LCD_D0,
++        .data1_io_num = LCD_D1,
++        .data2_io_num = LCD_D2,
++        .data3_io_num = LCD_D3,
++        .max_transfer_sz = LCD_CHUNK_BYTES,
++    };
++    if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
++        ESP_LOGE(TAG, "spi bus");
++        return NULL;
++    }
++    const esp_lcd_panel_io_spi_config_t io_cfg = ST77916_PANEL_IO_QSPI_CONFIG(LCD_CS, NULL, NULL);
++    if (esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &s_io) != ESP_OK) {
++        ESP_LOGE(TAG, "panel io");
++        return NULL;
++    }
++    st77916_vendor_config_t vendor_cfg = {
++        .init_cmds = ST77916_INIT_185C_CMDS,
++        .init_cmds_size = ST77916_INIT_185C_SIZE,
++        .flags = { .use_qspi_interface = 1 },
++    };
++    const esp_lcd_panel_dev_config_t panel_cfg = {
++        .reset_gpio_num = LCD_RST,
++        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
++        .bits_per_pixel = 16,
++        .vendor_config = &vendor_cfg,
++    };
++    if (esp_lcd_new_panel_st77916(s_io, &panel_cfg, &s_panel) != ESP_OK) {
++        ESP_LOGE(TAG, "st77916");
++        return NULL;
++    }
++    esp_lcd_panel_reset(s_panel);
++    esp_lcd_panel_init(s_panel);
++    esp_lcd_panel_disp_on_off(s_panel, true);
++
++    esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
++    adapter_cfg.task_core_id = MUSE_UI_CORE;
++    adapter_cfg.task_priority = MUSE_UI_PRIORITY;
++#if CONFIG_LV_USE_TJPGD
++    /* 和 175c 同一档：TJPGD 解码+绘制链溢过适配器默认 8KB（钟面页实测
++     * task lvgl stack overflow ⇒ rst=0xc）。抬到 12KB，水位看 >carpet 回读。 */
++    adapter_cfg.task_stack_size = 12 * 1024;
++#endif
++    if (esp_lv_adapter_init(&adapter_cfg) != ESP_OK) {
++        return NULL;
++    }
++    const esp_lv_adapter_display_config_t disp_cfg = {
++        .panel = s_panel,
++        .panel_io = s_io,
++        .profile = {
++            .interface = ESP_LV_ADAPTER_PANEL_IF_OTHER,
++            .rotation = ESP_LV_ADAPTER_ROTATE_0,
++            .hor_res = LCD_RES,
++            .ver_res = LCD_RES,
++        },
++        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
++    };
++    lv_display_t *disp = muse_lcd_bands_register(disp_cfg, DRAW_BUF_LINES, LCD_CHUNK_BYTES);
++    if (!disp) {
++        return NULL;
++    }
++    lv_display_add_event_cb(disp, round_area, LV_EVENT_INVALIDATE_AREA, NULL);
++
++    esp_lcd_panel_io_handle_t tp_io;
++    const esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG();
++    if (esp_lcd_new_panel_io_i2c(s_i2c, &tp_io_cfg, &tp_io) != ESP_OK) {
++        ESP_LOGE(TAG, "touch io");
++        return NULL;
++    }
++    const esp_lcd_touch_config_t tp_cfg = {
++        .x_max = LCD_RES,
++        .y_max = LCD_RES,
++        .rst_gpio_num = TOUCH_RST,
++        .int_gpio_num = TOUCH_INT,
++        .flags = {
++            .swap_xy = 0,
++            .mirror_x = 0,
++            .mirror_y = 0,
++        },
++    };
++    if (esp_lcd_touch_new_i2c_cst816s(tp_io, &tp_cfg, &s_tp) != ESP_OK) {
++        ESP_LOGE(TAG, "cst816");
++        return NULL;
++    }
++    const esp_lv_adapter_touch_config_t tp_lvgl_cfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, s_tp);
++    *touch = esp_lv_adapter_register_touch(&tp_lvgl_cfg);
++    if (!*touch || esp_lv_adapter_start() != ESP_OK) {
++        return NULL;
++    }
++    s_touch_indev = *touch;
++    return disp;
++}
++
++static bool display_lock(int timeout_ms)
++{
++    return esp_lv_adapter_lock(timeout_ms) == ESP_OK;
++}
++
++static void set_brightness(int pct)
++{
++    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, pct * 1023 / 100);
++    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
++}
++
++static void panel_sleep(bool sleep)
++{
++    esp_lcd_panel_disp_sleep(s_panel, sleep);   /* SLPIN/SLPOUT; GRAM is kept */
++    vTaskDelay(pdMS_TO_TICKS(120));             /* settle before the next command */
++}
++
++static void display_pause(bool pause)
++{
++    if (pause) {
++        esp_lv_adapter_pause(-1);
++    } else {
++        esp_lv_adapter_resume();
++    }
++}
++
++/* No codec control anywhere: the PCM5100A takes I2S as is, esp_codec_dev adds
++ * the volume in software, and the mic gain is applied here. Both channels run
++ * all the time; idle, the speaker sends zeros (auto_clear). */
++static int data_enable(const audio_codec_data_if_t *h, esp_codec_dev_type_t type, bool on)
++{
++    (void)h;
++    (void)type;
++    (void)on;
++    return ESP_CODEC_DEV_OK;
++}
++
++static int spk_write(const audio_codec_data_if_t *h, uint8_t *data, int size)
++{
++    (void)h;
++    size_t wrote;
++    return i2s_channel_write(s_tx, data, size, &wrote, portMAX_DELAY) == ESP_OK ? ESP_CODEC_DEV_OK
++                                                                                : ESP_CODEC_DEV_WRITE_FAIL;
++}
++
++/* A MEMS mic's slot has a small DC offset, which the gain would turn into
++ * clipping: each slot's zero level is tracked and taken off first. */
++static int mic_read(const audio_codec_data_if_t *h, uint8_t *data, int size)
++{
++    (void)h;
++    size_t got;
++    if (i2s_channel_read(s_rx, data, size, &got, pdMS_TO_TICKS(1000)) != ESP_OK || got != (size_t)size) {
++        return ESP_CODEC_DEV_READ_FAIL;
++    }
++    int16_t *s = (int16_t *)data;
++    for (int i = 0; i < size / 2; i++) {
++        int32_t *dc = &s_mic_dc[i & 1];
++        *dc += (s[i] * 256 - *dc) >> 8;
++        int v = (s[i] - (*dc >> 8)) * s_mic_gain_q8 >> 8;
++        s[i] = v > INT16_MAX ? INT16_MAX : v < INT16_MIN ? INT16_MIN : v;
++    }
++    return ESP_CODEC_DEV_OK;
++}
++
++static void set_mic_gain(esp_codec_dev_handle_t mic, int db)
++{
++    (void)mic;
++    s_mic_gain_q8 = (int)(256.0f * powf(10.0f, (db - MIC_GAIN_OFFSET_DB) / 20.0f));
++}
++
++/* Two I2S buses: the PCM5100A on I2S1 with plain 16-bit stereo (MCLK wired on
++ * this carrier), the MEMS mic on I2S0 with the 32-bit slots it needs (each
++ * sample is the slot's top 16 bits). */
++static esp_err_t audio_init(esp_codec_dev_handle_t *spk, esp_codec_dev_handle_t *mic)
++{
++    i2s_chan_config_t tx_chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
++    tx_chan.auto_clear = true;
++    ESP_RETURN_ON_ERROR(i2s_new_channel(&tx_chan, &s_tx, NULL), TAG, "i2s tx chan");
++    const i2s_std_config_t tx_cfg = {
++        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(MUSE_AUDIO_RATE),
++        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
++        .gpio_cfg = {
++            .mclk = SPK_MCLK,
++            .bclk = SPK_BCLK,
++            .ws = SPK_WS,
++            .dout = SPK_DOUT,
++            .din = I2S_GPIO_UNUSED,
++        },
++    };
++    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx, &tx_cfg), TAG, "i2s tx");
++    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "i2s tx on");
++
++    i2s_chan_config_t rx_chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
++    ESP_RETURN_ON_ERROR(i2s_new_channel(&rx_chan, NULL, &s_rx), TAG, "i2s rx chan");
++    i2s_std_config_t rx_cfg = {
++        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(MUSE_AUDIO_RATE),
++        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
++        .gpio_cfg = {
++            .mclk = I2S_GPIO_UNUSED,
++            .bclk = MIC_BCLK,
++            .ws = MIC_WS,
++            .dout = I2S_GPIO_UNUSED,
++            .din = MIC_DIN,
++        },
++    };
++    rx_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
++    rx_cfg.slot_cfg.ws_width = 32;
++    s_rx_slot = rx_cfg.slot_cfg;
++    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx, &rx_cfg), TAG, "i2s rx");
++    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx), TAG, "i2s rx on");
++
++    static const audio_codec_data_if_t spk_if = { .enable = data_enable, .write = spk_write };
++    static const audio_codec_data_if_t mic_if = { .enable = data_enable, .read = mic_read };
++    esp_codec_dev_cfg_t out_cfg = { .dev_type = ESP_CODEC_DEV_TYPE_OUT, .data_if = &spk_if };
++    esp_codec_dev_cfg_t in_cfg = { .dev_type = ESP_CODEC_DEV_TYPE_IN, .data_if = &mic_if };
++    *spk = esp_codec_dev_new(&out_cfg);
++    *mic = esp_codec_dev_new(&in_cfg);
++    ESP_RETURN_ON_FALSE(*spk && *mic, ESP_FAIL, TAG, "codec devs");
++    ESP_LOGI(TAG, "audio: PCM5100A (line out, I2S1) + MSM261 mic (I2S0)");
++    return ESP_OK;
++}
++
++/* Bench probe (>micraw): bring-up discriminator for a silent mic. Counts pad
++ * transitions on SD/BCLK/WS (a Hi-Z SD pulled down by R8 never toggles), then
++ * dumps full 32-bit DMA words so a format mismatch is visible instead of
++ * guessed. Other readers of s_rx see transient read failures while the slot
++ * is reconfigured; both handle that as a dropped frame. */
++void spotpear_micraw(void)
++{
++    const int pins[3] = { MIC_DIN, MIC_BCLK, MIC_WS };
++    for (int p = 0; p < 3; p++) {
++        gpio_input_enable(pins[p]);
++        int last = gpio_get_level(pins[p]), toggles = 0;
++        int64_t t0 = esp_timer_get_time();
++        for (int i = 0; i < 100000; i++) {
++            int v = gpio_get_level(pins[p]);
++            toggles += (v != last);
++            last = v;
++        }
++        printf("@micraw pin%d toggles=%d/%lldus last=%d\n", pins[p], toggles,
++               (long long)(esp_timer_get_time() - t0), last);
++    }
++    i2s_std_slot_config_t wide = s_rx_slot;
++    wide.data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
++    uint32_t w[16];
++    size_t got = 0;
++    i2s_channel_disable(s_rx);
++    if (i2s_channel_reconfig_std_slot(s_rx, &wide) == ESP_OK) {
++        i2s_channel_enable(s_rx);
++        vTaskDelay(pdMS_TO_TICKS(20));
++        if (i2s_channel_read(s_rx, w, sizeof(w), &got, pdMS_TO_TICKS(500)) == ESP_OK) {
++            for (int i = 0; i < 8; i++) {
++                printf("@micraw w%d=%08lx\n", i, (unsigned long)w[i]);
++            }
++        }
++        i2s_channel_disable(s_rx);
++    }
++    i2s_channel_reconfig_std_slot(s_rx, &s_rx_slot);
++    i2s_channel_enable(s_rx);
++}
++
++/* Bench probe (>micen): if a board revision wires CHIPEN to a GPIO instead of
++ * the schematic's 3V3 bar, the mic sits in power-down (SD Hi-Z) until that pin
++ * is driven high. Try each free GPIO and watch the SD pad for transitions. */
++void spotpear_micen(void)
++{
++    const int cand[] = { 1, 2, 3, 4, 5, 6, 38, 39 };
++    gpio_input_enable(MIC_DIN);
++    for (unsigned c = 0; c < sizeof(cand) / sizeof(cand[0]); c++) {
++        /* Open-drain + pull-up: raises a possibly-wired CHIPEN without fighting
++         * anything else on the net (GPIO1-6 are the SD card bus). */
++        const gpio_config_t en = {
++            .pin_bit_mask = 1ULL << cand[c],
++            .mode = GPIO_MODE_OUTPUT_OD,
++            .pull_up_en = GPIO_PULLUP_ENABLE,
++        };
++        gpio_config(&en);
++        gpio_set_level(cand[c], 1);
++        vTaskDelay(pdMS_TO_TICKS(5));
++        int last = gpio_get_level(MIC_DIN), toggles = 0;
++        for (int i = 0; i < 40000; i++) {
++            int v = gpio_get_level(MIC_DIN);
++            toggles += (v != last);
++            last = v;
++        }
++        printf("@micen gpio%d high: sd toggles=%d\n", cand[c], toggles);
++        gpio_set_level(cand[c], 0);
++        gpio_config(&en);
++        gpio_set_direction(cand[c], GPIO_MODE_DISABLE);
++    }
++}
++
++/* Hold-to-talk on the face tile: a finger held on the avatar for
++ * TOUCH_HOLD_MS acts as the talk button. Taps and touches on other tiles
++ * (e.g. settings) never trigger talk. Touch state comes from LVGL's input
++ * device, which owns the CST816 driver handle; reading the driver here
++ * would race LVGL's own reads. */
++#define TOUCH_HOLD_MS 500
++
++static unsigned poll_buttons(void)
++{
++    unsigned ev = muse_gpio_button_poll(&s_boot);
++
++    static bool tp_down = false;          /* finger currently on screen */
++    static bool tp_talking = false;       /* hold threshold reached */
++    static TickType_t tp_press_tick = 0;  /* when the current press began */
++    static bool tp_on_face = false;       /* press started on the face tile */
++
++    bool pressed = false;
++    if (s_touch_indev) {
++        pressed = (lv_indev_get_state(s_touch_indev) == LV_INDEV_STATE_PRESSED);
++    }
++
++    if (pressed && !tp_down) {
++        /* New press: only a hold that starts on the face tile can talk. */
++        tp_down = true;
++        tp_on_face = muse_ui_face_active();
++        tp_press_tick = xTaskGetTickCount();
++        tp_talking = false;
++    } else if (!pressed && tp_down) {
++        /* Release: end the talk if one started. */
++        if (tp_talking) {
++            ev |= MUSE_BTN_TALK_RELEASE;
++        }
++        tp_down = false;
++        tp_talking = false;
++    } else if (pressed && tp_down && tp_on_face && !tp_talking) {
++        /* Still held on the face: start talking once the hold threshold passes. */
++        if ((xTaskGetTickCount() - tp_press_tick) >= pdMS_TO_TICKS(TOUCH_HOLD_MS)) {
++            tp_talking = true;
++            ev |= MUSE_BTN_TALK_PRESS;
++        }
++    }
++    return ev;
++}
++
++static void wait_buttons(int timeout_ms)
++{
++    muse_gpio_buttons_wait((muse_gpio_button_t *const[]){ &s_boot }, 1, timeout_ms);
++}
++
++/* No battery divider and no charge-state line on this carrier: report no
++ * cell rather than invent a voltage. USB presence is the chip's own port. */
++static esp_err_t read_power(muse_power_t *out)
++{
++    out->battery_mv = 0;
++    out->battery_pct = -1;
++    out->charging = false;
++    out->usb = usb_serial_jtag_is_connected();
++    return ESP_OK;
++}
++
++static esp_err_t power_off(void)
++{
++    set_brightness(0);
++    esp_lcd_panel_disp_on_off(s_panel, false);
++    esp_lcd_panel_disp_sleep(s_panel, true);
++    /* No PMU on this board; deep sleep is the closest thing to off. BOOT
++     * wakes it. */
++    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
++    esp_deep_sleep_start();
++    return ESP_FAIL;
++}
++
++static const muse_board_t s_board = {
++    .name = "Spotpear ESP32-S3-1.8-Touch-LCD",
++    .width = LCD_RES,
++    .height = LCD_RES,
++    .round = true,
++    .touch = true,
++    .diagonal_in = 1.8f,
++    .talk_button = "BOOT",
++    .talk_hint = { LV_ALIGN_TOP_LEFT, 20, 16 },
++    .frame_ms = 40,
++    .init = init,
++    .display_start = display_start,
++    .display_lock = display_lock,
++    .display_unlock = esp_lv_adapter_unlock,
++    .set_brightness = set_brightness,
++    .panel_sleep = panel_sleep,
++    .display_pause = display_pause,
++    .audio_init = audio_init,
++    .mic_slot = 0,   /* MSM261 L/R tied low: left slot */
++    .set_mic_gain = set_mic_gain,
++    .poll_buttons = poll_buttons,
++    .wait_buttons = wait_buttons,
++    .read_power = read_power,
++    .power_off = power_off,
++};
++
++/* Home Link's app_main starts Muse with this board (main/main.c). */
++const muse_board_t *muse_board_get(void)
++{
++    return &s_board;
++}
+\ No newline at end of file
 diff --git a/esp32/components/muse/boards/board_waveshare_s3_175c.c b/esp32/components/muse/boards/board_waveshare_s3_175c.c
 index 66a02a3..00a3b89 100644
 --- a/esp32/components/muse/boards/board_waveshare_s3_175c.c
@@ -9728,10 +10313,10 @@ index 0000000..57c626e
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..cf93966
+index 0000000..5e86ff3
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1593 @@
+@@ -0,0 +1,1713 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -9764,11 +10349,19 @@ index 0000000..cf93966
 +#include "esp_log.h"
 +#include "esp_timer.h"
 +#include "esp_lv_adapter_input.h"   /* esp_lv_adapter_touch_notify_interrupt：按住期间主动喂触摸读 */
++#include "esp_jpeg_dec.h"        /* 小屏相册预解码：TJPGD 流式解码上压运行时缩放会整帧画黑 */
 +#include "muse_ui.h"
++#include "muse_mem.h"
 +#include "muse_pixel.h"
 +#include "muse_settings.h"
 +
 +static const char *TAG = "carpet_page";
++
++/* 本页所有绝对像素是按 466 圆屏称过的（圆内接、逐角验过）。小屏按屏宽等比缩：
++ * 等比缩放不改变"到圆心距离/半径"的比值，466 上称过的圆内接结论原样成立。
++ * build 时从真屏取一次宽，之后只读。 */
++static int s_screen_w = 466;
++#define SC(v) ((int)((int64_t)(v) * s_screen_w / 466))
 +
 +/* ---------- 字体 ---------- */
 +
@@ -9791,10 +10384,10 @@ index 0000000..cf93966
 +#define FALLBACK NULL
 +#endif
 +
-+#define FONT_BIG    28   /* 场景名、条目名、详情的值：圆屏隔着两米读的那一档 */
-+#define FONT_SMALL  22   /* 提示、按钮、副行：和 Muse 正文同档，比条目名矮一级 */
-+#define FONT_GLYPH  30   /* 宫格卡片里那一颗字：只做视觉锚点，不承担读 */
-+#define FONT_CLOCK  76   /* 钟面那两位时:分：整页就它一个主角，隔着两米也要一眼读到 */
++#define FONT_BIG    SC(28)   /* 场景名、条目名、详情的值：圆屏隔着两米读的那一档 */
++#define FONT_SMALL  SC(22)   /* 提示、按钮、副行：和 Muse 正文同档，比条目名矮一级 */
++#define FONT_GLYPH  SC(30)   /* 宫格卡片里那一颗字：只做视觉锚点，不承担读 */
++#define FONT_CLOCK  SC(76)   /* 钟面那两位时:分：整页就它一个主角，隔着两米也要一眼读到 */
 +
 +#if CONFIG_LV_USE_TINY_TTF
 +/* carpet_font.ttf 由本组件 CMakeLists 的 EMBED_FILES 进 rodata，符号名只取文件名 */
@@ -9882,20 +10475,20 @@ index 0000000..cf93966
 +/* 星轨守护钟面（owner 2026-11-16 选的 2 号）：青蓝轨道环 + 绕行卫星 + 径向渐变地球。
 + * 纯 LVGL 画，不塞位图、不引解码器。 */
 +#define ORBIT_CYAN          0x35E0FF
-+#define ORBIT_RX            193        /* 背景图主环实测：横 419/1024×472 */
-+#define ORBIT_RY            178        /* 纵 387/1024×472；环画成略椭圆（透视），卫星要跟着 */
++#define ORBIT_RX            SC(193)    /* 背景图主环实测：横 419/1024×472 */
++#define ORBIT_RY            SC(178)    /* 纵 387/1024×472；环画成略椭圆（透视），卫星要跟着 */
 +
 +/* 466 的圆里，宽 300 的一列上下各能让到多少：屏半径 233、半宽 150，
 + * sqrt(233^2-150^2)=178 ⇒ 整列最高 356 px。场景页都按这条上限排过：
 + * 最满的一页 44+34+3*52+26+44+5*6=338，没顶到 356，最外那张的圆角不会被裁。 */
-+#define COL_W      300
-+#define ROW_H      52
-+#define BTN_H      44
-+#define BTN_W      92   /* 三个并一排 276，余 24 分给两道间隙 */
-+#define TITLE_H    34
-+#define SUB_H      26
-+#define GAP        6
-+#define DOT_D      12   /* 行首琥珀点的直径：条目名 22px、值 16px，12 既看得清也不顶行高 */
++#define COL_W      SC(300)
++#define ROW_H      SC(52)
++#define BTN_H      SC(44)
++#define BTN_W      SC(92)   /* 三个并一排 276，余 24 分给两道间隙 */
++#define TITLE_H    SC(34)
++#define SUB_H      SC(26)
++#define GAP        SC(6)
++#define DOT_D      SC(12)   /* 行首琥珀点的直径：条目名 22px、值 16px，12 既看得清也不顶行高 */
 +
 +/* L1 宫格。容器 364×380 居中 ⇒ 占 x 51..415、y 43..423，圆屏半径 233，逐角称过：
 + * 第一行卡片外角 (51,104) → sqrt(182²+129²)=223 ✓
@@ -9903,13 +10496,13 @@ index 0000000..cf93966
 + * 底部回脸条（宽 300）下角 (83,397) → sqrt(150²+164²)=222 ✓
 + * 顶部状态行那一带（y 43..71）可用宽只有 269，所以那句必须居中，不能贴左：
 + * 居中后最长的一句"掉线重连"（88px）离圆边还有 60 以上。 */
-+#define GRID_CELL   116                 /* 一张场景卡：3 个一行 + 两道 8px 间隙 = 364 */
-+#define GRID_GAP      8
++#define GRID_CELL   SC(116)             /* 一张场景卡：3 个一行 + 两道 8px 间隙 = 364 */
++#define GRID_GAP      SC(8)
 +#define GRID_W     (3 * GRID_CELL + 2 * GRID_GAP)
-+#define GRID_H    380
-+#define GRID_ROUND  56                  /* 那颗字的圆底托 */
-+#define GRID_ROWS_Y  61                 /* 第一行卡片在容器里的 y（往下是 61+124） */
-+#define GRID_BACK_Y 310                 /* 回脸条：贴底会掉到圆外，这是称过的最后一档 */
++#define GRID_H     SC(380)
++#define GRID_ROUND  SC(56)              /* 那颗字的圆底托 */
++#define GRID_ROWS_Y  SC(61)             /* 第一行卡片在容器里的 y（往下是 61+124） */
++#define GRID_BACK_Y  SC(310)            /* 回脸条：贴底会掉到圆外，这是称过的最后一档 */
 +
 +/* ---------- 页名：和契约的 ScreenPage 一字不差 ---------- */
 +
@@ -10081,6 +10674,9 @@ index 0000000..cf93966
 +static int s_photo_count;         /* 上一拍环里有几张：0↔非0 翻转时才重排隐现 */
 +static uint32_t s_photo_gen;      /* 上一拍见过的收齐序号 */
 +static int s_photo_idx;           /* 轮播播到第几张（按收齐先后） */
++static int s_photo_scale_bench;   /* >photoscale 判别口：0=自动，非0=强制 lv_image scale */
++static int s_photo_bench_pending; /* 串口只立记号，photo_show 落在 LVGL 任务（跨任务动 lv 会撞渲染断言） */
++static uint8_t *s_photo_rgb;      /* 小屏预解码的 RGB565 整帧（PSRAM），换张时释放 */
 +static int64_t s_photo_last_ms;   /* 上一次换照片的时刻 */
 +#define PHOTO_TEMPO_MS 8000       /* 轮播节拍：屏自己定（B §5），8 秒一张 */
 +static line_t s_detail_title;
@@ -10129,14 +10725,14 @@ index 0000000..cf93966
 +    lv_obj_t *c = clickable ? lv_button_create(parent) : lv_obj_create(parent);
 +    lv_obj_remove_style_all(c);
 +    lv_obj_set_size(c, lv_pct(100), h);
-+    lv_obj_set_style_radius(c, 18, 0);
++    lv_obj_set_style_radius(c, SC(18), 0);
 +    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
 +    lv_obj_set_style_bg_color(c, lv_color_hex(COLOR_CARD), 0);
 +    lv_obj_set_style_bg_color(c, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
-+    lv_obj_set_style_pad_hor(c, 16, 0);
++    lv_obj_set_style_pad_hor(c, SC(16), 0);
 +    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
 +    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-+    lv_obj_set_style_pad_column(c, 12, 0);
++    lv_obj_set_style_pad_column(c, SC(12), 0);
 +    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
 +    /* 不能点的那种是纯容器：留着默认的 CLICKABLE 会把整块玻璃都变成"控件"，
 +     * 手势判定就分不出"点在按钮上"和"点在空处"。 */
@@ -10221,7 +10817,7 @@ index 0000000..cf93966
 +    lv_obj_t *b = lv_button_create(parent);
 +    lv_obj_remove_style_all(b);
 +    lv_obj_set_size(b, w, h);
-+    lv_obj_set_style_radius(b, 18, 0);
++    lv_obj_set_style_radius(b, SC(18), 0);
 +    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
 +    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD), 0);
 +    lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
@@ -10305,7 +10901,7 @@ index 0000000..cf93966
 +    for (int i = 0; i < ARRAY_LEN(PICKER_CELLS); i++) {
 +        if (!s_scene_card[i]) continue;
 +        bool cur = PICKER_CELLS[i].target == s_scene_pg;
-+        lv_obj_set_style_border_width(s_scene_card[i], cur ? 3 : 0, 0);
++        lv_obj_set_style_border_width(s_scene_card[i], cur ? SC(3) : 0, 0);
 +        lv_obj_set_style_border_opa(s_scene_card[i], LV_OPA_COVER, 0);
 +        lv_obj_set_style_border_color(s_scene_card[i], lv_color_hex(PICKER_CELLS[i].hue), 0);
 +    }
@@ -10324,12 +10920,12 @@ index 0000000..cf93966
 +{
 +    if (!col) return;
 +    lv_anim_delete(col, col_slide_cb);
-+    lv_obj_set_style_translate_y(col, 24, 0);
++    lv_obj_set_style_translate_y(col, SC(24), 0);
 +    lv_anim_t a;
 +    lv_anim_init(&a);
 +    lv_anim_set_var(&a, col);
 +    lv_anim_set_exec_cb(&a, col_slide_cb);
-+    lv_anim_set_values(&a, 24, 0);
++    lv_anim_set_values(&a, SC(24), 0);
 +    lv_anim_set_duration(&a, 220);
 +    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
 +    lv_anim_start(&a);
@@ -10341,12 +10937,12 @@ index 0000000..cf93966
 +        lv_obj_t *card = s_scene_card[i];
 +        if (!card) continue;
 +        lv_anim_delete(card, col_slide_cb);
-+        lv_obj_set_style_translate_y(card, 30, 0);
++        lv_obj_set_style_translate_y(card, SC(30), 0);
 +        lv_anim_t a;
 +        lv_anim_init(&a);
 +        lv_anim_set_var(&a, card);
 +        lv_anim_set_exec_cb(&a, col_slide_cb);
-+        lv_anim_set_values(&a, 30, 0);
++        lv_anim_set_values(&a, SC(30), 0);
 +        lv_anim_set_duration(&a, 260);
 +        lv_anim_set_delay(&a, (uint32_t)i * 80);   /* 三张卡错峰升起 */
 +        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
@@ -10482,7 +11078,7 @@ index 0000000..cf93966
 + * 都在吃 CLICKED，事件冒泡到哪一层不由我们定 —— indev 的点是唯一和命中测试无关的事实。
 + * A 那套（左右滑 card_next / 上下滑明细层）的**判定引擎**留着，**方向语义**换成 B。
 + */
-+#define SWIPE_MIN_PX  60
++#define SWIPE_MIN_PX  SC(60)
 +#define LONG_PRESS_MS 800
 +
 +static lv_indev_t *s_ptr;
@@ -10840,14 +11436,14 @@ index 0000000..cf93966
 +    lv_obj_center(pl->sub.label);   /* 顶部那一带圆屏只剩 269 的宽，靠左边摆会被裁 */
 +
 +    /* 三张卡一排，竖直居中在副行和回脸条之间（外角逐张称过，都在圆内）。 */
-+    const int row_y = 120;
++    const int row_y = SC(120);
 +    for (int i = 0; i < ARRAY_LEN(PICKER_CELLS); i++) {
 +        const cell_def_t *c = &PICKER_CELLS[i];
 +        lv_obj_t *card = lv_button_create(box);
 +        lv_obj_remove_style_all(card);
 +        lv_obj_set_size(card, GRID_CELL, GRID_CELL);
 +        lv_obj_set_pos(card, i * (GRID_CELL + GRID_GAP), row_y);
-+        lv_obj_set_style_radius(card, 26, 0);
++        lv_obj_set_style_radius(card, SC(26), 0);
 +        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
 +        lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD), 0);
 +        lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
@@ -10859,7 +11455,7 @@ index 0000000..cf93966
 +        lv_obj_t *disc = lv_obj_create(card);
 +        lv_obj_remove_style_all(disc);
 +        lv_obj_set_size(disc, GRID_ROUND, GRID_ROUND);
-+        lv_obj_align(disc, LV_ALIGN_TOP_MID, 0, 12);
++        lv_obj_align(disc, LV_ALIGN_TOP_MID, 0, SC(12));
 +        lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
 +        lv_obj_set_style_bg_opa(disc, LV_OPA_20, 0);
 +        lv_obj_set_style_bg_color(disc, lv_color_hex(c->hue), 0);
@@ -10870,7 +11466,7 @@ index 0000000..cf93966
 +        lv_obj_t *nm = make_label(card, s_small, COLOR_TEXT, c->name);
 +        lv_obj_set_width(nm, GRID_CELL);
 +        lv_obj_set_style_text_align(nm, LV_TEXT_ALIGN_CENTER, 0);
-+        lv_obj_align(nm, LV_ALIGN_TOP_MID, 0, 78);
++        lv_obj_align(nm, LV_ALIGN_TOP_MID, 0, SC(78));
 +
 +        lv_obj_add_event_cb(card, on_scene_clicked, LV_EVENT_CLICKED, (void *)c);
 +    }
@@ -10897,7 +11493,7 @@ index 0000000..cf93966
 +        lv_obj_t *b = lv_button_create(bar);
 +        lv_obj_remove_style_all(b);
 +        lv_obj_set_size(b, BTN_W, BTN_H);
-+        lv_obj_set_style_radius(b, 18, 0);
++        lv_obj_set_style_radius(b, SC(18), 0);
 +        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
 +        lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD), 0);
 +        lv_obj_set_style_bg_color(b, lv_color_hex(COLOR_CARD_PRESSED), LV_STATE_PRESSED);
@@ -10923,7 +11519,8 @@ index 0000000..cf93966
 +    float a = (float)deg * 3.14159265f / 180.0f;
 +    int x = cx + (int)(ORBIT_RX * sinf(a));
 +    int y = cy - (int)(ORBIT_RY * cosf(a));
-+    lv_obj_set_pos(o, x - 8, y - 8);
++    int half = lv_obj_get_width(o) / 2;
++    lv_obj_set_pos(o, x - half, y - half);
 +}
 +
 +/* 星轨层（11-16 第二版）：整屏背景图 + 一颗绕行卫星。
@@ -10933,6 +11530,40 @@ index 0000000..cf93966
 + * 的壁纸机制：它家时钟就是一张整屏 RGB565 图（main/assets/default.rgb565）叠大数字。
 + * 图换成我们自己的 demo 底图（抹掉烤死的时间/日期/按钮/卫星点，数字和卫星仍是真的：
 + * 时间走 SNTP、卫星走 lv_anim），所以既贴 demo 又不假造。 */
++/* 小屏把 472 底图一次性双线性重采样进 PSRAM（屏+6 见方，和 472/466 同款每边 3px
++ * 烧屏位移余量）。不用 lv_image 运行时缩放：钟面每秒重画、烧屏还要位移，
++ * 缩放钱不能每帧付。只在 build 里跑一次。 */
++static uint16_t *clock_bg_resample(int size)
++{
++    uint16_t *dst = heap_caps_malloc((size_t)size * size * 2, MUSE_BIG_CAPS);
++    const uint16_t *src = (const uint16_t *)carpet_clock_bg_start;
++    const float k = (float)CLOCK_BG_SIZE / size;
++    const int sh[3] = { 11, 5, 0 }, mask[3] = { 31, 63, 31 };
++    for (int y = 0; y < size; y++) {
++        float fy = (y + 0.5f) * k - 0.5f;
++        if (fy < 0) fy = 0;
++        int y0 = (int)fy, y1 = y0 + 1 < CLOCK_BG_SIZE ? y0 + 1 : y0;
++        float ty = fy - y0;
++        for (int x = 0; x < size; x++) {
++            float fx = (x + 0.5f) * k - 0.5f;
++            if (fx < 0) fx = 0;
++            int x0 = (int)fx, x1 = x0 + 1 < CLOCK_BG_SIZE ? x0 + 1 : x0;
++            float tx = fx - x0;
++            uint16_t a = src[y0 * CLOCK_BG_SIZE + x0], b = src[y0 * CLOCK_BG_SIZE + x1];
++            uint16_t c = src[y1 * CLOCK_BG_SIZE + x0], d = src[y1 * CLOCK_BG_SIZE + x1];
++            int out = 0;
++            for (int ch = 0; ch < 3; ch++) {
++                float va = (a >> sh[ch]) & mask[ch], vb = (b >> sh[ch]) & mask[ch];
++                float vc = (c >> sh[ch]) & mask[ch], vd = (d >> sh[ch]) & mask[ch];
++                float v = (va + (vb - va) * tx) * (1 - ty) + (vc + (vd - vc) * tx) * ty;
++                out |= ((int)(v + 0.5f) & mask[ch]) << sh[ch];
++            }
++            dst[y * size + x] = (uint16_t)out;
++        }
++    }
++    return dst;
++}
++
 +static void build_clock_orbit(lv_obj_t *tile)
 +{
 +    lv_obj_t *st = lv_obj_create(tile);
@@ -10944,13 +11575,20 @@ index 0000000..cf93966
 +    s_clock_stage = st;
 +
 +    static lv_image_dsc_t bg_dsc;
++    static uint16_t *bg_small;
++    int bg_size = CLOCK_BG_SIZE;
++    if (s_screen_w < 466) {
++        bg_size = s_screen_w + 6;
++        bg_small = clock_bg_resample(bg_size);
++        if (!bg_small) bg_size = CLOCK_BG_SIZE;
++    }
 +    bg_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
 +    bg_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-+    bg_dsc.header.w = CLOCK_BG_SIZE;
-+    bg_dsc.header.h = CLOCK_BG_SIZE;
-+    bg_dsc.header.stride = CLOCK_BG_SIZE * 2;
-+    bg_dsc.data_size = (uint32_t)(carpet_clock_bg_end - carpet_clock_bg_start);
-+    bg_dsc.data = carpet_clock_bg_start;
++    bg_dsc.header.w = bg_size;
++    bg_dsc.header.h = bg_size;
++    bg_dsc.header.stride = bg_size * 2;
++    bg_dsc.data_size = (uint32_t)bg_size * bg_size * 2;
++    bg_dsc.data = bg_small ? (const uint8_t *)bg_small : carpet_clock_bg_start;
 +    lv_obj_t *bg = lv_image_create(st);
 +    lv_image_set_src(bg, &bg_dsc);
 +    lv_obj_center(bg);
@@ -10959,15 +11597,15 @@ index 0000000..cf93966
 +    /* 卫星：带辉光的点，60s 沿画出来的环绕一圈。装饰轨道，不冒充真实过境倒计时。 */
 +    s_clock_sat = lv_obj_create(st);
 +    lv_obj_remove_style_all(s_clock_sat);
-+    lv_obj_set_size(s_clock_sat, 16, 16);
++    lv_obj_set_size(s_clock_sat, SC(16), SC(16));
 +    lv_obj_set_style_radius(s_clock_sat, LV_RADIUS_CIRCLE, 0);
 +    lv_obj_set_style_bg_color(s_clock_sat, lv_color_hex(0xE8FBFF), 0);
 +    lv_obj_set_style_bg_opa(s_clock_sat, LV_OPA_COVER, 0);
-+    lv_obj_set_style_shadow_width(s_clock_sat, 20, 0);
++    lv_obj_set_style_shadow_width(s_clock_sat, SC(20), 0);
 +    lv_obj_set_style_shadow_color(s_clock_sat, lv_color_hex(ORBIT_CYAN), 0);
 +    lv_obj_set_style_shadow_opa(s_clock_sat, LV_OPA_60, 0);
 +    lv_obj_remove_flag(s_clock_sat, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-+    lv_obj_set_pos(s_clock_sat, 233 - 8, 233 - ORBIT_RY - 8);
++    lv_obj_set_pos(s_clock_sat, SC(233) - SC(8), SC(233) - ORBIT_RY - SC(8));
 +    lv_anim_t an;
 +    lv_anim_init(&an);
 +    lv_anim_set_var(&an, s_clock_sat);
@@ -11033,8 +11671,9 @@ index 0000000..cf93966
 + * 解码不在这儿做 —— LVGL 的 TJPGD 在重绘时按 MCU 小块现解（lv_tjpgd.c），
 + * 这里只把字节指针和宽高填进 dsc。所以显示期间那张的字节必须一直在：
 + * acquire 把它钉住，新照片顶掉的只会是别的槽。
-+ * 472×472 比屏每边大 3px：App 压图就是这个尺寸（PhotoPush），圆屏裁掉四角，
-+ * 烧屏 ±3px 位移也有黑边可挪。不缩放 —— 缩放要另开整帧缓冲，白吃 PSRAM。 */
++ * 472×472 比 466 屏每边大 3px：App 压图就是这个尺寸（PhotoPush），圆屏裁掉四角，
++ * 烧屏 ±3px 位移也有黑边可挪，466 上不缩放。小屏（360）先预解码成 RGB565 整帧
++ * 再等比缩到屏宽（流式 TJPGD 上压缩放会黑，见 photo_show），围绕中心 pivot 居中。 */
 +static void build_photo(lv_obj_t *col)
 +{
 +    lv_obj_t *st = lv_obj_create(lv_obj_get_parent(col));
@@ -11082,16 +11721,75 @@ index 0000000..cf93966
 +        ESP_LOGW(TAG, "这张 JPEG 扫不出宽高（%u 字节），不上屏", (unsigned)n);
 +        return;
 +    }
++    /* App 推的是 472 见方：小屏等比缩到屏宽，pivot 在中心 ⇒ 按源尺寸居中仍然居中。 */
++    int fit = w > h ? w : h;
++    int scale = fit > s_screen_w ? (int)((uint32_t)s_screen_w * 256 / fit) : 256;
++    if (s_photo_scale_bench) scale = s_photo_scale_bench;
++
 +    s_photo_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-+    s_photo_dsc.header.cf = LV_COLOR_FORMAT_RAW;   /* RAW 才走解码器链，TJPGD 认 JFIF 接手 */
-+    s_photo_dsc.header.w = w;
-+    s_photo_dsc.header.h = h;
-+    s_photo_dsc.header.stride = w * 3;
-+    s_photo_dsc.data_size = (uint32_t)n;
-+    s_photo_dsc.data = bytes;
++    bool predecoded = false;
++    if (scale < 256) {
++        /* TJPGD 是流式解码，运行时缩放压在它上面整帧画黑（360 真机称到：
++         * scale=256 全帧 / 195 只剩导航点）。先一次性解成 RGB565 整帧，
++         * 缩放就压在普通位图上，走 LVGL 常规变换路。 */
++        jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
++        cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
++        jpeg_dec_handle_t dec = NULL;
++        if (jpeg_dec_open(&cfg, &dec) == JPEG_ERR_OK) {
++            jpeg_dec_io_t io = { .inbuf = (uint8_t *)bytes, .inbuf_len = (int)n };
++            jpeg_dec_header_info_t info;
++            int outlen = 0;
++            if (jpeg_dec_parse_header(dec, &io, &info) == JPEG_ERR_OK &&
++                jpeg_dec_get_outbuf_len(dec, &outlen) == JPEG_ERR_OK && outlen > 0) {
++                uint8_t *buf = heap_caps_aligned_alloc(16, (size_t)outlen, MUSE_BIG_CAPS);
++                if (buf) {
++                    io.outbuf = buf;
++                    if (jpeg_dec_process(dec, &io) == JPEG_ERR_OK) {
++                        free(s_photo_rgb);
++                        s_photo_rgb = buf;
++                        s_photo_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
++                        s_photo_dsc.header.w = info.width;
++                        s_photo_dsc.header.h = info.height;
++                        s_photo_dsc.header.stride = info.width * 2;
++                        s_photo_dsc.data_size = (uint32_t)outlen;
++                        s_photo_dsc.data = buf;
++                        predecoded = true;
++                    } else {
++                        free(buf);
++                    }
++                }
++            }
++            jpeg_dec_close(dec);
++        }
++        if (!predecoded) {
++            /* 解不出来就退回不缩放：中心裁切但看得见，不画黑帧假装有图。 */
++            ESP_LOGW(TAG, "相册预解码失败，退回不缩放（小屏会裁边）");
++            scale = 256;
++        }
++    }
++    if (!predecoded) {
++        s_photo_dsc.header.cf = LV_COLOR_FORMAT_RAW;   /* RAW 才走解码器链，TJPGD 认 JFIF 接手 */
++        s_photo_dsc.header.w = w;
++        s_photo_dsc.header.h = h;
++        s_photo_dsc.header.stride = w * 3;
++        s_photo_dsc.data_size = (uint32_t)n;
++        s_photo_dsc.data = bytes;
++    }
 +    lv_image_set_src(s_photo_img, &s_photo_dsc);
++    lv_image_set_scale(s_photo_img, scale);
 +    lv_obj_center(s_photo_img);
-+    ESP_LOGI(TAG, "相册上屏第 %d 张：%ux%u %u 字节", idx + 1, w, h, (unsigned)n);
++    ESP_LOGI(TAG, "相册上屏第 %d 张：%ux%u %u 字节 scale=%d%s", idx + 1, w, h,
++             (unsigned)n, scale, predecoded ? " 预解码" : "");
++}
++
++/* 台架判别口（>photoscale）：256=不缩、195=缩到 360，0=回自动。用来把
++ * "小屏相册黑屏"判到缩放路上还是别的路上。 */
++void carpet_page_bench_photo_scale(int v)
++{
++    s_photo_scale_bench = v;
++    s_photo_bench_pending = 1;
++    printf("@photoscale bench=%d\n", v);
++    fflush(stdout);
 +}
 +
 +/* 每拍看一眼环账：新收齐 → 立刻切到最新那张；多张 → 8 秒轮播。
@@ -11149,6 +11847,7 @@ index 0000000..cf93966
 +                       lv_obj_t *face_tile)
 +{
 +    if (!func_tile || !ring_tile || !amb_tile) return;
++    s_screen_w = lv_display_get_horizontal_resolution(lv_display_get_default());
 +    fonts_init();
 +    /* 三格各自的根：手势命中测试只查现在露着的那一格（active_tile_obj）。 */
 +    s_func_tile = func_tile;
@@ -11160,7 +11859,7 @@ index 0000000..cf93966
 +     * 脸那格的点击仍干净地落到 tap 分支。 */
 +    if (face_tile) {
 +        s_guard_dot = make_dot(face_tile);
-+        lv_obj_align(s_guard_dot, LV_ALIGN_TOP_MID, 0, 84);
++        lv_obj_align(s_guard_dot, LV_ALIGN_TOP_MID, 0, SC(84));
 +    }
 +
 +    for (int i = PG_PICKER; i < PG_COUNT; i++) {
@@ -11191,7 +11890,7 @@ index 0000000..cf93966
 +    s_detail_value.label = make_label(dv, s_big, COLOR_TEXT, "");
 +    s_detail_value.shown[0] = '\0';
 +    lv_label_set_long_mode(s_detail_value.label, LV_LABEL_LONG_MODE_WRAP);
-+    lv_obj_set_width(s_detail_value.label, COL_W - 32);
++    lv_obj_set_width(s_detail_value.label, COL_W - SC(32));
 +
 +    s_detail_hint.label = make_label(make_band(s_detail_col, SUB_H), s_small, COLOR_DIM, "");
 +    s_detail_hint.shown[0] = '\0';
@@ -11238,6 +11937,12 @@ index 0000000..cf93966
 +    if (s_touch_dump) {
 +        s_touch_dump = false;
 +        touch_dump_locked();
++    }
++
++    /* >photoscale：和上面同一条规矩，串口立记号、这里动 LVGL。 */
++    if (s_photo_bench_pending) {
++        s_photo_bench_pending = 0;
++        if (s_photo_count > 0) photo_show(s_photo_idx);
 +    }
 +
 +    if (s_reshare) {
@@ -11327,10 +12032,10 @@ index 0000000..cf93966
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_page.h b/esp32/components/muse/carpet/carpet_page.h
 new file mode 100644
-index 0000000..86266ca
+index 0000000..7142bbc
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,73 @@
 +/*
 + * 场景页（L1 选场景 / L2 场景 / L3 功能详情）住在 muse_ui.c 建的那格 tile 里。
 + *
@@ -11398,6 +12103,10 @@ index 0000000..86266ca
 +/* `>touch` 台架口：回读真触摸 indev 的解析结果（类型/模式/state/point）+ 手势互斥闸。
 + * 台架那条造点不走 indev，真玻璃划不动时唯一没称过的就是这一段。串口立记号，LVGL 任务里读。 */
 +void carpet_page_touch_dump(void);
++
++/* `>photoscale <n>` 台架口：强制相册那张的 lv_image scale（256=不缩），0=回自动。
++ * 小屏相册黑屏时用来判别是不是缩放路的问题。 */
++void carpet_page_bench_photo_scale(int v);
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_photo.c b/esp32/components/muse/carpet/carpet_photo.c
@@ -12400,10 +13109,10 @@ index 0000000..bbcf994
 +void carpet_wake_dump(void);
 \ No newline at end of file
 diff --git a/esp32/components/muse/idf_component.yml b/esp32/components/muse/idf_component.yml
-index 62f5f85..3e97a8e 100644
+index 62f5f85..71b5418 100644
 --- a/esp32/components/muse/idf_component.yml
 +++ b/esp32/components/muse/idf_component.yml
-@@ -16,6 +16,16 @@ dependencies:
+@@ -16,6 +16,23 @@ dependencies:
    idf:
      version: ">=5.5"
    espressif/cjson: "~1.7"
@@ -12417,9 +13126,44 @@ index 62f5f85..3e97a8e 100644
 +    version: "==2.4.7"
 +    rules:
 +      - if: "$CONFIG{MUSE_CARPET_CARDS} == True"
++  # 小屏相册预解码（carpet_page.c photo_show）：TJPGD 流式解码上压运行时缩放
++  # 会整帧画黑，小屏先一次性解成 RGB565 整帧再缩。esp_lvgl_adapter → esp_lv_decoder
++  # 本来就无条件带它进解析，这里显式声明只是让 muse 自己拿得到头文件和链接。
++  espressif/esp_new_jpeg:
++    version: "1.*"
++    rules:
++      - if: "$CONFIG{MUSE_CARPET_CARDS} == True"
    # Video over Wi-Fi announces itself with it (muse_video_wifi.c).
    espressif/mdns:
      version: "^1.8"
+@@ -41,7 +58,7 @@ dependencies:
+   espressif/esp_lvgl_adapter:
+     version: "0.6.4"
+     rules:
+-      - if: "$CONFIG{MUSE_BOARD_ID} in [\"ostb_echoear_2st\", \"waveshare_s3_175c\", \"waveshare_s3_175\", \"waveshare_s3_18\", \"waveshare_s3_216\", \"waveshare_s3_206\", \"waveshare_s3_185c\", \"waveshare_s3_143\", \"waveshare_s3_146\", \"aipi\", \"atk_dnesp32s3_box\", \"m5stack_cardputer_adv\", \"sensecap_watcher\", \"m5stack_sticks3\", \"crowpanel_advance_43\", \"m5stack_stickc_plus2\", \"m5stack_stopwatch\", \"seeed_xiao_s3_147\", \"fnk0104b\", \"vn_s3_183\", \"ai_passport\", \"waveshare_s3_lcd128\", \"esp_mosaico\", \"waveshare_p4_lcd35\", \"deotaland_rorolee\", \"waveshare_s3_lcd19\", \"waveshare_s3_143c\"]"
++      - if: "$CONFIG{MUSE_BOARD_ID} in [\"ostb_echoear_2st\", \"waveshare_s3_175c\", \"waveshare_s3_175\", \"waveshare_s3_18\", \"waveshare_s3_216\", \"waveshare_s3_206\", \"waveshare_s3_185c\", \"waveshare_s3_143\", \"waveshare_s3_146\", \"aipi\", \"atk_dnesp32s3_box\", \"m5stack_cardputer_adv\", \"sensecap_watcher\", \"m5stack_sticks3\", \"crowpanel_advance_43\", \"m5stack_stickc_plus2\", \"m5stack_stopwatch\", \"seeed_xiao_s3_147\", \"fnk0104b\", \"vn_s3_183\", \"ai_passport\", \"waveshare_s3_lcd128\", \"esp_mosaico\", \"waveshare_p4_lcd35\", \"deotaland_rorolee\", \"waveshare_s3_lcd19\", \"waveshare_s3_143c\", \"spotpear_s3_18\"]"
+   espressif/esp_lcd_ili9341:
+     version: "^2.1.0"
+     rules:
+@@ -123,15 +140,15 @@ dependencies:
+   espressif/esp_lcd_touch:
+     version: "^1.2.0"
+     rules:
+-      - if: "$CONFIG{MUSE_BOARD_ID} == \"waveshare_s3_185c\""
++      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_185c\", \"spotpear_s3_18\"]"
+   espressif/esp_lcd_st77916:
+     version: "2.0.2"
+     rules:
+-      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_185c\", \"ostb_echoear_2st\"]"
++      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_185c\", \"ostb_echoear_2st\", \"spotpear_s3_18\"]"
+   espressif/esp_lcd_touch_cst816s:
+     version: "==1.1.2"
+     rules:
+-      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_185c\", \"waveshare_s3_lcd128\", \"waveshare_s3_lcd19\"]"
++      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_185c\", \"waveshare_s3_lcd128\", \"waveshare_s3_lcd19\", \"spotpear_s3_18\"]"
+   espressif/esp_lcd_gc9a01:
+     version: "^2.0.0"
+     rules:
 diff --git a/esp32/components/muse/muse_app.c b/esp32/components/muse/muse_app.c
 index d27f69e..6345222 100644
 --- a/esp32/components/muse/muse_app.c
@@ -12457,7 +13201,7 @@ index d27f69e..6345222 100644
      muse_state_init();
  #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..d49c363 100644
+index 7c579bb..d9101ca 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,28 @@
@@ -12663,7 +13407,7 @@ index 7c579bb..d49c363 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +994,384 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +994,404 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -12732,6 +13476,10 @@ index 7c579bb..d49c363 100644
 +        carpet_photo_bench();
 +        return true;
 +    }
++    if (!strncmp(line, "photoscale", 10) && (line[10] == '\0' || line[10] == ' ')) {
++        carpet_page_bench_photo_scale(line[10] == ' ' ? atoi(line + 11) : 0);
++        return true;
++    }
 +    /* 上行那一档开关：`>micup` 读，`>micup off|auto|force|default` 改（改完落 NVS，重启还在）。
 +     * 屏上「声音」页那一格「对着屏说话」读写的是同一格（开=auto、关=off），不是两份状态。
 +     * off = 按下走 Muse 原来那一路；auto = 只在对面那台手机在 ack.protocols 里申报过 4 才发
@@ -12768,6 +13516,22 @@ index 7c579bb..d49c363 100644
 +        fflush(stdout);
 +        return true;
 +    }
++#if CONFIG_MUSE_BOARD_SPOTPEAR_S3_18
++    /* 新板麦克风全零的判别探针：数 SD/BCLK/WS 三根线的翻转，再倒 32 位 DMA 原字。
++     * SD 不动而时钟在动 ⇒ 麦克风没在驱动（硬件/使能问题）；SD 在动 ⇒ 采集格式问题。 */
++    if (!strcmp(line, "micraw")) {
++        extern void spotpear_micraw(void);
++        spotpear_micraw();
++        fflush(stdout);
++        return true;
++    }
++    if (!strcmp(line, "micen")) {
++        extern void spotpear_micen(void);
++        spotpear_micen();
++        fflush(stdout);
++        return true;
++    }
++#endif
 +    /* 唤醒词：`>wake` 回读，`>wake on|off` 改（和设置页「声音」那一格同一个 NVS key）。
 +     * 为什么串口也要有一条：这一路"没反应"分四种，屏上画的字一模一样 ——
 +     * 模型没起来(ready=0) / 设置在关(on=0) / 屏正在念(live=1) / 闸没开(armed=0)。
@@ -13048,7 +13812,7 @@ index 7c579bb..d49c363 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1406,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1426,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -13061,7 +13825,7 @@ index 7c579bb..d49c363 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1514,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1534,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -14934,6 +15698,84 @@ index 0000000..3cf853a
 +# CONFIG_SPIRAM_FETCH_INSTRUCTIONS is not set
 +# CONFIG_SPIRAM_RODATA is not set
 +# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+diff --git a/esp32/devices/sdkconfig.muse-spotpear-s3-18 b/esp32/devices/sdkconfig.muse-spotpear-s3-18
+new file mode 100644
+index 0000000..4ebad46
+--- /dev/null
++++ b/esp32/devices/sdkconfig.muse-spotpear-s3-18
+@@ -0,0 +1,71 @@
++# Copyright (c) Meta Platforms, Inc. and affiliates.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# Spotpear ESP32-S3-1.8inch-Touch-LCD (JC3636W518): 16 MB flash (esptool
++# flash_id measured 2026-11-19), 8 MB octal PSRAM (S3R8).
++# Load last, after sdkconfig.muse.
++CONFIG_IDF_TARGET="esp32s3"
++CONFIG_MUSE_BOARD_SPOTPEAR_S3_18=y
++CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
++CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
++
++CONFIG_SPIRAM=y
++CONFIG_SPIRAM_MODE_OCT=y
++CONFIG_SPIRAM_SPEED_80M=y
++CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
++CONFIG_SPIRAM_RODATA=y
++CONFIG_SPIRAM_XIP_FROM_PSRAM=y
++CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
++CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
++CONFIG_ESP32S3_DATA_CACHE_64KB=y
++CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
++
++CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
++CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
++CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
++# Static buffers in PSRAM: Wi-Fi's, lwIP's and BT's, and those marked
++# EXT_RAM_BSS_ATTR (Muse's chat turn, the tunnel batch). Without it light
++# sleep's code leaves Link under 16 KB of DMA RAM once connected, too little
++# to send link.register, so the tunnel never opens. The chip always has
++# PSRAM, so booting without it needn't be allowed.
++CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
++# CONFIG_SPIRAM_IGNORE_NOTFOUND is not set
++# That forces Wi-Fi's TX buffers static, in internal RAM: 8, not 16, at 1.6 KB
++# each, which voice over the tunnel doesn't fill.
++CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
++
++# Screen off on battery: the CPU drops to the crystal clock and light-sleeps
++# between button polls (muse_input.c). BLE has to allow that with modem sleep;
++# there's no 32 kHz crystal, so its sleep clock is the main crystal, kept
++# powered. On USB power the chip stays awake at full speed.
++CONFIG_PM_ENABLE=y
++CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
++CONFIG_BT_CTRL_MODEM_SLEEP=y
++CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
++CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
++CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
++CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
++# The CPU stays powered in light sleep: saving its state takes 8.5 KB of
++# internal RAM, more than Wi-Fi can spare here.
++# CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set
++# Pins keep their state in light sleep. This workaround would float them all,
++# panel and touch reset and the DAC unmute included.
++# CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND is not set
++# For the battery meter (muse_battery.h, ">power" on the console): time
++# actually slept, and how long each power lock kept the chip awake.
++CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
++CONFIG_PM_PROFILING=y
++
++# Set your SDK token in build-muse-s3-spotpear-carpet/sdkconfig (ignored by
++# Git), not here.
+\ No newline at end of file
 diff --git a/esp32/main/app.c b/esp32/main/app.c
 index 1030652..25ddc42 100644
 --- a/esp32/main/app.c
