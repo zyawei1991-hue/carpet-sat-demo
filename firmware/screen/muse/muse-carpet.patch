@@ -10313,10 +10313,10 @@ index 0000000..57c626e
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..5e86ff3
+index 0000000..8d3bceb
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1713 @@
+@@ -0,0 +1,1757 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -10624,6 +10624,13 @@ index 0000000..5e86ff3
 +/* B §1 守护灯点：挂在脸那格顶上的一枚琥珀点（make_dot 同款）。有未读守护事件才亮；
 + * 它在脸那格上，露别的格时 tileview 自然把它带出画面，不用额外管页。 */
 +static lv_obj_t *s_guard_dot;
++
++/* 断链提示（方向文档 §三.2：连不上不能沉默，孩子得知道发生了什么）：四格各一行
++ * 底边小字，同一状态同一文案。连续断 10 秒才露（拨号/重连那几秒不闪），linked 立刻藏。
++ * 不是按钮、不新开页 —— 设置格不是 carpet 的，不摆。 */
++static lv_obj_t *s_link_hint[4];
++static int64_t s_link_down_us;
++static int s_link_hint_shown;   /* 0=藏 1=手机不在身边 2=连不上手机 App */
 +static lv_obj_t *s_scene_card[3];   /* 场景环那三张卡：apply() 按当前场景给谁描边 */
 +static lv_obj_t *s_shown_col;       /* 上一次露出的列：只在它变了时播入场动效，不每帧重播 */
 +
@@ -11897,6 +11904,17 @@ index 0000000..5e86ff3
 +    make_pill(s_detail_col, COL_W, BTN_H, "戳一下", on_poke_clicked, NULL);
 +    lv_obj_set_flag(s_detail_col, LV_OBJ_FLAG_HIDDEN, true);
 +
++    /* 断链提示挂在格上（不挂列）：同一格里翻页它都在。底导航点在 -12，这行在 -30；
++     * 脸格例外 —— Muse 的 caption 带占着 -30（muse_ui.c 触屏那条），抬到 -52。
++     * 建在所有页之后：钟面星轨/相册整格背景层比它晚建就会盖住它（LVGL 同级后建在上）。 */
++    lv_obj_t *hint_tiles[4] = { face_tile, func_tile, ring_tile, amb_tile };
++    for (int i = 0; i < 4; i++) {
++        if (!hint_tiles[i]) continue;
++        s_link_hint[i] = make_label(hint_tiles[i], s_small, COLOR_OFF, "");
++        lv_obj_align(s_link_hint[i], LV_ALIGN_BOTTOM_MID, 0, -SC(i == 0 ? 52 : 30));
++        lv_obj_set_flag(s_link_hint[i], LV_OBJ_FLAG_HIDDEN, true);
++    }
++
 +    /* 划动判定靠轮询：40ms 一次。一次 60 px 的划动最快也就 100ms 出头，采得到两三点。 */
 +    lv_timer_create(drag_timer, 40, NULL);
 +
@@ -11913,6 +11931,32 @@ index 0000000..5e86ff3
 +     * 点被念掉（broadcast 清未读）下一拍自然灭。 */
 +    if (s_guard_dot)
 +        lv_obj_set_flag(s_guard_dot, LV_OBJ_FLAG_HIDDEN, !carpet_link_event_pending());
++
++    /* 断链提示跟链路快照走：wifi 没起来=热点不在=手机不在身边；wifi 在而没连上
++     * =App 没在前台那类，文案分开不假造。文案只在状态变了才写（每拍 set_text 白费）。 */
++    {
++        carpet_link_view_t view;
++        carpet_link_view(&view);
++        int want = 0;
++        if (!view.linked) {
++            int64_t now = esp_timer_get_time();
++            if (!s_link_down_us) s_link_down_us = now;
++            if (now - s_link_down_us >= 10LL * 1000 * 1000)
++                want = view.wifi_up ? 2 : 1;
++        } else {
++            s_link_down_us = 0;
++        }
++        if (want != s_link_hint_shown) {
++            s_link_hint_shown = want;
++            const char *text = want == 1 ? "手机不在身边" : want == 2 ? "连不上手机 App" : "";
++            for (int i = 0; i < 4; i++) {
++                if (!s_link_hint[i]) continue;
++                if (want) lv_label_set_text(s_link_hint[i], text);
++                lv_obj_set_flag(s_link_hint[i], LV_OBJ_FLAG_HIDDEN, !want);
++            }
++            if (want) ESP_LOGI(TAG, "断链提示上屏：%s", text);
++        }
++    }
 +
 +    /* 台架那一下先回脸：四方向都从默认态（脸）起判才称得准（串口任务不许动 LVGL 对象）。 */
 +    if (s_bench_nav) {
@@ -15893,7 +15937,7 @@ index 1030652..25ddc42 100644
              }
              if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..0be7bbb 100644
+index 0c74b08..23fbaa8 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -15907,23 +15951,31 @@ index 0c74b08..0be7bbb 100644
  #include "muse_input.h"
  #include "muse_link.h"
  #include "muse_mem.h"
-@@ -65,13 +69,25 @@ static const char *TAG = "link.muse";
+@@ -63,15 +67,31 @@ static const char *TAG = "link.muse";
+ 
+ #define CONNECT_TIMEOUT_MS 20000
  #define RETRY_MIN_US (5LL * 1000 * 1000)
- #define RETRY_MAX_US (60LL * 1000 * 1000)
+-#define RETRY_MAX_US (60LL * 1000 * 1000)
++#define RETRY_MAX_US (30LL * 1000 * 1000)
  #define RETRY_AWAKE_MAX_US (15LL * 1000 * 1000)   // screen on: it says it's reconnecting
 -// No saved network nearby: look again after this, doubling up to a minute with
 -// the screen on and ten asleep.
 +// No saved network nearby: look again after this, doubling up to the cap.
 +// 醒着和睡着分开定起点：演示现场是"人开了热点站在那儿等屏连上"，而 30 秒起步那条
 +// 是照着电池定的，醒着时它把等待翻六倍（2026-11-13 owner 报「连接热点有点慢」）。
-+// 醒着 5 秒起步、15 秒封顶（和 RETRY_AWAKE_MAX_US 同一档）；睡着仍 30 秒起步、
-+// 10 分钟封顶 —— 电池那条约束一个字没动。
++// 醒着 5 秒起步、15 秒封顶（和 RETRY_AWAKE_MAX_US 同一档）。
++// 睡着的封顶 2026-11-20 从 10 分钟压到 30 秒（RETRY_MAX_US 同改，原 60 秒）：
++// 合作方方向（docs/DIRECTION-2026-11-19-partner-sync.md §三.2）——儿童产品热点回来
++// 最长等 ~10 分钟不可接受（11-19 实测退避到每 600 s 扫一次）。电池那条约束没丢：
++// 它走的是 nap（stay_online 关时熄屏直接离网），这条阶梯只在 stay_online 开着
++// （owner 为语音唤醒常开）或还没 nap 的窗口里跑，30 s 一扫是那条开关的已知代价。
  #define AWAY_MIN_US (30LL * 1000 * 1000)
 -#define AWAY_AWAKE_MAX_US (60LL * 1000 * 1000)
+-#define AWAY_MAX_US (10LL * 60 * 1000 * 1000)
+-#define AWAY_FRESH_US (10LL * 1000 * 1000)   // a look this recent that found none stands
 +#define AWAY_AWAKE_MIN_US (5LL * 1000 * 1000)
 +#define AWAY_AWAKE_MAX_US (15LL * 1000 * 1000)
- #define AWAY_MAX_US (10LL * 60 * 1000 * 1000)
--#define AWAY_FRESH_US (10LL * 1000 * 1000)   // a look this recent that found none stands
++#define AWAY_MAX_US (30LL * 1000 * 1000)
 +// 一次"附近没有"的结论只站 3 秒：热点随时可能出现，而按下键那一下必须有事发生。
 +// 原来那 10 秒比新的 5 秒重试还长，会把第一次重试整条吞掉（看着像按了没反应）。
 +#define AWAY_FRESH_US (3LL * 1000 * 1000)   // a look this recent that found none stands
@@ -15937,7 +15989,7 @@ index 0c74b08..0be7bbb 100644
  
  _Static_assert(MUSE_WIFI_SAVED_MAX >= WIFI_KNOWN_MAX, "room for every saved network");
  
-@@ -490,14 +506,31 @@ static bool none_nearby_lately(void) {
+@@ -490,14 +510,31 @@ static bool none_nearby_lately(void) {
  // leaves Wi-Fi alone instead of dropping a network it has no copy of.
  #define WIFI_OVERRIDE (CONFIG_HOMEHUB_WIFI_SSID[0] != '\0')
  
@@ -15970,7 +16022,7 @@ index 0c74b08..0be7bbb 100644
      uint32_t pending = KEEP_BLE;
      bool napped = false;
      bool setup_done = config_setup_complete();
-@@ -515,7 +548,7 @@ static void keeper_task(void *arg) {
+@@ -515,7 +552,7 @@ static void keeper_task(void *arg) {
              reload_creds(&joined_gen);
              next_try = 0;
              backoff = RETRY_MIN_US;
@@ -15979,7 +16031,7 @@ index 0c74b08..0be7bbb 100644
          }
          if (pending & KEEP_RELOAD) {
              // Link saves a network it has already joined (provisioning), so
-@@ -541,7 +574,7 @@ static void keeper_task(void *arg) {
+@@ -541,7 +578,7 @@ static void keeper_task(void *arg) {
              // nothing would only look again.
              if (!s_away || !none_nearby_lately()) {
                  next_try = 0;
@@ -15988,7 +16040,7 @@ index 0c74b08..0be7bbb 100644
              }
          }
  
-@@ -562,16 +595,41 @@ static void keeper_task(void *arg) {
+@@ -562,16 +599,41 @@ static void keeper_task(void *arg) {
                  ESP_LOGI(TAG, "screen off a while; left wifi");
                  napped = true;
              }
@@ -16033,7 +16085,7 @@ index 0c74b08..0be7bbb 100644
              // NVS has Muse's changes (s_editing is clear), so Link joins from
              // the same list the settings show.
              uint32_t gen = s_creds_gen;
-@@ -598,7 +656,7 @@ static void keeper_task(void *arg) {
+@@ -598,7 +660,7 @@ static void keeper_task(void *arg) {
                  // Joining a network moves it first.
                  reload_creds(&joined_gen);
                  backoff = RETRY_MIN_US;
@@ -16042,7 +16094,7 @@ index 0c74b08..0be7bbb 100644
              } else if (r == APP_WIFI_NOT_NEARBY) {
                  // Quietly: nothing here touches the screen. Waking it or a
                  // talk press looks again at once (muse_wifi_apply), unless
-@@ -663,6 +721,11 @@ void muse_glue_start(void) {
+@@ -663,6 +725,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }
