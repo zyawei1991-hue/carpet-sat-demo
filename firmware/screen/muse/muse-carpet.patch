@@ -485,7 +485,7 @@ index b478d5e..7be64ea 100644
  idf_component_register(
      SRCS ${srcs}
 diff --git a/esp32/components/muse/Kconfig b/esp32/components/muse/Kconfig
-index 588d7c6..bc7df3e 100644
+index 588d7c6..6fd38cb 100644
 --- a/esp32/components/muse/Kconfig
 +++ b/esp32/components/muse/Kconfig
 @@ -55,6 +55,10 @@ menu "Muse"
@@ -507,7 +507,7 @@ index 588d7c6..bc7df3e 100644
          default "waveshare_s3_143c" if MUSE_BOARD_WAVESHARE_S3_143C
          default "waveshare_s3_143" if MUSE_BOARD_WAVESHARE_S3_143
          default "waveshare_s3_146" if MUSE_BOARD_WAVESHARE_S3_146
-@@ -297,6 +302,20 @@ menu "Muse"
+@@ -297,6 +302,33 @@ menu "Muse"
              rarer characters and Korean show as boxes. Takes about 910 KB of
              flash, against about 1.2 MB.
  
@@ -525,10 +525,23 @@ index 588d7c6..bc7df3e 100644
 +            Its labels are Chinese, so this selects the CJK caption font
 +            (about 910 KB of flash). Off, the build is upstream's.
 +
++    config MUSE_CARPET_CHAT_WINDOW
++        bool "Chat window: one wake word, more turns without re-waking"
++        depends on MUSE_CARPET_CARDS
++        default n
++        help
++            A wake-word hit opens a 60 s window: each time the reply has
++            finished playing on the screen, the mic re-opens on its own.
++            Closes on "didn't catch that", on sleep, on the gate, on the
++            60 s cap, and - honestly - 12 s after a turn when no reply
++            audio ever started: a phone-side read reply (#76 shape) gives
++            the screen no end-of-sentence to hear. Off, every turn needs
++            its own wake word (the shipped behaviour).
++
      config MUSE_LATIN_FONT
          bool "Show Vietnamese and other accented letters in captions"
          depends on MUSE_ENABLED && !MUSE_UI_FREEINK
-@@ -319,7 +338,7 @@ menu "Muse"
+@@ -319,7 +351,7 @@ menu "Muse"
              language you speak to it, and the serial console stays in
              English for the tools that read it. The button menu and the
              pairing card are translated; the touch boards' settings pages
@@ -537,7 +550,7 @@ index 588d7c6..bc7df3e 100644
  
          config MUSE_UI_LANG_EN
              bool "English"
-@@ -327,6 +346,21 @@ menu "Muse"
+@@ -327,6 +359,21 @@ menu "Muse"
          config MUSE_UI_LANG_VI
              bool "Vietnamese"
              select MUSE_LATIN_FONT
@@ -10313,10 +10326,10 @@ index 0000000..57c626e
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..8d3bceb
+index 0000000..a702bbc
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1757 @@
+@@ -0,0 +1,1762 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -10354,6 +10367,7 @@ index 0000000..8d3bceb
 +#include "muse_mem.h"
 +#include "muse_pixel.h"
 +#include "muse_settings.h"
++#include "muse_state.h"          /* muse_state_asleep()：熄屏不跳相册 */
 +
 +static const char *TAG = "carpet_page";
 +
@@ -11819,6 +11833,10 @@ index 0000000..8d3bceb
 +        s_photo_idx = pv.count - 1;   /* 新来的那张就是最新 */
 +        s_photo_last_ms = now;
 +        photo_show(s_photo_idx);
++        /* 11-22 owner 拍板（D16.3.1）：收齐一张就自动跳相册页。旧入口
++         * （脸→右滑氛围→再右滑轮换）留着没拆 —— owner 自己都没找到过它，
++         * 拆了更没有地方进。熄屏不跳：那会儿没人看屏，跳了白跳。 */
++        if (!muse_state_asleep()) nav_to(PG_PHOTO);
 +    } else if (pv.count > 1 && now - s_photo_last_ms >= PHOTO_TEMPO_MS) {
 +        s_photo_idx = (s_photo_idx + 1) % pv.count;
 +        s_photo_last_ms = now;
@@ -15368,21 +15386,24 @@ index a671bbc..a56b3dc 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..bd07f46 100644
+index 000104e..37ed186 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -38,6 +38,10 @@
+@@ -38,6 +38,13 @@
  #include "muse_settings.h"
  #include "muse_state.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_mic.h"    /* 「对着屏说话」：这一轮的语音交给手机，不去 Muse 云 */
 +#include "carpet/carpet_wake.h"   /* 免按键：听见那个词就替人按了一下键，后面整条路不变 */
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
++#include "carpet/carpet_audio.h"  /* 会话窗口：答句在屏上放完那一刻，重新开麦 */
++#endif
 +#endif
  #if CONFIG_MUSE_REALTIME_VOICE
  #include "muse_voice_call.h"
  #include "muse_voice_call_core.h"
-@@ -221,6 +225,13 @@ static void idle_capture(void)
+@@ -221,6 +228,13 @@ static void idle_capture(void)
          vTaskDelay(pdMS_TO_TICKS(20));
          return;
      }
@@ -15396,7 +15417,7 @@ index 000104e..bd07f46 100644
      if (s_monitor) {
          float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
          s_monitor_db = db > s_monitor_db ? db : s_monitor_db * 0.9f + db * 0.1f;
-@@ -414,6 +425,138 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+@@ -414,6 +428,174 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
  
  static void go_idle(const char *caption);
  
@@ -15430,11 +15451,44 @@ index 000104e..bd07f46 100644
 +#define HF_NOTHING_CHUNKS 100  /* 2 秒还没人出声：判成误触发 */
 +#define HF_THRESH_CAP (-25.0f)
 +
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++/* 会话窗口：一次「你好小安」开场，此后每轮答句在屏上放完就自动重新开麦；
++ * 满 60 秒、说没听清、熄屏、断闸，四种收口。
++ * 「放完」这个判据只有**屏自己念答句**时才听得见（carpet_audio 的落点）。
++ * 答句要是从手机那头念（#76 没修的现状），发完 12 秒等不到任何一段音频起头，
++ * 当场判这轮没耳朵、关窗说实话 —— 窗口宁可关，不能空转：空转的窗口会在
++ * 孩子沉默的 8 秒里不停把环境噪声往手机发。 */
++#define WIN_LIFE_S 60
++#define WIN_REPLY_WAIT_S 12
++static int64_t s_win_until_us;   /* 0 = 关着 */
++static int64_t s_win_turn_us;    /* 这一句交出去的时刻 */
++static bool s_win_reply_live;    /* 这轮已经听到答句音频起头 */
++static bool s_turn_sent;         /* talk_to_phone 走到过 carpet_mic_end(true) */
++
++static void window_open(void)
++{
++    int64_t now = esp_timer_get_time();
++    s_win_until_us = now + (int64_t)WIN_LIFE_S * 1000000;
++    s_win_turn_us = now;
++    s_win_reply_live = false;
++}
++
++static void window_close(const char *why)
++{
++    if (!s_win_until_us) return;
++    s_win_until_us = 0;
++    if (why) go_idle(why);
++}
++#endif
++
 +/* 只有一条采集任务用它，放 .bss（200 B 内部）而不是那 6144 字节的任务栈上。 */
 +static float s_hf_win[HF_WINDOW];
 +
 +static void talk_to_phone(bool barge_in, bool hands_free)
 +{
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++    s_turn_sent = false;
++#endif
 +    if (!carpet_mic_begin()) {
 +        go_idle("上一句还在发，稍等一下");
 +        return;
@@ -15524,6 +15578,9 @@ index 000104e..bd07f46 100644
 +        return;
 +    }
 +    carpet_mic_end(true);
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++    s_turn_sent = true;
++#endif
 +    ESP_LOGI(TAG, "carpet: 这一句交给手机 %.2f 秒（%s %zu 帧%s）",
 +             (double)held / MUSE_AUDIO_RATE, hands_free ? "免按键，静音收尾" : "按住", held,
 +             released ? "" : "，撞到 8 秒上限");
@@ -15535,7 +15592,7 @@ index 000104e..bd07f46 100644
  /*
   * Plays Hatch's reply as it arrives, with its text as the caption. Returns
   * true if interrupted by a new press. *delivered: the VM has the note.
-@@ -533,7 +676,12 @@ static const char *not_ready_reason(void)
+@@ -533,7 +715,12 @@ static const char *not_ready_reason(void)
      muse_hatch_status_t st;
      muse_hatch_status(&st);
      switch (st.state) {
@@ -15548,7 +15605,7 @@ index 000104e..bd07f46 100644
      case MUSE_HATCH_OFFLINE: return "NO WI-FI";
      default: return "CAN'T REACH MUSE";
      }
-@@ -897,8 +1045,16 @@ static bool can_record(void)
+@@ -897,8 +1084,16 @@ static bool can_record(void)
      muse_hatch_status_t st;
      muse_hatch_status(&st);
      if (st.state == MUSE_HATCH_NOT_SET) {
@@ -15565,7 +15622,7 @@ index 000104e..bd07f46 100644
      }
      if ((!ready || s_held_count) && s_held_count >= HELD_MAX) {
          go_idle("NOTES STILL WAITING TO SEND");
-@@ -1217,6 +1373,44 @@ static void voice_task(void *arg)
+@@ -1217,6 +1412,83 @@ static void voice_task(void *arg)
              }
              /* The 20 ms read paces this loop. */
              idle_capture();
@@ -15581,6 +15638,11 @@ index 000104e..bd07f46 100644
 +                    carpet_wake_inhibit(true);
 +                    talk_to_phone(false, true);
 +                    carpet_wake_inhibit(false);
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
++                    /* 命中开场、这句真发出去了，才给 60 秒的窗口；
++                     * 没发出去（静音/在发上一句）不开，别拿空窗口吃电。 */
++                    if (s_turn_sent) window_open();
++#endif
 +                } else if (carpet_mic_link_up()) {
 +                    go_idle("对着屏说话还没开");
 +                } else {
@@ -15606,11 +15668,45 @@ index 000104e..bd07f46 100644
 +                pre_reset();
 +                continue;
 +            }
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
++            /* 窗口维护：放完→重新开麦；没耳朵/超时/熄屏→说实话关窗。
++             * 放在唤醒和点脸之后、按键事件之前：这三条路不会同时开火。 */
++            if (s_win_until_us) {
++                int64_t now = esp_timer_get_time();
++                if (muse_state_asleep() || !carpet_mic_armed()) {
++                    window_close(muse_state_asleep() ? "屏幕熄了，窗口先收" : NULL);
++                } else if (carpet_audio_live()) {
++                    s_win_reply_live = true;
++                } else if (s_win_reply_live) {
++                    /* 起头有过、现在没了：这句放完了，接麦。 */
++                    s_win_reply_live = false;
++                    muse_wifi_power(MUSE_WIFI_FULL);
++                    carpet_wake_inhibit(true);
++                    talk_to_phone(false, true);
++                    carpet_wake_inhibit(false);
++                    if (s_turn_sent) {
++                        s_win_turn_us = esp_timer_get_time();
++                    } else {
++                        window_close(NULL);  /* 没听清那句已经替话说过了，不再补一句 */
++                    }
++                    pre_reset();
++                    continue;
++                } else if (now - s_win_turn_us > (int64_t)WIN_REPLY_WAIT_S * 1000000) {
++                    window_close("这轮答句没从屏上念，窗口收在；连上会出声的 App 再开");
++                    pre_reset();
++                    continue;
++                } else if (now > s_win_until_us) {
++                    window_close("到一会儿了，想接着聊再喊「你好小安」");
++                    pre_reset();
++                    continue;
++                }
++            }
++#endif
 +#endif
              if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                  continue;
              }
-@@ -1255,6 +1449,19 @@ static void voice_task(void *arg)
+@@ -1255,6 +1527,19 @@ static void voice_task(void *arg)
          }
  #endif
          muse_input_clear_call_pending(s_press_mark);
@@ -15630,7 +15726,7 @@ index 000104e..bd07f46 100644
          if (!can_record()) {
              pending_down = false;
              continue;
-@@ -1301,7 +1508,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
+@@ -1301,7 +1586,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
          muse_state_set_caption("AUDIO INIT FAILED");
          return ESP_FAIL;
      }
@@ -15645,10 +15741,10 @@ index 000104e..bd07f46 100644
          /* Without the task nothing would ever rest the codecs, which
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
-index 0000000..3cf853a
+index 0000000..fa53c9f
 --- /dev/null
 +++ b/esp32/devices/sdkconfig.carpet
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,99 @@
 +# 车联（Screen-Link）覆盖层：叠在 devices/sdkconfig.muse-waveshare-s3-175 之后。
 +#
 +# 打开它就有的两件事：
@@ -15661,6 +15757,12 @@ index 0000000..3cf853a
 +# 我们的改动一行都不进二进制。
 +
 +CONFIG_MUSE_CARPET_CARDS=y
++
++# 会话窗口（11-22 owner 拍「连续对话」立项）：一次「你好小安」开场，此后每轮
++# 答句在屏上放完自动重新开麦，60 秒封顶。放完判据要**屏自己念答句**才听得见；
++# 答句还是手机念的这轮（#76 未修），窗口会在发完 12 秒等不到音频起头时
++# 说实话关窗 —— 这是设计好的收口，不是故障。#76 修好后同版固件无需改动直接生效。
++CONFIG_MUSE_CARPET_CHAT_WINDOW=y
 +
 +# 设置页、按钮菜单和配对卡片的中文（MUSE_UI_LANG_ZH 只有叠了上面那条才选得上，
 +# 因为只有那条把 910 KB 那份中文字体弄进镜像）。
