@@ -51,6 +51,8 @@ class DialogBridge(
      * 而猜错的代价是屏上把车主自己问的那句又念一遍。
      */
     private val onAnswer: (DialogPayload) -> Unit = {},
+    /** §5.1 四段打点里的两段（请求发出/首字回）。不给就是不打，行为和原来一模一样 */
+    private val trace: TurnTrace? = null,
 ) {
     private var turnSeq = 0
 
@@ -93,8 +95,10 @@ class DialogBridge(
         }
         _thinking.value = true
         val t0 = nowMs()
+        trace?.requestSent(id)
         try {
             val reply = gateway.ask(q, context(id), personaScene)
+            trace?.firstToken(id)
             // 一轮到底等了多久要在日志里看得见：现场说"AI 变慢了"时，
             // 分不清是模型慢、取数慢还是合成慢，这三种要改的地方完全不同
             note("一轮 $id：问 → 答 ${nowMs() - t0} ms（${reply.skill ?: reply.source.name}）")

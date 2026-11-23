@@ -17,6 +17,7 @@ import com.carpet.satdemo.core.ai.skillContext
 import com.carpet.satdemo.core.ai.Turn
 import com.carpet.satdemo.core.ai.TurnFrom
 import com.carpet.satdemo.core.ai.TurnScene
+import com.carpet.satdemo.core.ai.TurnTrace
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
@@ -535,6 +536,17 @@ class AppRuntime(private val host: Application) {
     }
 
     /**
+     * §5.1 四段打点：识别完 → 请求发出 → 首字回 → 首帧音频推屏。
+     * 现场说"AI 变慢了"时，这一行日志直接把锅分给 ASR、模型、合成还是链路。
+     */
+    private val turnTrace = TurnTrace(sink = { line -> runtimeRef?.log(line) })
+
+    init {
+        // §5.1 打点第 ④ 段：语音层第一帧真推给屏那一刻回填（一轮只报一次，守卫在 ScreenVoice 里）
+        voice.onFirstAudioToScreen = { turnTrace.firstAudio(it) }
+    }
+
+    /**
      * 对话的唯一一条接线：入账 → 该不该触发技能 → 答 → 回镜给圆屏。
      * 逻辑本体在 `core/ai/DialogBridge`（那边才有真单测，彩排台和手机跑的也才是同一份），
      * 这里只填三个口子：事实表、往屏发一帧、宿主自己的协程作用域。
@@ -561,6 +573,7 @@ class AppRuntime(private val host: Application) {
         // 答句落地之后合成语音推给屏。**问句不回镜的那一侧也不会走到这儿**，
         // 所以屏上不会把车主自己问的那句又念一遍
         onAnswer = { d -> voice.speak(d.turnId, d.text, d.origin) },
+        trace = turnTrace,
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */
@@ -1117,6 +1130,8 @@ class AppRuntime(private val host: Application) {
                 )
                 when (r) {
                     is SiliconFlowAsr.AsrResult.Text -> {
+                        // §5.1 打点第 ① 段：这句的字已经出来了，后面两段（模型、合成）拿同一个 turn_id 接
+                        turnTrace.asrDone(seg.turnId)
                         withContext(Dispatchers.Main) { say("屏上说了：「${r.text}」") }
                         dialog.onScreenFrame(
                             ScreenMessage(

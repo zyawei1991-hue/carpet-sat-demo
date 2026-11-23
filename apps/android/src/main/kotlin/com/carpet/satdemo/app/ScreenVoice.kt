@@ -112,6 +112,18 @@ class ScreenVoice(
     }
 
     /**
+     * §5.1 打点第 ④ 段「首帧音频推屏」，一轮只报第一句。两处推屏落点都在这条串行 worker 上，
+     * 所以 once 守卫用普通字段就够，不需要锁。
+     */
+    var onFirstAudioToScreen: (turnId: String) -> Unit = {}
+    private var audioHookTurn: String? = null
+    private fun noteFirstAudio(turnId: String) {
+        if (audioHookTurn == turnId) return
+        audioHookTurn = turnId
+        onFirstAudioToScreen(turnId)
+    }
+
+    /**
      * 这台引擎里的中文人声。空 = 引擎没报（老引擎不实现 voices）或者只有一种。
      *
      * **这是最直接的一条"换可爱女声"的路**：Google 那台在中国区常见一男一女，
@@ -889,6 +901,7 @@ class ScreenVoice(
                 return null
             }
             live.broadcast(frames)
+            noteFirstAudio(turnId)
             nextSeq = seqStart + frames.size
             turnBytes = bytesBefore + pcm.size
             // 这一句真送出去了：清掉上一次的原因，设置页上那行红字跟着消失
@@ -971,6 +984,7 @@ class ScreenVoice(
                     }.getOrDefault(emptyList())
                     if (frames.isNotEmpty()) {
                         link.broadcast(frames)
+                        noteFirstAudio(turnId)
                         log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块。answer_peak=${peakOf(pcm)} dest=屏")
                         screenGot = true
                         sentBytes = pcm.size
