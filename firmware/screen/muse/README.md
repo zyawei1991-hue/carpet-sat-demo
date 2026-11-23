@@ -33,7 +33,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
 - 我们的全部改动 = 43 个文件、9205 行新增 / 105 行删，三份是二进制素材：283,244 字节的字库、
   445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，16,226 行 / 886,309 字节，
   `git diff --binary` 打的，三份二进制在里面都是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-22 夜（会话窗口 + 相册自动跳这一版）在**台架之外的这台机器**上实读的。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-22 夜（会话窗口 + 相册自动跳这一版）在本机实读的。
   下面逐文件表的首列数字这一轮也按 `git diff --numstat` 全表重读了一遍（往轮只改总数没改表，有过漂移）。
   **会话窗口 + 相册自动跳这一轮（11-22）**：owner 拍板 `docs/DECISIONS.md` D16/D16.5 落地两件屏侧活。
   ①**收图自动跳相册页**（`carpet_page.c` `photo_refresh()`：`pv.gen` 变化 = 新收齐一张 → `nav_to(PG_PHOTO)`，
@@ -44,11 +44,18 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   没听清（沿用现句）、60 秒到（「到一会儿了，想接着聊再喊你好小安」）、熄屏、
   以及发完 12 秒等不到任何音频起头（= 答句还是手机念的 #76 形状）→「这轮答句没从屏上念，窗口收在」。**#76 没修前窗口的默认表现就是第四条**，
   这是设计好的降级，不是故障；App 侧修好后同版固件无需改动直接生效（交接单 `docs/APP-CHANGES-2026-11-22.md`）。
-  ⚠️ **这一轮没编没刷**：这台机器的 ESP-IDF 工具链没装完（`C:\Espressif\tools\eim_idf.json` 停在 `status: in_progress`，
-  没有 xtensa 编译器，`idf.py` 起不来）——台架上那几轮的 `FEXIT=0` 都出自另一台机器。
-  已称的只有 patch 完整性：`git apply` 干净过（43 sections）、三份二进制逐字节同、40 份文本统一行尾后逐份同；
-  C 代码只过了人眼审（Kconfig 依赖、窗口四收口、`s_turn_sent` 的编译围栏）。**合并前必须台架 build + 真机称**：
-  窗口三条收口 + 相册自动跳（假手机 `fake-phone.mjs` 推图就能称）+ 关掉 `CHAT_WINDOW` 回归今天的装机构建。
+  ✅ **这一轮已编已刷（11-22 深夜补记，改写本节 24 分钟前的 ⚠️「没编没刷」段）**：本机就是台架 —— 之前以为
+  「FEXIT=0 出自另一台机器」是误判，真相是本机工具链被 `C:\Espressif\tools\eim_idf.json` 的半截安装
+  （`status: in_progress`）带偏，我起初又按 5.5.2 和 `D:\dev\esp\tools` 错路径找，白折腾一晚。正确环境本节 §3 早写着：
+  **IDF v6.0.1 + `D:\dev\esp\idf-tools`**（venv 是 `idf6.0_py3.11_env`；export.ps1 会因找 3.12 venv 报错，
+  绕法：手动置 `IDF_PATH/ESP_IDF_VERSION/IDF_TOOLS_PATH/IDF_PYTHON_ENV_PATH` + 工具 bin 进 PATH，用 venv python 直调 `tools/idf.py`）。
+  已称：全量构建 **FEXIT=0**（2423 目标、0 error，日志 `D:\dev\esp\build603.log`）；COM8 **刷写 AEXIT=0**
+  （app-flash，分区表未动；哈希校验过 + 硬复位）；开机串口日志 30 秒 **无 crash**，唤醒引擎就绪
+  （`waken9_tts2h12_nihaoxiaoan`）、上行地基就绪、断链提示上屏照旧。
+  **仍没称到（合入前硬条件不变）**：假手机 `fake-phone.mjs` 推图称自动跳相册；会话窗口四条收口真机称
+  （尤其 12 秒降级那条 —— 依赖热点 + 对话链路，且 #76 没修前窗口默认就走第四条）；关 `CHAT_WINDOW` 回归装机构建。
+  另记两坑（都是这晚踩的，写死在这）：PowerShell 里 `-DSDKCONFIG_DEFAULTS=$var` **必须整体加引号**，
+  否则 `;` 把参数腰斩成字面量；bridge 后台任务回收会连坐杀掉它派生的整棵进程树，长构建要 `Start-Process` 脱树跑。
   重打 patch：**43 文件 / 9205+ / 105- / 16,226 行 / 886,309 字节**。
   **合作方方向屏侧两件这一轮（11-21，#34/#86）**：方向文档 `docs/DIRECTION-2026-11-19-partner-sync.md` §三.2
   点名的两件屏侧动手项（儿童产品：热点回来不能等十分钟、连不上不能沉默）。
