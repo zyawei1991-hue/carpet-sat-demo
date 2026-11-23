@@ -876,6 +876,7 @@ class ScreenVoice(
             // #76 收口：peak=0 就是合成器交回来一段静音，推给屏只会换来"屏不出声"。
             // 本机接住、把原因摆在设置页 —— 静音从"要现场猜"变成"当场可查可听"
             if (amp == 0) {
+                log("answer_peak=0.00 dest=本机（system 合成给了静音）")
                 speakHere(engine, text)
                 gate("这句合成出来是一段静音，屏收不到声音，先在手机上念了")
                 return null
@@ -893,7 +894,7 @@ class ScreenVoice(
             // 这一句真送出去了：清掉上一次的原因，设置页上那行红字跟着消失
             _issue.value = null
             lastGate = null
-            log("屏幕语音：${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
+            log("屏幕语音：${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块。answer_peak=${peakOf(pcm)} dest=屏")
             return pcm.size
         } finally {
             file.delete()
@@ -970,13 +971,13 @@ class ScreenVoice(
                     }.getOrDefault(emptyList())
                     if (frames.isNotEmpty()) {
                         link.broadcast(frames)
-                        log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
+                        log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块。answer_peak=${peakOf(pcm)} dest=屏")
                         screenGot = true
                         sentBytes = pcm.size
                         sentFrames = frames.size
                     }
                 } else {
-                    log("屏幕语音：网络合成的 PCM 全零（peak=0.00，源 ${_source.value ?: "-"}），这句不推给屏")
+                    log("屏幕语音：网络合成的 PCM 全零，这句不推给屏。answer_peak=0.00 dest=本机（源 ${_source.value ?: "-"}）")
                 }
             }
         }
@@ -1019,7 +1020,7 @@ class ScreenVoice(
                 try {
                     player.start()
                     phoneGot = true
-                    log("屏幕语音：网络合成一句，本机喇叭播放中（${mp3.size} 字节）")
+                    log("屏幕语音：网络合成一句，本机喇叭播放中（${mp3.size} 字节）。answer_peak=未量 dest=本机")
                 } catch (e: Exception) {
                     runCatching { player.release() }
                     clearPhonePlayer(player)
