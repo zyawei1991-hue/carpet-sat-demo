@@ -1,8 +1,12 @@
 package com.carpet.satdemo.core.ai
 
 import com.carpet.satdemo.core.link.SosCopy
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -17,6 +21,8 @@ class AiGateway(
     initialGranted: PermissionTier = PermissionTier.ReadLocal,
     private val log: (String) -> Unit = {},
     private val nowMs: () -> Long = System::currentTimeMillis,
+    /** §5.1-2：技能话术「先答」要等多久。模型超过这个数还没吐第一个字，本机那句就先开口 */
+    private val localFirstMs: Long = 1_500,
 ) {
     /** 授予档。默认只读本机 —— 出网和不可逆动作要在设置里明确开（§6 第 3 条同一条思路：取更严的） */
     @Volatile
@@ -45,12 +51,17 @@ class AiGateway(
     /**
      * [onSentence]：**流式每凑齐一句回调一次**（已逐句过 [guard]）。整段答案照旧从返回值走，
      * 记录、历史、回镜都不提前用这一句 —— 提前交出去的只有声音。不传就是非流式，行为同旧。
+     *
+     * [onLocalFirst]：§5.1-2「先答后补」。技能有本机话术、模型等了 [localFirstMs] 还没出第一个字时，
+     * 这句本机话术交出去让屏幕先开口；模型后面回来照常用 [onSentence]/返回值补充。
+     * 交出去的那句在返回值上带 [AiReply.answeredEarly]（仅当模型最终没回来），宿主入账但别再说第二遍。
      */
     suspend fun ask(
         question: String,
         ctx: SkillContext,
         scene: TurnScene? = null,
         onSentence: (String) -> Unit = {},
+        onLocalFirst: (AiReply) -> Unit = {},
     ): AiReply {
         val q = question.trim()
         if (q.isEmpty()) return AiReply("想说点什么？", skill = null, source = ReplySource.LocalRule)
@@ -93,13 +104,36 @@ class AiGateway(
         }
         // 没回来时这行是唯一说得清「屏上那句到底是谁写的」的证据：不打的话，
         // 现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错
-        val out = model(facts + summarize(ctx, persona), q, persona, fallbackNote = "用技能自己的话术兜底", onSentence = onSentence)
+        //
+        // §5.1-2 先答后补：到点模型一个字没出，本机那句就先开口。两条纪律：
+        // 定时器**不许用 withTimeout** —— 那会取消在飞的 HTTP，等于把"模型后面补充"一起掐死；
+        // 流式只要吐过一句就不抢嘴 —— 模型的话已经让屏幕开口了，再插一句本机话术是双嘴红线。
+        val spokeAny = AtomicBoolean(false)
+        val earlyFired = AtomicBoolean(false)
+        val streamGate: (String) -> Unit = { s -> spokeAny.set(true); onSentence(s) }
+        val out: String? = coroutineScope {
+            val job = if (result.line != null && provider.live && localFirstMs > 0) launch {
+                delay(localFirstMs)
+                if (!spokeAny.get()) {
+                    earlyFired.set(true)
+                    onLocalFirst(AiReply(guard(result.line), skill = skill.id, source = ReplySource.LocalRule))
+                }
+            } else null
+            val answer = model(
+                facts + summarize(ctx, persona), q, persona,
+                fallbackNote = "用技能自己的话术兜底", onSentence = streamGate,
+            )
+            job?.cancel()
+            answer
+        }
         return record(
             AiReply(
                 text = out?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",
                 skill = skill.id,
                 source = if (out != null) ReplySource.Model else if (provider.live) ReplySource.LocalFallback else ReplySource.LocalRule,
                 mocked = result.mocked,
+                // 模型这回没回来、本机那句又已经先答过：这一条只是重播，宿主入账但不许再开口
+                answeredEarly = earlyFired.get() && out == null,
             ),
             q,
         )

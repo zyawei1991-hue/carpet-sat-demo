@@ -89,6 +89,8 @@ data class AiReply(
     val source: ReplySource,
     val mocked: Boolean = false,
     val proactive: Boolean = false,
+    /** §5.1-2：技能那句本机话术**已经先答过**（模型这回没回来，文本是重播）。宿主入账但不许再开口一次 */
+    val answeredEarly: Boolean = false,
 )
 
 enum class ReplySource {

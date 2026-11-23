@@ -106,31 +106,40 @@ class DialogBridge(
         // 排在这些块**后面**的才是这里的续体 —— 读这一个变量就够，不用锁
         var streamed = false
         try {
-            val reply = gateway.ask(q, context(id), personaScene) { s ->
-                val line = s.trim()
-                if (line.isNotEmpty()) launch {
-                    if (!streamed) {
-                        streamed = true
-                        // 流式下"首字回"的真实含义提前到第一句生成完 —— 打点吃的就是这一刻
-                        trace?.firstToken(id)
+            val reply = gateway.ask(
+                q, context(id), personaScene,
+                onSentence = { s ->
+                    val line = s.trim()
+                    if (line.isNotEmpty()) launch {
+                        if (!streamed) {
+                            streamed = true
+                            // 流式下"首字回"的真实含义提前到第一句生成完 —— 打点吃的就是这一刻
+                            trace?.firstToken(id)
+                        }
+                        onStreamSentence(
+                            DialogPayload(
+                                turnId = id,
+                                dir = DialogDir.down,
+                                text = line,
+                                source = DialogSource.model,
+                                skill = null,
+                                origin = via,
+                            ),
+                        )
                     }
-                    onStreamSentence(
-                        DialogPayload(
-                            turnId = id,
-                            dir = DialogDir.down,
-                            text = line,
-                            source = DialogSource.model,
-                            skill = null,
-                            origin = via,
-                        ),
-                    )
-                }
-            }
+                },
+                onLocalFirst = { early ->
+                    // §5.1-2 早到那句自成一轮（"$id-e"）：去重键是 turnId:from，
+                    // 蹭同一个 id 会把后面整段答案当重复静默丢掉
+                    launch { say(early, via, "$id-e", to) }
+                },
+            )
             if (!streamed) trace?.firstToken(id)
             // 整段到底等了多久要在日志里看得见：现场说"AI 变慢了"时，
             // 分不清是模型慢、取数慢还是合成慢，这三种要改的地方完全不同
             note("一轮 $id：问 → 答 ${nowMs() - t0} ms（${reply.skill ?: reply.source.name}）")
-            say(reply, via, id, to, speak = !streamed)
+            // 早到句已经开过口、这次模型又没回来：文本是重播，入账但别再念第二遍（双嘴红线）
+            say(reply, via, id, to, speak = !(streamed || reply.answeredEarly))
         } finally {
             _thinking.value = false
         }
@@ -228,7 +237,9 @@ class DialogBridge(
                 scene = scene,
             ),
         ) ?: return
-        mirror(stored)
+        // 重播那条不回镜：早到句已经占着屏了，再回一帧同文案就是连着两条一样的气泡。
+        // 账还是记（时间线要留这条的出处和耗时），只是不再往屏上推
+        if (!reply.answeredEarly) mirror(stored)
         // 声音挂在文字后面，而不是替掉文字：合成失败、屏没升到 v3、端点没配 ——
         // 任何一种都只让这一句没声音，那句答话本身已经在屏上了。
         // 流式那一轮这句早就从 onStreamSentence 开口了，这里再交一次就是双嘴（红线）
