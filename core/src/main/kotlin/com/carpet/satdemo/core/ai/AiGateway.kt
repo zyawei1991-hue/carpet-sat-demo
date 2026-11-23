@@ -23,15 +23,34 @@ class AiGateway(
     private val nowMs: () -> Long = System::currentTimeMillis,
     /** §5.1-2：技能话术「先答」要等多久。模型超过这个数还没吐第一个字，本机那句就先开口 */
     private val localFirstMs: Long = 1_500,
+    /** §5.2：会话窗口。同一个人格隔过这个窗再问，算新一轮 —— 旧话不陪跑（owner 11-15 拍：20 秒内算同一段对话） */
+    private val sessionWindowMs: Long = 20_000,
 ) {
     /** 授予档。默认只读本机 —— 出网和不可逆动作要在设置里明确开（§6 第 3 条同一条思路：取更严的） */
     @Volatile
     var granted: PermissionTier = initialGranted
         private set
 
-    private val turns = ArrayDeque<ChatTurn>()
+    /** 人格各一条历史（§5.2）：亲子页陪聊的话不该接在车载守护的历史后面被喂给模型 */
+    private class Track {
+        val turns = ArrayDeque<ChatTurn>()
+        var lastMs = 0L
+    }
 
-    val history: List<ChatTurn> get() = turns.toList()
+    private val tracks = Persona.entries.associateWith { Track() }
+
+    /** 发给模型的按人格取（[historyFor]）；这条是排障总视图，拼接顺序按人格声明序 */
+    val history: List<ChatTurn> get() = tracks.values.flatMap { it.turns.toList() }
+
+    fun historyFor(persona: Persona): List<ChatTurn> = tracks.getValue(persona).turns.toList()
+
+    /** 会话窗口在这一刀收：窗一过先清这条人格的历史，别人格的不动 */
+    private fun trackFor(persona: Persona): Track = tracks.getValue(persona).also { t ->
+        if (t.turns.isNotEmpty() && t.lastMs > 0L && nowMs() - t.lastMs > sessionWindowMs) {
+            t.turns.clear()
+            log("会话窗口过了 ${sessionWindowMs}ms，清掉 ${persona.name} 的历史")
+        }
+    }
 
     /**
      * 上一次真模型为什么没答上来。设置页要把它原样摆出来 ——
@@ -77,6 +96,7 @@ class AiGateway(
                 if (out != null) AiReply(guard(out), skill = null, source = ReplySource.Model)
                 else AiReply(noMatch(persona), skill = null, source = ReplySource.LocalFallback),
                 q,
+                persona,
             )
         }
 
@@ -91,6 +111,7 @@ class AiGateway(
                     source = ReplySource.Denied,
                 ),
                 q,
+                persona,
             )
         }
 
@@ -136,13 +157,17 @@ class AiGateway(
                 answeredEarly = earlyFired.get() && out == null,
             ),
             q,
+            persona,
         )
     }
 
-    private fun record(reply: AiReply, question: String): AiReply {
-        turns.addLast(ChatTurn("user", question))
-        turns.addLast(ChatTurn("assistant", reply.text))
-        while (turns.size > MAX_TURNS) turns.removeFirst()
+    private fun record(reply: AiReply, question: String, persona: Persona): AiReply {
+        // 历史按人格分道（§5.2），入哪条道、下次从哪条道取，都跟这轮的人格走
+        val t = trackFor(persona)
+        t.turns.addLast(ChatTurn("user", question))
+        t.turns.addLast(ChatTurn("assistant", reply.text))
+        while (t.turns.size > MAX_TURNS) t.turns.removeFirst()
+        t.lastMs = nowMs()
         return reply
     }
 
@@ -172,7 +197,8 @@ class AiGateway(
         val t0 = nowMs()
         // 首句时刻在 IO 线程上写、协程恢复后在别的线程读：用一个数说清，不靠可见性运气
         val firstMs = AtomicLong(-1L)
-        val out = provider.completeStream(facts, history.toList(), question, persona) { s ->
+        // 发给模型的历史只取这一轮人格那一条道（§5.2）；会话窗口也在这里收
+        val out = provider.completeStream(facts, trackFor(persona).turns.toList(), question, persona) { s ->
             if (firstMs.get() < 0) firstMs.set(nowMs() - t0)
             // 红线逐句过：这一句马上要合成开口，等不到整段回来再把关
             onSentence(guard(s))
