@@ -46,6 +46,18 @@ class TurnTraceTest {
     }
 
     @Test
+    fun `流式下 firstToken 每句都来 只认第一下`() {
+        val t = trace()
+        now = 100; t.requestSent("t5")
+        now = 500; t.firstToken("t5")
+        now = 600; t.firstToken("t5")
+        assertEquals(1, lines.size)
+        now = 900; t.firstAudio("t5")
+        // 首帧推屏从**第一句**起算：这一段的数才是"模型写第一句之外"的全部耗时
+        assertEquals("打点 t5：首字回→首帧推屏 400 ms", lines[1])
+    }
+
+    @Test
     fun `纯文字答句等不到首帧 表被挤掉不泄漏`() {
         val t = trace()
         repeat(20) { i -> t.requestSent("t$i"); t.firstToken("t$i") }

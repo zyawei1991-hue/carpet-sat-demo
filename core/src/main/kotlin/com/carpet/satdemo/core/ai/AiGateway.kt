@@ -1,6 +1,7 @@
 package com.carpet.satdemo.core.ai
 
 import com.carpet.satdemo.core.link.SosCopy
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -41,7 +42,16 @@ class AiGateway(
         log("AI 权限档 → ${tier.label}")
     }
 
-    suspend fun ask(question: String, ctx: SkillContext, scene: TurnScene? = null): AiReply {
+    /**
+     * [onSentence]：**流式每凑齐一句回调一次**（已逐句过 [guard]）。整段答案照旧从返回值走，
+     * 记录、历史、回镜都不提前用这一句 —— 提前交出去的只有声音。不传就是非流式，行为同旧。
+     */
+    suspend fun ask(
+        question: String,
+        ctx: SkillContext,
+        scene: TurnScene? = null,
+        onSentence: (String) -> Unit = {},
+    ): AiReply {
         val q = question.trim()
         if (q.isEmpty()) return AiReply("想说点什么？", skill = null, source = ReplySource.LocalRule)
         val persona = Persona.of(scene)
@@ -51,7 +61,7 @@ class AiGateway(
             // 没命中关键词也要能答：走模型，但事实表里只有状态机给得出的东西。
             // 事实表按人格取材 —— 亲子/助手态不喂卫星，模型手里没卫星料就绕不回卫星
             val facts = summarize(ctx, persona)
-            val out = model(facts, q, persona)
+            val out = model(facts, q, persona, onSentence = onSentence)
             return record(
                 if (out != null) AiReply(guard(out), skill = null, source = ReplySource.Model)
                 else AiReply(noMatch(persona), skill = null, source = ReplySource.LocalFallback),
@@ -83,7 +93,7 @@ class AiGateway(
         }
         // 没回来时这行是唯一说得清「屏上那句到底是谁写的」的证据：不打的话，
         // 现场看到的就是「明明配了大模型，念出来的却是本机话术」，而且没有任何地方报错
-        val out = model(facts + summarize(ctx, persona), q, persona, fallbackNote = "用技能自己的话术兜底")
+        val out = model(facts + summarize(ctx, persona), q, persona, fallbackNote = "用技能自己的话术兜底", onSentence = onSentence)
         return record(
             AiReply(
                 text = out?.let { guard(it) } ?: result.line ?: "这条我现在说不了。",
@@ -122,10 +132,17 @@ class AiGateway(
         question: String,
         persona: Persona,
         fallbackNote: String? = null,
+        onSentence: (String) -> Unit = {},
     ): String? {
         if (!provider.live) return null
         val t0 = nowMs()
-        val out = provider.complete(facts, history.toList(), question, persona)
+        // 首句时刻在 IO 线程上写、协程恢复后在别的线程读：用一个数说清，不靠可见性运气
+        val firstMs = AtomicLong(-1L)
+        val out = provider.completeStream(facts, history.toList(), question, persona) { s ->
+            if (firstMs.get() < 0) firstMs.set(nowMs() - t0)
+            // 红线逐句过：这一句马上要合成开口，等不到整段回来再把关
+            onSentence(guard(s))
+        }
         val ms = nowMs() - t0
         if (out == null) {
             log(
@@ -133,7 +150,8 @@ class AiGateway(
                     (fallbackNote?.let { "，$it" } ?: ""),
             )
         } else {
-            log("${provider.label} 用时 $ms ms")
+            val head = if (firstMs.get() >= 0) "，首句 ${firstMs.get()} ms" else ""
+            log("${provider.label} 用时 $ms ms$head")
         }
         return out
     }

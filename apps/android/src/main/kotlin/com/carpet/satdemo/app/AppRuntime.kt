@@ -574,6 +574,9 @@ class AppRuntime(private val host: Application) {
         // 所以屏上不会把车主自己问的那句又念一遍
         onAnswer = { d -> voice.speak(d.turnId, d.text, d.origin) },
         trace = turnTrace,
+        // §5.1-1 流式：第一句一凑齐就先开合成（voice.speak 自己排串行 worker，模型还在写第二句）。
+        // 这一轮交过早到句后，DialogBridge 不再把整段交给 onAnswer —— 不会念两遍
+        onStreamSentence = { d -> voice.speak(d.turnId, d.text, d.origin) },
     )
 
     /** 唯一的那份对话时间线。圆屏和手机都只是它的两个入口 */

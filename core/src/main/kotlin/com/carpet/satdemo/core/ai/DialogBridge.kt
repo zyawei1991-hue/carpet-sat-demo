@@ -53,6 +53,12 @@ class DialogBridge(
     private val onAnswer: (DialogPayload) -> Unit = {},
     /** §5.1 四段打点里的两段（请求发出/首字回）。不给就是不打，行为和原来一模一样 */
     private val trace: TurnTrace? = null,
+    /**
+     * §5.1-1 流式的**早到答句**（已过文案闸）：模型那边一句刚凑齐就从这儿交出来，宿主拿去先开口。
+     * 这一轮交过早到句之后，整段答落地时**不再走 [onAnswer]** —— 两只嘴念同一句是红线。
+     * 不给就是非流式，行为和原来一模一样。
+     */
+    private val onStreamSentence: (DialogPayload) -> Unit = {},
 ) {
     private var turnSeq = 0
 
@@ -96,13 +102,35 @@ class DialogBridge(
         _thinking.value = true
         val t0 = nowMs()
         trace?.requestSent(id)
+        // 这一轮有没有早到句。onSentence 从模型读线程来、launch 回宿主作用域排队，
+        // 排在这些块**后面**的才是这里的续体 —— 读这一个变量就够，不用锁
+        var streamed = false
         try {
-            val reply = gateway.ask(q, context(id), personaScene)
-            trace?.firstToken(id)
-            // 一轮到底等了多久要在日志里看得见：现场说"AI 变慢了"时，
+            val reply = gateway.ask(q, context(id), personaScene) { s ->
+                val line = s.trim()
+                if (line.isNotEmpty()) launch {
+                    if (!streamed) {
+                        streamed = true
+                        // 流式下"首字回"的真实含义提前到第一句生成完 —— 打点吃的就是这一刻
+                        trace?.firstToken(id)
+                    }
+                    onStreamSentence(
+                        DialogPayload(
+                            turnId = id,
+                            dir = DialogDir.down,
+                            text = line,
+                            source = DialogSource.model,
+                            skill = null,
+                            origin = via,
+                        ),
+                    )
+                }
+            }
+            if (!streamed) trace?.firstToken(id)
+            // 整段到底等了多久要在日志里看得见：现场说"AI 变慢了"时，
             // 分不清是模型慢、取数慢还是合成慢，这三种要改的地方完全不同
             note("一轮 $id：问 → 答 ${nowMs() - t0} ms（${reply.skill ?: reply.source.name}）")
-            say(reply, via, id, to)
+            say(reply, via, id, to, speak = !streamed)
         } finally {
             _thinking.value = false
         }
@@ -187,7 +215,7 @@ class DialogBridge(
     }
 
     /** 网关的回执落成记录 + 上屏。主动播报也走这儿，两条路只有一份代码 */
-    private fun say(reply: AiReply, via: DialogOrigin, turnId: String, scene: TurnScene?) {
+    private fun say(reply: AiReply, via: DialogOrigin, turnId: String, scene: TurnScene?, speak: Boolean = true) {
         val stored = log.append(
             Turn(
                 from = TurnFrom.Ai,
@@ -202,8 +230,9 @@ class DialogBridge(
         ) ?: return
         mirror(stored)
         // 声音挂在文字后面，而不是替掉文字：合成失败、屏没升到 v3、端点没配 ——
-        // 任何一种都只让这一句没声音，那句答话本身已经在屏上了
-        onAnswer(payloadOf(stored))
+        // 任何一种都只让这一句没声音，那句答话本身已经在屏上了。
+        // 流式那一轮这句早就从 onStreamSentence 开口了，这里再交一次就是双嘴（红线）
+        if (speak) onAnswer(payloadOf(stored))
     }
 
     /**

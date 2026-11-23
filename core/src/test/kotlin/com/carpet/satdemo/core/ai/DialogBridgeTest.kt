@@ -30,6 +30,8 @@ class DialogBridgeTest {
         /** 屏报上来的那一页换算出来的手机页。默认 null = 屏还没报过页 */
         screenScene: () -> TurnScene? = { null },
         provider: AiProvider = LocalRuleProvider(),
+        /** 流式早到句的收集口（§5.1-1）。不给就是非流式宿主 */
+        private val early: MutableList<DialogPayload> = mutableListOf(),
     ) {
         val pushed = mutableListOf<DialogPayload>()
         val answered = mutableListOf<DialogPayload>()
@@ -50,6 +52,7 @@ class DialogBridgeTest {
             nowMs = { clock++ },
             screenScene = screenScene,
             onAnswer = { answered += it },
+            onStreamSentence = { early += it },
         )
         fun texts() = bridge.log.turns.value.map { it.text }
         fun frame(d: DialogPayload) = ScreenMessage(t = MsgType.dialog, seq = 1, ts = clock, dialog = d)
@@ -396,5 +399,36 @@ class DialogBridgeTest {
         assertTrue(h.pushed.any { it.text.contains("我在想上一条") })
         // 忙时那一句也没进模型历史：下一轮发给模型的两条仍然只是第一轮的问答
         assertEquals(listOf("user", "assistant"), h.gateway.history.map { it.role })
+    }
+
+    /** 会提前交句的假模型源（§5.1-1）。complete 故意炸：流式这一路不该再退到整段那趟 */
+    private class StreamStub : AiProvider {
+        override val label = "流式假源"
+        override val live = true
+        override suspend fun complete(f: String, h: List<ChatTurn>, q: String, p: Persona): String? =
+            error("流式路不该调整段 complete")
+        override suspend fun completeStream(
+            f: String, h: List<ChatTurn>, q: String, p: Persona, onSentence: (String) -> Unit,
+        ): String? {
+            onSentence("第一句到了。")
+            onSentence("这是后半句。")
+            return "第一句到了。这是后半句。"
+        }
+    }
+
+    @Test
+    fun `流式那一轮 早到句先开口 整段不再交 onAnswer 记录和回镜仍是整段`() = runBlocking {
+        val early = mutableListOf<DialogPayload>()
+        val h = Harness(provider = StreamStub(), early = early)
+        h.bridge.ask("嗯嗯随便聊聊", DialogOrigin.phone)
+        assertEquals(listOf("第一句到了。", "这是后半句。"), early.map { it.text })
+        // 早到句全部沿用这一轮的 turn_id：屏靠它把声音钉回原来那一轮
+        assertEquals(1, early.map { it.turnId }.distinct().size)
+        assertEquals(early[0].turnId, h.pushed.last().turnId)
+        // 嘴已经由早到句开过了，整段落地时不许再念一遍（两只嘴念同一句是红线）
+        assertTrue(h.answered.isEmpty(), h.answered.toString())
+        // 台账和回镜收到的是整段原话，不是零句
+        assertContains(h.texts(), "第一句到了。这是后半句。")
+        assertEquals("第一句到了。这是后半句。", h.pushed.last().text)
     }
 }

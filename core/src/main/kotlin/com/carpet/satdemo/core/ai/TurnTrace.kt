@@ -40,10 +40,15 @@ class TurnTrace(
         touch(turnId).requestMs = nowMs()
     }
 
-    /** 模型整段回完（非流式下"首字"==整句；改流式后这里才是真首字） */
+    /** 模型整段回完（非流式下"首字"==整句）；流式下第一句早到时就报，**每轮只认第一下** */
     fun firstToken(turnId: String) {
         val t = nowMs()
-        val d = synchronized(this) { touch(turnId).also { it.firstTokenMs = t } }
+        val d = synchronized(this) {
+            touch(turnId).also {
+                if (it.firstTokenMs != null) return
+                it.firstTokenMs = t
+            }
+        }
         val a = d.asrDoneMs
         val r = d.requestMs ?: return
         sink(

@@ -109,6 +109,19 @@ interface AiProvider {
     /** 拿结构化事实 + 对话历史，生成最后那句话。失败要返回 null，不许抛到 UI 线程。
      *  [persona] 决定 SYSTEM 身份和答句口径（车载守护 / 亲子 / 屏上助手） */
     suspend fun complete(facts: String, history: List<ChatTurn>, question: String, persona: Persona = Persona.Guardian): String?
+
+    /**
+     * 流式版（§5.1 第 1 条）：**每凑齐一句就先交一句**，整段生成完再返回全文。
+     * 默认实现直接走 [complete] 且不提前交句 —— 不认流式的 provider 行为和改造前一模一样，
+     * 调用方不用分辨两家。
+     */
+    suspend fun completeStream(
+        facts: String,
+        history: List<ChatTurn>,
+        question: String,
+        persona: Persona = Persona.Guardian,
+        onSentence: (String) -> Unit = {},
+    ): String? = complete(facts, history, question, persona)
 }
 
 /** 本地话术器：把 Skill 自己那句结论原样说出来。**这是默认 provider**，所以断网、没 key 也能演示，但界面得标 */
@@ -139,6 +152,13 @@ class OpenAiCompatProvider(
     // 在旧的单测里到处都是，参数顺序一颠倒就全部编译不过
     private val transportGet: (url: String, headers: Map<String, String>) -> String =
         { u, h -> get(u, h, timeout.toMillis()) },
+    /**
+     * 流式那一趟：逐行回调 SSE。**放在 transport 前面** ——
+     * 尾随 lambda 绑的是最后一个参数，老的 `OpenAiCompatProvider(ep) { _, _, _ -> … }` 写法必须继续绑 transport。
+     * 和 [transport] 一样可注入：单测拿它喂假流，不许真出网。
+     */
+    private val transportStream: (url: String, body: String, headers: Map<String, String>, onLine: (String) -> Unit) -> Unit =
+        { u, b, h, onLine -> streamPost(u, b, h, timeout.toMillis(), onLine) },
     private val transport: (url: String, body: String, headers: Map<String, String>) -> String =
         { u, b, h -> post(u, b, h, timeout.toMillis()) },
 ) : AiProvider {
@@ -230,6 +250,97 @@ class OpenAiCompatProvider(
             error = last
             null
         }
+    }
+
+    /**
+     * 流式那一趟。一条总规矩：**第一句还没交出去之前，随时可以整条退回老路** ——
+     * 那句还没上屏也没开口，重打一次只是慢，不是骗。反过来，**半句已出就不重打整段**：
+     * 屏上已经响了一句，再让非流式路把同样的话慢一遍是双嘴；此时把已积累的前半截原样交回，
+     * 比装作什么都没发生诚实。
+     */
+    override suspend fun completeStream(
+        facts: String,
+        history: List<ChatTurn>,
+        question: String,
+        persona: Persona,
+        onSentence: (String) -> Unit,
+    ): String? {
+        // 没配好 / 明文 / 地址形状不对：一句都别提前交，直接让 complete 去写那条准确的失败原因
+        if (!endpoint.configured || endpoint.baseUrl.startsWith("http://", ignoreCase = true) ||
+            baseUrlCandidates(endpoint.baseUrl).isEmpty()
+        ) return complete(facts, history, question, persona)
+        val headers = mapOf(
+            "Content-Type" to "application/json",
+            "Accept" to "text/event-stream",
+            "Authorization" to "Bearer ${endpoint.apiKey}",
+        )
+        return withContext(Dispatchers.IO) {
+            for (base in baseUrlCandidates(endpoint.baseUrl)) {
+                val url = runCatching { URI.create(base + "/chat/completions").toURL().toString() }.getOrNull() ?: continue
+                val acc = StringBuilder()
+                var emitted = false
+                var done = false
+                val splitter = SentenceSplitter { s ->
+                    if (s.isNotBlank()) {
+                        emitted = true
+                        onSentence(s)
+                    }
+                }
+                val failure: Throwable? = try {
+                    transportStream(url, body(facts, history, question, endpoint.disableThinking, persona, stream = true), headers) { raw ->
+                        if (done || !raw.startsWith("data:")) return@transportStream
+                        val payload = raw.substring(5).trim()
+                        if (payload == "[DONE]") {
+                            done = true
+                        } else {
+                            parseSseChunk(payload)?.let { piece ->
+                                acc.append(piece)
+                                splitter.feed(piece)
+                            }
+                        }
+                    }
+                    null
+                } catch (e: Exception) {
+                    e
+                }
+                if (failure == null) {
+                    splitter.finish()
+                    val text = acc.toString().trim()
+                    if (text.isNotEmpty()) {
+                        correctedBase = base.takeIf { it != normalizeBaseUrl(endpoint.baseUrl) }
+                        error = null
+                        return@withContext text
+                    }
+                    error = "流式回了空正文"
+                    if (!emitted) return@withContext complete(facts, history, question, persona)
+                    return@withContext null
+                }
+                if (failure is NotStreamResponse && !emitted) {
+                    // 网关不理 stream:true，整段 JSON 就在异常里：直接认这一份，不再重打一遭
+                    accept(failure.bodyText)?.let { whole ->
+                        onSentence(whole)
+                        error = null
+                        return@withContext whole
+                    }
+                    return@withContext complete(facts, history, question, persona)
+                }
+                if (emitted) {
+                    error = "流式中途断了（${failLine(failure)}），只答了前半句"
+                    return@withContext acc.toString().trim().takeIf { it.isNotEmpty() }
+                }
+                // 只有"地址口径"这一类错值得换下一种写法试；其余整条退回非流式，让老路去写失败原因
+                shapeFailure = failure is HttpStatusException && failure.looksLikeWrongPath
+                if (!shapeFailure) return@withContext complete(facts, history, question, persona)
+            }
+            complete(facts, history, question, persona)
+        }
+    }
+
+    /** 失败原因那一行。HttpStatusException 带正文段，其余交给 [reasonOf] 分类 */
+    private fun failLine(e: Throwable): String = if (e is HttpStatusException) {
+        "HTTP ${e.code}：${e.snippet.ifBlank { "网关没给正文" }}"
+    } else {
+        reasonOf(e as? Exception ?: Exception(e))
     }
 
     /** 上一次失败是不是"地址写法不对"这一类（404 / 200 却不是对话格式）。换基址重试只认这一类 */
@@ -386,7 +497,14 @@ class OpenAiCompatProvider(
         else -> "请求失败：${e.javaClass.simpleName}${e.message?.let { " · $it" } ?: ""}"
     }
 
-    private fun body(facts: String, history: List<ChatTurn>, question: String, thinking: Boolean, persona: Persona): String = buildString {
+    private fun body(
+        facts: String,
+        history: List<ChatTurn>,
+        question: String,
+        thinking: Boolean,
+        persona: Persona,
+        stream: Boolean = false,
+    ): String = buildString {
         append("{\"model\":\"").append(escape(endpoint.model)).append("\",")
         // 长答按句分段念（owner 11-16 拍的折中）：250 会把长答截成半句，抬到 900 给"念完一段"留量；
         // 短答照旧 —— 口径由 SYSTEM 压着，不是靠 token 上限压
@@ -399,6 +517,9 @@ class OpenAiCompatProvider(
         }
         append(",{\"role\":\"user\",\"content\":\"").append(escape(question)).append("\"}")
         append("]")
+        // OpenAI 标准的流式开关。老网关不认这一项会直接忽略（回整段 JSON），
+        // 也有的回 400 —— 那两种都会被 completeStream 整条退回非流式路
+        if (stream) append(",\"stream\":true")
         if (thinking) append(",\"thinking\":{\"type\":\"disabled\"}")
         append("}")
     }
@@ -481,6 +602,55 @@ class OpenAiCompatProvider(
             }.distinct().sorted()
         }.getOrDefault(emptyList())
 
+        /**
+         * SSE 一块里的文本片段：`choices[0].delta.content`（chat 流式）或 `choices[0].text`（老补全口径）。
+         * 开头那块只有 role、content 是 null —— JsonNull 的 content 是字符串 "null"，
+         * 所以只认 isString 的原始值，别把这两个字母念出来。
+         */
+        fun parseSseChunk(raw: String): String? = runCatching {
+            val obj = json.parseToJsonElement(raw) as? JsonObject ?: return null
+            val first = (obj["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return null
+            ((first["delta"] as? JsonObject)?.get("content") as? JsonPrimitive)
+                ?.takeIf { it.isString }?.content
+                ?: (first["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        }.getOrNull()
+
+        /** 一次 POST 逐行读流。见 [streamPost] 用处的注释 */
+        private fun streamPost(
+            url: String,
+            body: String,
+            headers: Map<String, String>,
+            readMs: Long,
+            onLine: (String) -> Unit,
+        ) {
+            val builder = Request.Builder().url(url).post(body.toRequestBody("application/json".toMediaType()))
+            headers.forEach { (k, v) -> builder.header(k, v) }
+            val call = client.newBuilder()
+                // 流式的读超时语义正好是"两包之间最多等多久"：非流式那 12 秒等的是整段，这里等的是下一包
+                .readTimeout(readMs.coerceIn(1_000, 60_000), TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(builder.build())
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    throw HttpStatusException(resp.code, text.take(160).replace('\n', ' '))
+                }
+                val ct = resp.header("Content-Type").orEmpty()
+                if (!ct.contains("event-stream", ignoreCase = true)) {
+                    // 网关不理 stream:true，整段 JSON 就是正文：原样带回去认，别再重打一遭
+                    throw NotStreamResponse(resp.body?.string().orEmpty())
+                }
+                val src = resp.body?.source() ?: return
+                src.use {
+                    var line = it.readUtf8Line()
+                    while (line != null) {
+                        onLine(line)
+                        line = it.readUtf8Line()
+                    }
+                }
+            }
+        }
+
         fun escape(s: String): String = buildString {
             s.forEach { c ->
                 when (c) {
@@ -554,4 +724,32 @@ class HttpStatusException(val code: Int, val snippet: String) : Exception("http 
             return listOf("invalid url", "unknown url", "unknown endpoint", "unsupported endpoint", "no route", "路径")
                 .any { s.contains(it) }
         }
+}
+
+/** 连上了、也回了 200，但正文不是 SSE（网关不理 `stream:true`）。[bodyText] 就是那份整段 JSON */
+class NotStreamResponse(val bodyText: String) : Exception("not an event-stream response")
+
+/**
+ * 把流式增量按句切开。**标点集和 ScreenVoice.splitSentences 是同一套**（。！？；换行）——
+ * 两边切法不一样，语音层收到的"一句"就会再被它自己切一遍，首句到底哪句算首句都说不清。
+ * 改任何一边都要看着另一边。
+ */
+internal class SentenceSplitter(private val emit: (String) -> Unit) {
+    private val buf = StringBuilder()
+
+    fun feed(text: String) {
+        text.forEach { ch ->
+            buf.append(ch)
+            if (ch in "。！？；\n") flush()
+        }
+    }
+
+    /** 流收尾：没有句号的尾段也算一句，别吞掉 */
+    fun finish() = flush()
+
+    private fun flush() {
+        val s = buf.toString().trim()
+        buf.setLength(0)
+        if (s.isNotEmpty()) emit(s)
+    }
 }
