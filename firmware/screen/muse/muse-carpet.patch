@@ -1,8 +1,8 @@
 diff --git a/esp32/avatar/muse_pixel.c b/esp32/avatar/muse_pixel.c
-index de2542f..c95df09 100644
+index de2542f..536d6b0 100644
 --- a/esp32/avatar/muse_pixel.c
 +++ b/esp32/avatar/muse_pixel.c
-@@ -44,6 +44,23 @@ enum {
+@@ -44,6 +44,28 @@ enum {
      C_SHADOW,
      C_HEART,
      C_WHITE,
@@ -23,10 +23,51 @@ index de2542f..c95df09 100644
 +    C_SUITL,     /* 分身：西装翻领/高光 */
 +    C_SHIRT,     /* 分身：白衬衫 */
 +    C_TIE,       /* 分身：领带 */
++    /* 小墨 v4 新添（白绒黑脸）：见 FIXED 注释。 */
++    C_EDGE,      /* 浅灰蓝收口：垂耳描边、蹄沿（AMOLED 上黑件不被吃掉） */
++    C_BELL,      /* 胸铃铛金身（铃舌/底沿另吃 accent） */
++    C_BELLD,     /* 铃铛暗部 */
++    C_CORD,      /* 挂铃绳 */
      C_COUNT,
  };
  
-@@ -89,6 +106,22 @@ static const uint32_t FIXED[C_COUNT] = {
+@@ -67,28 +89,50 @@ static const scheme_t SCHEMES[MUSE_MODE_COUNT] = {
+     [MUSE_MODE_OFF]       = { { 0xd8d4ff, 0x8f86d9, 0x5a4fb0, 0x2e2870 }, 0x7c72d0 },
+ };
+ 
+-/* Cream fur and a peach face. */
++/* 小墨 v4（owner 2026-11-23 定稿）：白绒身子、炭黑脸。
++ * 羊绒坡 = 米色系；脸/耳/顶毛/蹄 = 炭黑系（C_SKIN*）；暗部部件在纯黑屏上靠
++ * C_EDGE 浅灰蓝收口（垂耳、蹄沿），铃铛金身、铃舌和底沿吃状态 accent（链路灯）。 */
+ static const uint32_t FIXED[C_COUNT] = {
+     [C_BG] = 0x000000,
+     [C_OUT] = 0x3a2b22,
+-    [C_OUT2] = 0x8c7560,
+-    [C_BD] = 0xae987e,
+-    [C_BM] = 0xcfbc9f,
+-    [C_BL] = 0xe6d7bd,
+-    [C_BH] = 0xf8eedc,
+-    [C_SKIND] = 0xe9cba4,
+-    [C_SKIN] = 0xf6dfbd,
+-    [C_SKINL] = 0xfdeed6,
+-    [C_IRIS] = 0x120d0b,
++    [C_OUT2] = 0x8c8268,
++    [C_BD] = 0xb3a98f,
++    [C_BM] = 0xd3c9ae,
++    [C_BL] = 0xeae2ca,
++    [C_BH] = 0xfbf5e6,
++    [C_SKIND] = 0x10151e,
++    [C_SKIN] = 0x1b2330,
++    [C_SKINL] = 0x262f40,
++    [C_IRIS] = 0xefe6d0,
+     [C_SHINE] = 0xffffff,
+-    [C_BROW] = 0x6b5444,
++    [C_BROW] = 0xc9c0ab,
+     [C_BLUSH] = 0xf4aaa0,
+     [C_BLUSHD] = 0xea8f8e,
+-    [C_MOUTH] = 0x3a1f1a,
++    [C_MOUTH] = 0xd8c9ac,
+     [C_TONGUE] = 0xe86a7a,
      [C_SHADOW] = 0x16101f,
      [C_HEART] = 0xff4f8b,
      [C_WHITE] = 0xffffff,
@@ -46,10 +87,14 @@ index de2542f..c95df09 100644
 +    [C_SUITL] = 0x5b6579,
 +    [C_SHIRT] = 0xeef2f8,
 +    [C_TIE] = 0xc23a52,
++    [C_EDGE] = 0x8a93a6,
++    [C_BELL] = 0xffc94a,
++    [C_BELLD] = 0xc98a2a,
++    [C_CORD] = 0x3a2b22,
  };
  
  static rgb_t s_scheme[5];      /* live, blended: f0..f3, acc */
-@@ -96,6 +129,19 @@ static bool s_scheme_init;
+@@ -96,6 +140,19 @@ static bool s_scheme_init;
  static uint16_t s_pal[C_COUNT];
  static uint16_t s_pal_dim[C_COUNT];
  
@@ -69,7 +114,7 @@ index de2542f..c95df09 100644
  static uint8_t s_fb[W * H];
  static uint8_t s_mask[W * H];
  
-@@ -185,6 +231,19 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
+@@ -185,6 +242,19 @@ uint32_t muse_pixel_accent(muse_mode_t mode)
      return SCHEMES[mode < MUSE_MODE_COUNT ? mode : MUSE_MODE_IDLE].acc;
  }
  
@@ -89,7 +134,7 @@ index de2542f..c95df09 100644
  static void update_palette(const scheme_t *target, float dt)
  {
      rgb_t tgt[5];
-@@ -199,10 +258,29 @@ static void update_palette(const scheme_t *target, float dt)
+@@ -199,10 +269,29 @@ static void update_palette(const scheme_t *target, float dt)
      }
      s_scheme_init = true;
  
@@ -119,7 +164,169 @@ index de2542f..c95df09 100644
      rgb_t acc = s_scheme[4];
      pal[C_G0] = s_scheme[0];
      pal[C_G1] = s_scheme[1];
-@@ -684,6 +762,7 @@ typedef enum {
+@@ -423,8 +512,9 @@ static inline int32_t hash16(int x, int y)
+ }
+ 
+ /*
+- * The avatar: a tall furry hood shaped like a rounded bullet, with a smooth peach
+- * face panel, bead eyes, rosy cheeks, stubby arms and two little feet.
++ * 小墨（圆屏形象 v4，owner 2026-11-23 定稿）：白绒梨形身子 + 炭黑脸，
++ * 垂耳和蹄是黑色但带浅灰蓝收口，头顶一撮炭黑呆毛，胸口挂金铃铛（随 bob 摆），
++ * 珠眼是米色点。几何沿用原来的绒毛弹头身段，配色整体反转。
+  */
+ typedef struct {
+     float cx, cy;   /* body centre */
+@@ -518,15 +608,17 @@ static inline bool in_limb(const limb_q_t *l, int32_t x, int32_t y, int32_t *lx,
+     return u * u + v * v <= ONE * ONE;
+ }
+ 
+-enum { M_NONE, M_BODY, M_ARM, M_FOOT, M_FACE };
++enum { M_NONE, M_BODY, M_ARM, M_FOOT, M_FACE, M_EAR };
+ 
+-static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t feet[2])
++static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t feet[2],
++                        const limb_t ears[2])
+ {
+     memset(s_mask, 0, sizeof(s_mask));
+-    limb_q_t arm_q[2], foot_q[2];
++    limb_q_t arm_q[2], foot_q[2], ear_q[2];
+     for (int i = 0; i < 2; i++) {
+         limb_setup(&arms[i], 2.9f, 5.2f, &arm_q[i]);
+-        limb_setup(&feet[i], 4.4f, 2.6f, &foot_q[i]);
++        limb_setup(&feet[i], 3.6f, 3.2f, &foot_q[i]);
++        limb_setup(&ears[i], 2.6f, 4.4f, &ear_q[i]);
+     }
+     /* Only rows/columns that can hold the avatar are shaded. */
+     int x0 = (int)(j->cx - j->a * 1.1f - 8), x1 = (int)(j->cx + j->a * 1.1f + 8);
+@@ -594,11 +686,23 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
+                 continue;
+             }
+ 
+-            for (int f = 0; f < 2; f++) {
++            /* Outside the body: floppy ears peek out beside the hood, sock feet below. */
++            bool limb = false;
++            for (int f = 0; f < 2 && !limb; f++) {
+                 if (in_limb(&foot_q[f], fx, fy, &lx, &ly)) {
+                     s_mask[y * W + x] = M_FOOT;
+-                    px(x, y, ly < -QF(0.2f) ? C_BM : C_BD);
+-                    break;
++                    /* 袜腿（小墨 v4）：米色袜筒、浅灰蓝沿、炭黑蹄。 */
++                    uint8_t c = ly < -QF(0.35f) ? C_BL : ly < -QF(0.05f) ? C_BM
++                              : ly < QF(0.3f) ? C_EDGE : C_SKIN;
++                    px(x, y, c);
++                    limb = true;
++                }
++            }
++            for (int e = 0; e < 2 && !limb; e++) {
++                if (in_limb(&ear_q[e], fx, fy, &lx, &ly)) {
++                    s_mask[y * W + x] = M_EAR;
++                    px(x, y, C_SKIND);
++                    limb = true;
+                 }
+             }
+         }
+@@ -615,6 +719,18 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
+             for (int k = 0; k < 4; k++) {
+                 int xx = x + N4[k][0], yy = y + N4[k][1];
+                 uint8_t n = ((unsigned)xx < W && (unsigned)yy < H) ? s_mask[yy * W + xx] : M_NONE;
++                if (m == M_EAR) {
++                    /* 黑耳：外沿只压一档深灰（纯黑屏上防消失），贴身处软缝。 */
++                    if (n == M_NONE) {
++                        px(x, y, C_SKIN);
++                        break;
++                    }
++                    if (n == M_BODY) {
++                        px(x, y, C_OUT2);
++                        break;
++                    }
++                    continue;
++                }
+                 if (n == M_NONE || (m == M_ARM && (n == M_BODY || n == M_FACE)) || (m == M_BODY && n == M_FOOT)) {
+                     px(x, y, C_OUT);
+                     break;
+@@ -624,6 +740,72 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
+     }
+ }
+ 
++/* 头顶呆毛（小墨 v4 概念图）：帽顶正中一小撮炭黑毛球，上沿浅灰蓝收口。 */
++static void draw_tuft(const avatar_t *j)
++{
++    static const int8_t OFF[2][2] = { { -2, 0 }, { 2, 0 } };
++    int top = iround(j->cy - j->b);
++    int cx = iround(j->cx);
++    for (int k = 0; k < 2; k++) {
++        for (int dy = -3; dy <= 2; dy++) {
++            for (int dx = -2; dx <= 2; dx++) {
++                int d2 = dx * dx + dy * dy;
++                if (d2 > 5) {
++                    continue;
++                }
++                int x = cx + OFF[k][0] + dx, y = top + OFF[k][1] + dy;
++                if ((unsigned)x >= W || (unsigned)y >= H) {
++                    continue;
++                }
++                px(x, y, d2 >= 4 && dy <= -1 ? C_EDGE : ((hash16(x, y) & 3) == 0 ? C_SKINL : C_SKIN));
++            }
++        }
++    }
++}
++
++/* 绒帽开口（小墨 v4 概念图）：脸不是"黑刘海"，是米色绒毛压进黑脸上缘的一圈
++ * 扇贝边——每个 x 一撮深浅米色毛垂到 2..4 px 深，底沿一行 C_BD 收口。只碰 M_FACE 像素。 */
++static void draw_fringe(const avatar_t *j)
++{
++    int cx = iround(j->fx), cy = iround(j->fy);
++    int fa = iround(j->fa), fb = iround(j->fb);
++    int top = cy - fb;
++    for (int dx = -fa; dx <= fa; dx++) {
++        int x = cx + dx;
++        if ((unsigned)x >= W) {
++            continue;
++        }
++        int depth = 2 + (int)(hash16(x, 5) % 3u);
++        for (int y = top; y <= top + depth; y++) {
++            if (y < 0 || y >= H || s_mask[y * W + x] != M_FACE) {
++                continue;
++            }
++            px(x, y, (hash16(x, y) & 3) == 0 ? C_BD : C_BM);
++        }
++        int y = top + depth;
++        if (y >= 0 && y < H && s_mask[y * W + x] == M_FACE) {
++            px(x, y, C_BD);
++        }
++    }
++}
++
++/* 胸铃铛（小墨 v4）：铃身固定金 #FFC94A，底沿和铃舌吃状态 accent——
++ * 它就是这块屏的链路灯（草案 §1），绳随 bob 带轻微摆动。 */
++static void draw_bell(const avatar_t *j, float swing)
++{
++    int bx = iround(j->cx + swing);
++    int chin = iround(j->fy + j->fb) + 1;
++    int by = chin + 6;
++    int frac = by - 1 - chin;
++    for (int y = chin; y < by - 1; y++) {
++        float f = frac > 0 ? (float)(y - chin) / (float)frac : 0.0f;
++        px(iround(j->cx + swing * f), y, C_CORD);
++    }
++    static const char *const BELL[4] = { ".###.", "##o##", "#####", ".ooo." };
++    stamp(BELL, 4, bx - 2, by - 2, C_BELL, C_ACC);
++    px(bx - 1, by - 1, C_WHITE);
++}
++
+ typedef enum {
+     EYES_NORMAL,
+     EYES_WIDE,
+@@ -631,7 +813,7 @@ typedef enum {
+     EYES_X,
+ } eye_style_t;
+ 
+-/* The eyes are small glossy black beads. */
++/* 米色珠眼（炭黑脸上）：C_IRIS 填色，C_SHINE 点高光。 */
+ static void draw_eye(float ex, float ey, float openness, eye_style_t style, float gx, float gy)
+ {
+     int cx = iround(ex + gx * 0.8f), cy = iround(ey + gy * 0.7f);
+@@ -684,6 +866,7 @@ typedef enum {
      MOUTH_TALK,
      MOUTH_GRIN,
      MOUTH_FLAT,
@@ -127,7 +334,7 @@ index de2542f..c95df09 100644
  } mouth_t;
  
  static void draw_mouth(int x, int y, mouth_t m, float open)
-@@ -726,6 +805,11 @@ static void draw_mouth(int x, int y, mouth_t m, float open)
+@@ -726,6 +909,11 @@ static void draw_mouth(int x, int y, mouth_t m, float open)
          stamp(S, 1, x - 1, y + 1, C_MOUTH, C_MOUTH);
          break;
      }
@@ -139,7 +346,7 @@ index de2542f..c95df09 100644
      }
  }
  
-@@ -827,6 +911,215 @@ static void draw_alert(int x, int y)
+@@ -827,6 +1015,215 @@ static void draw_alert(int x, int y)
      stamp(BANG, 6, x - 2, y, C_ACC, C_ACC);
  }
  
@@ -355,7 +562,72 @@ index de2542f..c95df09 100644
  /* ---------------------------------------------------------------------------
   * Frame
   * ------------------------------------------------------------------------- */
-@@ -1047,25 +1340,59 @@ void muse_pixel_render(const muse_pose_t *p)
+@@ -933,14 +1330,15 @@ void muse_pixel_render(const muse_pose_t *p)
+ 
+     float breathe = sinf(t * breathe_rate + 1.0f) * 0.03f;
+     avatar_t j;
+-    j.a = 16.0f * (1 + breathe) * (2.0f - squash) + level * 0.8f;
+-    j.b = 23.0f * (1 - breathe) * squash;
++    /* 小墨 v4 定稿比例：圆滚滚的绒球身（宽≈高），大黑脸占上半身。 */
++    j.a = 20.5f * (1 + breathe) * (2.0f - squash) + level * 0.8f;
++    j.b = 21.0f * (1 - breathe) * squash;
+     j.cx = 32.0f + lean;
+-    j.cy = 56.5f - j.b + bob * 0.5f - hop;   /* feet stay near the ground */
+-    j.fa = j.a * 0.66f;
+-    j.fb = 7.4f * squash;
++    j.cy = 53.0f - j.b + bob * 0.5f - hop;   /* feet stay near the ground */
++    j.fa = j.a * 0.64f;
++    j.fb = 9.6f * squash;
+     j.fx = j.cx + lean * 0.3f;
+-    j.fy = j.cy - j.b * 0.30f + bob * 0.3f;
++    j.fy = j.cy - j.b * 0.42f + bob * 0.3f;
+ 
+     /* ---- background layers ---- */
+     float aura_r = 29.0f + level * 4.0f + sinf(t * 1.5f) * 1.0f;
+@@ -962,8 +1360,8 @@ void muse_pixel_render(const muse_pose_t *p)
+     float base = j.cy + j.b;
+     limb_t feet[2];
+     float step = mode == MUSE_MODE_SPEAKING ? sinf(t * 5.0f) * 0.6f : 0.0f;
+-    feet[0] = (limb_t){ j.cx - 7.0f, base - 0.5f + (happy > 0 ? hop * 0.3f : step), -0.15f };
+-    feet[1] = (limb_t){ j.cx + 7.0f, base - 0.5f + (happy > 0 ? hop * 0.3f : -step), 0.15f };
++    feet[0] = (limb_t){ j.cx - 6.0f, base + 0.6f + (happy > 0 ? hop * 0.3f : step), -0.1f };
++    feet[1] = (limb_t){ j.cx + 6.0f, base + 0.6f + (happy > 0 ? hop * 0.3f : -step), 0.1f };
+ 
+     limb_t arms[2];
+     float adx = j.a + 0.3f;
+@@ -999,17 +1397,26 @@ void muse_pixel_render(const muse_pose_t *p)
+             arms[0] = (limb_t){ j.cx - adx - 1.0f, j.cy - 4.0f, 2.4f + wig };
+             arms[1] = (limb_t){ j.cx + adx + 1.0f, j.cy - 4.0f, -2.4f - wig };
+         } else {
+-            arms[0] = (limb_t){ j.cx - adx, ay, -0.3f + sway };
+-            arms[1] = (limb_t){ j.cx + adx, ay, 0.3f - sway };
++            /* 待机：手收进绒球轮廓里（概念图 v4 没外露手臂），只露一点绒缝。 */
++            arms[0] = (limb_t){ j.cx - j.a + 2.2f, j.cy + j.b * 0.42f, -0.2f + sway };
++            arms[1] = (limb_t){ j.cx + j.a - 2.2f, j.cy + j.b * 0.42f, 0.2f - sway };
+         }
+         break;
+     }
+     }
+-    draw_avatar(&j, arms, feet);
++    /* ---- 垂耳（小墨 v4）：黑耳从脸两侧横向伸出头缘，浅灰蓝收口 ---- */
++    limb_t ears[2];
++    float ear_y = j.fy - j.fb * 0.15f;
++    float ear_x = j.a * 0.94f + 1.6f;
++    ears[0] = (limb_t){ j.cx - ear_x, ear_y, -0.15f };
++    ears[1] = (limb_t){ j.cx + ear_x, ear_y, 0.15f };
++    draw_avatar(&j, arms, feet, ears);
++    draw_fringe(&j);
++    draw_tuft(&j);
+ 
+     /* ---- face ---- */
+-    float eye_y = j.fy - 0.5f;
+-    float eye_dx = j.fa * 0.48f;
++    float eye_y = j.fy - j.fb * 0.15f;
++    float eye_dx = j.fa * 0.55f;
+     eye_style_t style = EYES_NORMAL;
+     float open = 1.0f - blink;
+     mouth_t mouth = MOUTH_SMILE;
+@@ -1047,25 +1454,61 @@ void muse_pixel_render(const muse_pose_t *p)
          mouth = MOUTH_GRIN;
      }
  
@@ -414,6 +686,8 @@ index de2542f..c95df09 100644
  
 +    /* 场景换装道具：压在躯干/脸之上、状态特效（火花/声波/担心）之下。 */
 +    draw_costume(&j, t, fade);
++    /* 铃铛永远在装扮最外层——它是小墨本体，不是装扮。 */
++    draw_bell(&j, bob * 0.9f - hop * 0.4f);
 +
      /* ---- foreground ---- */
      draw_sparkles(p, j.cx, j.cy, true, spk_speed, spk_count);
