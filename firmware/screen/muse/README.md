@@ -30,11 +30,80 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 41 个文件、8270 行新增 / 99 行删，三份是二进制素材：283,244 字节的字库、
-  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，15,230 行 / 842,532 字节，
+- 我们的全部改动 = 43 个文件、9205 行新增 / 105 行删，三份是二进制素材：283,244 字节的字库、
+  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，16,226 行 / 886,309 字节，
   `git diff --binary` 打的，三份二进制在里面都是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-19（#82 对话崩溃修复这一版）实读的。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-22 夜（会话窗口 + 相册自动跳这一版）在本机实读的。
   下面逐文件表的首列数字这一轮也按 `git diff --numstat` 全表重读了一遍（往轮只改总数没改表，有过漂移）。
+  **会话窗口 + 相册自动跳这一轮（11-22）**：owner 拍板 `docs/DECISIONS.md` D16/D16.5 落地两件屏侧活。
+  ①**收图自动跳相册页**（`carpet_page.c` `photo_refresh()`：`pv.gen` 变化 = 新收齐一张 → `nav_to(PG_PHOTO)`，
+  熄屏不跳；旧入口照 11-14 规矩不动 —— owner 原话「我目前都没见过相册页面从哪里进去」）。
+  ②**会话窗口**（`muse_voice.c` + Kconfig `MUSE_CARPET_CHAT_WINDOW` + `devices/sdkconfig.carpet`=y）：
+  一次「你好小安」命中且真发出去，开 60 秒窗口；每轮靠 `carpet_audio_live()` 起头→落零判"答句放完"，
+  放完自动重新开麦走同一条 `talk_to_phone(false, true)`；收口四条全说实话：
+  没听清（沿用现句）、60 秒到（「到一会儿了，想接着聊再喊你好小安」）、熄屏、
+  以及发完 12 秒等不到任何音频起头（= 答句还是手机念的 #76 形状）→「这轮答句没从屏上念，窗口收在」。**#76 没修前窗口的默认表现就是第四条**，
+  这是设计好的降级，不是故障；App 侧修好后同版固件无需改动直接生效（交接单 `docs/APP-CHANGES-2026-11-22.md`）。
+  ✅ **这一轮已编已刷（11-22 深夜补记，改写本节 24 分钟前的 ⚠️「没编没刷」段）**：本机就是台架 —— 之前以为
+  「FEXIT=0 出自另一台机器」是误判，真相是本机工具链被 `C:\Espressif\tools\eim_idf.json` 的半截安装
+  （`status: in_progress`）带偏，我起初又按 5.5.2 和 `D:\dev\esp\tools` 错路径找，白折腾一晚。正确环境本节 §3 早写着：
+  **IDF v6.0.1 + `D:\dev\esp\idf-tools`**（venv 是 `idf6.0_py3.11_env`；export.ps1 会因找 3.12 venv 报错，
+  绕法：手动置 `IDF_PATH/ESP_IDF_VERSION/IDF_TOOLS_PATH/IDF_PYTHON_ENV_PATH` + 工具 bin 进 PATH，用 venv python 直调 `tools/idf.py`）。
+  已称：全量构建 **FEXIT=0**（2423 目标、0 error，日志 `D:\dev\esp\build603.log`）；COM8 **刷写 AEXIT=0**
+  （app-flash，分区表未动；哈希校验过 + 硬复位）；开机串口日志 30 秒 **无 crash**，唤醒引擎就绪
+  （`waken9_tts2h12_nihaoxiaoan`）、上行地基就绪、断链提示上屏照旧。
+  **仍没称到（合入前硬条件不变）**：假手机 `fake-phone.mjs` 推图称自动跳相册；会话窗口四条收口真机称
+  （尤其 12 秒降级那条 —— 依赖热点 + 对话链路，且 #76 没修前窗口默认就走第四条）；关 `CHAT_WINDOW` 回归装机构建。
+  另记两坑（都是这晚踩的，写死在这）：PowerShell 里 `-DSDKCONFIG_DEFAULTS=$var` **必须整体加引号**，
+  否则 `;` 把参数腰斩成字面量；bridge 后台任务回收会连坐杀掉它派生的整棵进程树，长构建要 `Start-Process` 脱树跑。
+  重打 patch：**43 文件 / 9205+ / 105- / 16,226 行 / 886,309 字节**。
+  **合作方方向屏侧两件这一轮（11-21，#34/#86）**：方向文档 `docs/DIRECTION-2026-11-19-partner-sync.md` §三.2
+  点名的两件屏侧动手项（儿童产品：热点回来不能等十分钟、连不上不能沉默）。
+  **#34 退避封顶**：`main/muse_glue.c` 看守循环两条阶梯的睡着封顶 `RETRY_MAX_US`/`AWAY_MAX_US`
+  从 60s/600s 一律改 30s —— 11-19 实测「热点回来等 10 分钟」的真凶就是 AWAY 那条 600s；
+  醒屏封顶 15s 不动（屏亮着它自己会说在重连）、**nap 路径不动**（`stay_online` 关时熄屏整个离网，
+  电池约束照旧）、`wifi_mgr.c` 连上之后掉线那条 60s 阶梯也不动（不是这次的症状）。
+  已刷已称：强制熄屏 150s 收 `looking again in` 串 `[30,30,30,30,30]`、`MAX_WAIT=30`，醒屏回 5s 起扫。
+  **#86 断链提示上屏**：`carpet_page.c` 四格（脸/功能/场景环/氛围）各挂一行底边小字（`s_small`、琥珀 `COLOR_OFF`），
+  连续断 10 秒才露（拨号/重连那几秒不闪）、linked 立刻藏；两态文案不假造：Wi-Fi 没连上⇒「手机不在身边」、
+  Wi-Fi 连着但 App 没连上⇒「连不上手机 App」；不是按钮、不新开页（设置格不是 carpet 的，不摆）。
+  已刷已称：冷开机 `I (13120) carpet_page: 断链提示上屏：手机不在身边`，脸/车载/选择/钟面/画廊/相册六页截图
+  琥珀像素各 515 同串同渲染、逐张实看。**一个 LVGL 坑**：提示必须建在所有页之后 —— 钟面星轨/相册整格背景层
+  比它晚建就盖住它（同级后建在上），第一版钟面/相册页没小字就是这个；创建顺序挪到 build 循环之后修好。
+  脸格那行抬到 `-SC(52)`：Muse 的 caption 带占着 `-30`（muse_ui.c 触屏那条，它是脸格的子对象）。
+  **466 回归顺带称**：#84 的相册预解码在旧屏也触发（472 图 scale=252<256），
+  `相册上屏第 1 张：472x472 16125 字节 scale=252 预解码`、非零 214,365，不黑屏。
+  **没称到**：「连不上手机 App」那态和 linked=1 立刻藏都要真热点（台架没有）；热点回来的恢复 timing 要 owner 手机；
+  新板 COM9 仍跑 #34/#86 之前的固件，要带这两件得另编 spotpear 档另刷。
+  重打 patch：**43 文件 / 9103+ / 105- / 16,124 行 / 880,965 字节**，`verify_carpet_patch.py`
+  `git apply: OK (43 sections)` / **`byte-compare: 43/43 identical`**。
+  **Spotpear 1.85 LCD 新板移植这一轮（11-20，#81/#83/#84）**：owner 新买的圆屏不是旧屏同款 ——
+  斑梨 Spotpear ESP32-S3-1.8inch-Touch-LCD（JC3636W518，S3R8 + 16MB flash），360×360 ST77916 QSPI + CST816 触摸，
+  **没有** TCA9554/PMU/电池/喇叭功放（旧屏 466×466 CO5300 AMOLED 那套板级件全不在）。之前"刷机不成功/全黑"的真因是
+  型号不符：拿 185c/AMOLED 的板级配置去点 ST77916，屏当然全黑；出厂固件已整片备份并恢复过（#79/#80）。
+  这版新增 `boards/board_spotpear_s3_18.c`（550 行：QSPI 引脚 SCLK9/D0-3=11-14/CS10/RST47/BL15、I2C SDA7/SCL8、
+  TOUCH_INT41/RST40、PCM5100A DAC I2S1 MCLK21/BCLK18/WS16/DOUT17/XSMT48、MSM261 mic I2S0 SCK42/WS45/SD46）
+  + `devices/sdkconfig.muse-spotpear-s3-18` + Kconfig 一档 + yml 里 adapter/esp_lcd_touch/st77916/cst816s 四条 rule 加 `spotpear_s3_18`。
+  **UI 466→360 等比适配（#84）**：`carpet_page.c` 所有绝对像素走 `SC(v)=v*s_screen_w/466`，
+  `s_screen_w` 在 build 时从 `lv_display_get_horizontal_resolution()` 读一次（这版 LVGL 把旧名
+  `lv_display_get_hor_res` 改了，照旧名写编不过）；等比缩保住 466 上逐角验过的圆内接关系。
+  钟面 472 底图在小屏一次性双线性重采样进 PSRAM（366 见方，仍留 3px/边烧屏余量），不每帧变换。
+  **相册小屏黑屏真因+修**：TJPGD 是流式解码（重绘时按 MCU 条现解），`lv_image_set_scale` 压在它上面整帧画黑 ——
+  真机判别口 `>photoscale` 称到 `256` 全帧 129,600 非零像素 / `195` 只剩 208（导航点）。修：小屏先用
+  `esp_new_jpeg` 一次性解成 RGB565 整帧（PSRAM、16 字节对齐），缩放改压普通位图；466 不缩放照旧 RAW+TJPGD。
+  依赖走 `idf_component.yml` 带 rule 那条（**托管组件只写 CMake PRIV_REQUIRES 拿不到头文件**，这轮实测栽了一次：
+  configure 静默不把它加进 muse 的 requirements，编译报 `esp_jpeg_dec.h: No such file`）。
+  修后四态全称：auto/256/195/0 四张快照 128,159 / 128,520 / 127,445 / 127,445 非零像素，测试图整圆居中实看。
+  **顺带修一个台架口自撞**：`>photoscale` 原先在串口任务里直接调 `photo_show`（动 LVGL），撞
+  `lv_inv_area: !disp->rendering_in_progress` 断言重启（rst=0xc）；改成和 `>page`/`>scene` 同规矩 ——
+  串口只立记号、`carpet_page_tick()`（LVGL 任务）里落地。
+  **钟面页栈溢出同 #77 同因**：spotpear 板级漏了 175c 那条 `#if CONFIG_LV_USE_TJPGD` 12KB 栈抬档，
+  适配器默认 8KB 被 TJPGD 链溢过（rst=0xc）；补上后实测峰值 9,564 / 剩 2,724，与旧屏 9,556 同档。
+  **麦克风是硬件死的（#83，已报 owner 待拍）**：`>micraw` SD 线 toggles=0、`>micen` 全零扫描，
+  原理图 CHIPEN 硬接 3V3 排除使能问题 ⇒ 疑似 R8 钳位或 mic 本体坏，待 owner 拍返修/万用表/只用手机语音。
+  **喇叭这块板没有功放**：PCM5100A 是 line out（3.5mm + CN4），要外接有源音箱或改手机念，待 owner 拍。
+  八页 360 截图逐张实看 fit 圆内（face/picker/vehicle/kids/avatar/clock/gallery/photo），字阶 21/16/23/58。
+  **没称到**：新板真 App 链路整趟（热点+推图+出声）、真人唤醒、owner 肉眼观感。
   **#82「一开启对话就卡死重启」这一轮（11-19）**：owner 报冷开机点 Avatar 进对话当场重启。
   串口复现称到（`crash82.py`：冷开机后**第一条命令**就 `>gest tap`，此前不跑任何 mic 命令）：
   `点 Avatar → 进对话` ⇒ `assert failed: spi_flash_disable_interrupts_caches_and_other_cpu cache_utils.c:126
@@ -102,10 +171,11 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```
   （下面每一行的两个数是实读的「新增行数 + / 删除行数 -」，只写一个数的是整份新文件；
   上一版这张表用的是 diffstat 那一列合成数，和 5291/86 对不上，从这一轮起改成分开写）
-  esp32/components/muse/CMakeLists.txt       |  37 + /   1 -   (11-18 相册：carpet_photo.c 进 srcs + embed 里 `carpet/carpet_photo_test.jpg` 那行（`>phototest` 台架测试图，存底副本在 `firmware/screen/muse/bg/`）；11-12 唤醒词：carpet_wake.c 进 srcs + **按 Kconfig 分叉**的 `espressif__esp-sr` 进 PRIV_REQUIRES（它是带 rule 的托管组件，无条件写会让别的板子 configure 阶段就找不到组件）；原有：+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行 + 11-16 星轨底图：embed 里 `carpet/carpet_clock_bg.rgb565` 那行)
-  esp32/components/muse/Kconfig              |  30 + /   1 -   (+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
+  esp32/components/muse/CMakeLists.txt       |  39 + /   1 -   (11-20 新板：board_spotpear_s3_18.c 进板级分叉；**esp_new_jpeg 不进这里** —— 托管组件只写 PRIV_REQUIRES 拿不到头文件，依赖走 yml 那条 rule，见下；11-18 相册：carpet_photo.c 进 srcs + embed 里 `carpet/carpet_photo_test.jpg` 那行（`>phototest` 台架测试图，存底副本在 `firmware/screen/muse/bg/`）；11-12 唤醒词：carpet_wake.c 进 srcs + **按 Kconfig 分叉**的 `espressif__esp-sr` 进 PRIV_REQUIRES（它是带 rule 的托管组件，无条件写会让别的板子 configure 阶段就找不到组件）；原有：+carpet_audio.c 那行 + embed 那行 + 11-08 中文化：carpet_lang_zh.c 那行 + 11-09 断电验尸：carpet_diag.c 那行 + 11-11 对着屏说话：carpet_mic.c 那行 + 11-16 星轨底图：embed 里 `carpet/carpet_clock_bg.rgb565` 那行)
+  esp32/components/muse/Kconfig              |  48 + /   1 -   (11-22：+`MUSE_CARPET_CHAT_WINDOW` 那一档（会话窗口开关，`depends on MUSE_CARPET_CARDS`、default n —— 关掉就是今天的装机构建）；11-20：+MUSE_BOARD_SPOTPEAR_S3_18 那一档；+MUSE_UI_LANG_ZH 那一档，`depends on MUSE_CARPET_CARDS`)
+  esp32/components/muse/boards/board_spotpear_s3_18.c | 550 +   (新，11-20 #83：斑梨 JC3636W518 板级 —— ST77916 QSPI 360×360 + CST816、PCM5100A line-out DAC、MSM261 mic；无 PMU/电池/功放那些件一律不装；`display_start()` 里带 #77 同档的 `#if CONFIG_LV_USE_TJPGD` 12KB 栈抬档（漏了它钟面页 rst=0xc，实测峰值 9,564/剩 2,724）)
   esp32/components/muse/boards/board_waveshare_s3_175c.c |   6 +   (11-18 相册新入列：`display_start()` 里 `#if CONFIG_LV_USE_TJPGD` 时 `adapter_cfg.task_stack_size = 12*1024` —— TJPGD 解码+绘制链把适配器默认 8KB 栈边际溢过（实测峰值 9,556 B > 8,192，`***ERROR*** A stack overflow in task lvgl` ⇒ rst=0xc 重启，addr2line 落在 `lv_draw_sw_blend_color_to_rgb565_swapped`）。抬到 12KB 后水位稳定「最少剩 2,732 字节」，跨多轮轮播+截图不变。只在 TJPGD 开着时生效，上游/别的板子行为不动。这个文件同时编给 175 和 175C 两块板)
-  esp32/components/muse/idf_component.yml    |  10 +   (11-12 唤醒词新入列：`espressif/esp-sr` 钉死 `==2.4.7`，带 rule `if: "$CONFIG{MUSE_CARPET_CARDS} == True"`。**右边必须是 `True` 不是 `"y"`** —— MUSE_CARPET_CARDS 是真 bool，组件管理器的 `IfClause` 对 bool 只走 `eval_bool`（只认 True/False），写 `"y"` 当场 `Invalid boolean ""y"" in "if" clause` 构建失败；隔壁 mdns 那条能写 `"y"` 是因为 MUSE_VIDEO_MDNS 是 string。别的板子上这个符号不存在 ⇒ `MissingKconfigError` 被 manifest/models.py 吃掉 = 跳过这条依赖，不是报错，所以不影响任何非 carpet 构建)
+  esp32/components/muse/idf_component.yml    |  21 + /   4 -   (11-20：+`espressif/esp_new_jpeg` `1.*` 带同一条 carpet rule（小屏相册预解码；**托管组件的依赖必须写在这里**，只写 CMake PRIV_REQUIRES 会被 configure 静默丢掉、编译报头文件找不到）；adapter/esp_lcd_touch/st77916/cst816s 四条 rule 的板名清单加 `spotpear_s3_18`；11-12 唤醒词新入列：`espressif/esp-sr` 钉死 `==2.4.7`，带 rule `if: "$CONFIG{MUSE_CARPET_CARDS} == True"`。**右边必须是 `True` 不是 `"y"`** —— MUSE_CARPET_CARDS 是真 bool，组件管理器的 `IfClause` 对 bool 只走 `eval_bool`（只认 True/False），写 `"y"` 当场 `Invalid boolean ""y"" in "if" clause` 构建失败；隔壁 mdns 那条能写 `"y"` 是因为 MUSE_VIDEO_MDNS 是 string。别的板子上这个符号不存在 ⇒ `MissingKconfigError` 被 manifest/models.py 吃掉 = 跳过这条依赖，不是报错，所以不影响任何非 carpet 构建)
   esp32/components/muse/carpet/carpet_font.ttf | Bin 0 -> 283244   (新，字库；页面上 28/22 两档的词表。11-18 相册页补字重跑子集 267,276→283,244，fork 与仓库两处同拷)
   esp32/components/muse/carpet/carpet_clock_bg.rgb565 | Bin 0 -> 445568   (新，11-16 星轨钟面整屏底图：472×472 RGB565 裸像素，比 466 每边大 3px 是给烧屏 ±3px 位移留的黑边；由本仓库 `tools/muse/` 那套路从 demo 底图烤出，存底副本在 `firmware/screen/muse/bg/`，构建前拷进 carpet/，缺文件 configure 当场失败)
   esp32/components/muse/carpet/carpet_photo_test.jpg | Bin 0 -> 16125   (新，11-18 相册台架测试图：472×472 q85 JFIF，和 App PhotoPush 压缩输出同形状；`>phototest` 把它切 2048B 块走**线上同一条** photo_chunk 路喂进去；存底副本 `firmware/screen/muse/bg/photo_test.jpg`，构建前拷进 carpet/)
@@ -119,14 +189,14 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/carpet/carpet_link.h | 196 +   (新；11-16 B §1 守护灯点：+`carpet_link_event_pending/broadcast/clear/dump` 四个口 + `carpet_link_bench_event()` 台架口)
   esp32/components/muse/carpet/carpet_mic.c | 530 +   (新，11-19 #82：+`carpet_mic_preload()` —— 开机在内部栈上把 mic_mode 读掉，PSRAM 栈的 voice_task 不再懒读 NVS（对话崩溃根因，见 §2）；11-11 晚「对着屏说话」：屏主动上行那一整块 —— 按下 BOOT 起一段、松开整段发、`command{cmd:"mic_chunk", args:{turn_id,seq,total,rate,b64}}`。三道闸：NVS `carpet/mic_mode`（出厂 `off`）∧ 这一次连接里 App 申报过 `protocols ∋ 4` ∧ 没跳过闸；外加一具断路器（发过上行后 5 秒内被手机以 reason<1000 或≥4000 断开就 `s_dead`，本次开机不再试）。16k/单声道/s16le，2560 B 一块 = 80 ms，8 秒封顶 = 256,000 B = 100 块，`turn_id` = `m-<6 位开机随机>-<段号>`。采集只在 `voice_task` 里取它已经拿到的那 20 ms 块（`muse_audio_read` 不加锁，第二个读者会等满 1 秒令牌），发送走自己那条 8 KB PSRAM 栈任务 + 两块 256 KB PSRAM 段缓冲。`>micup`/`>mic [off|auto|force]`/`>mic`/`>mictest [秒]` 四个开发口。**516 → 518 是 11-17**：起轮那句从 `if (carpet_audio_live()) carpet_audio_abort(…)` 改成**无条件 abort** —— 句间空档里账是"停嘴留账"、live 恰好是假，光凭 live 放行，第二句会在新一轮录音播到一半时从喇叭冒出来，屏把自己的答句录了回去)
   esp32/components/muse/carpet/carpet_mic.h | 124 +   (新，那十个入口（含 11-13 下午 P0 的 `talk_request/talk_take`）+ `carpet_mic_mode_t` 三档；11-19 #82：+`carpet_mic_preload()` 声明，armed 注释改写「开机预读、这里只碰 RAM」)
-  esp32/components/muse/carpet/carpet_page.c | 1593 +   (新，11-18 相册再加 116 行：`build_photo/photo_show/photo_refresh` —— 整屏 stage 上挂 `lv_image`（透明、不可点，手势照常穿透判），dsc 运行期拼 VARIABLE/RAW，`PHOTO_TEMPO_MS 8000` 轮播 tick 在 `carpet_page_tick()` 里、熄屏不走；显示中的槽钉住（LVGL 重绘要重解码，读了一遍 lv_image/lv_image_decoder/lv_tjpgd 确认 VARIABLE 源没有同指针早退、缓存只认 FILE，一份静态 dsc 复用安全）；第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次；**11-14 外页划动回中心这一版再加 28 行**：`gesture_settle` 的 `G_SWIPE_X/G_SWIPE_Y` 从绝对方向→落点改成中心枢纽 —— `s_tile!=0`（任何外格）横滑/竖滑一律 `nav_to(PG_FACE)` 回中心，只有脸格（`s_tile==0`）按四方向发散；唯一例外氛围格右滑仍轮换 clock→gallery→photo；判定引擎未动。台架 `bench_gesture(dx,dy,hold,reset_face)` 抽出公共体，`carpet_page_gesture_bench` 传 true（每次前回脸）、新增 `carpet_page_gesture_bench_from` 传 false（从当前格起判）；**11-16 星轨守护钟面这一版再加 140 行**：`build_clock_orbit()` 在时钟列底下铺整页装饰层 —— 28 颗固定种子星点 + 实心暗盘夜地球 + 三层轨道环（`lv_arc` 满环、去 knob）+ 四方位刻度 + 16px 卫星点 `lv_anim` 60s 无限绕轨（`orbit_sat_anim` 算 sin/cos 走 `lv_obj_set_pos`，不用 align 免得和布局打架）；`apply()` 里装饰层跟时钟列同显隐，别的页不漏；**11-16 星轨底图这一版（owner「你现在做的这个钟面和之前你给我看的demo效果不一样…能搬开源就搬开源」）把程序化装饰层换成整屏 RGB565 底图**：`build_clock_orbit()` 重写为 stage（`LV_PCT(100)`）+ `lv_image`（运行期拼 `lv_image_dsc_t`，cf=RGB565、stride=944，数据就是 rodata 里那份 `_binary_carpet_clock_bg_rgb565_start`）+ 卫星点沿**画出来的椭圆** rx193/ry178 绕轨（两张不复位快照落点回代 (189/193)²+(38/178)²≈1.0 证贴环）；星点/夜地球/三环/刻度那些程序化件全删，数字和日期还是 SNTP 真值、离线还是诚实「--:-- / 时间同步中 / 等首帧」；同版**钟面页返回药丸撤掉**（owner「很突兀，滑屏也能找到其他功能」，别的内页留着）。机制搬的是 Round-Clock 的 `main/assets/default.rgb565`（整屏壁纸图 + 叠加数字），图是我们自己的 demo 底图，不是它的素材；**11-16 B §1 守护灯点再加 23 行**：`carpet_page_build()` 多收第四参 `face_tile`（脸那格本组件照旧不画一个控件，只挂灯），`s_guard_dot = make_dot(face_tile)` + `lv_obj_align(TOP_MID, 0, 84)` 落在 Avatar 头顶正上方（实拍头部顶端 ≈106，y=84 是截图校正前的估值，实测落点好）；`carpet_page_tick()` 在 `s_tile` 判断之前按 `carpet_link_event_pending()` 刷显隐；脸格 tap 分支改成 `carpet_link_event_broadcast()` 先试播报，没事件（或被半句挡住）才走原来的直接进对话)
-  esp32/components/muse/carpet/carpet_page.h |  69 +   (新；11-13 B §3 +`carpet_page_scene_bench()` 台架口；11-14 +`carpet_page_gesture_bench_from()` 声明 —— 和 `carpet_page_gesture_bench()` 同一条判定路但不先回脸，从当前露着那格起判，为称「外格划动回中心」；11-16 B §1 `carpet_page_build()` 签名加第四参 `face_tile`)
+  esp32/components/muse/carpet/carpet_page.c | 1762 +   (新，**11-22 收图自动跳相册加 5 行**：`photo_refresh()` 的 `pv.gen` 变化支路 `if (!muse_state_asleep()) nav_to(PG_PHOTO)`（D16.3.1 owner 拍板；旧入口原样不拆——owner「我目前都没见过相册页面从哪里进去」）+ `muse_state.h` include 一行；**11-21 #86 再加 44 行**：断链提示四格各一行底边小字（`s_link_hint[4]` + `s_link_down_us` + `s_link_hint_shown`），`carpet_page_tick()` 里读 `carpet_link_view()`（锁安全、只 UI tick 碰）判两态文案、连续断 10s 才露、linked 立刻藏、状态不变不重写文案；创建块放在**所有页 build 完之后**（钟面星轨/相册整格背景层同级后建在上，先建提示会被盖住 —— 第一版钟面/相册没小字实测就是这个），脸格 `-SC(52)` 避 Muse caption 带、其余 `-SC(30)` 在导航点 `-12` 之上；**11-20 Spotpear 新板这一版再加 120 行**：所有绝对像素走 `SC(v)=v*s_screen_w/466`（`s_screen_w` 在 `carpet_page_build()` 里用 `lv_display_get_horizontal_resolution()` 读一次 —— 这份 LVGL 9.5 把 `lv_display_get_hor_res` 改名了，照旧名写编译不过），字体四档 360 上落 21/16/23/58px；钟面底图开机一次性双线性重采样 472→屏宽+6 进 PSRAM（留 3px 烧屏位移余量），466 板照旧直用 rodata；**相册小屏预解码** —— TJPGD 是流式 get_area 解码器，在它上面压运行时 `lv_image_set_scale` 整帧画黑（板上实测 scale=256 → 129,600 非零像素、195 → 只剩 208），小屏（scale<256）改走 `esp_new_jpeg` 一次解成 RGB565_LE 整帧（16 字节对齐 PSRAM，换张释放）再缩，466 路径 RAW+TJPGD 不动；修完四态截图非零像素 128,159/128,520/127,445/127,445，`相册上屏…scale=195 预解码` 实读；`>photoscale` 台架口改成**串口只立记号、`carpet_page_tick()` 里动 LVGL**（第一版在串口任务直接调 photo_show，撞 `lv_inv_area !rendering_in_progress` 断言 rst:0xc，当场修）；11-18 相册再加 116 行：`build_photo/photo_show/photo_refresh` —— 整屏 stage 上挂 `lv_image`（透明、不可点，手势照常穿透判），dsc 运行期拼 VARIABLE/RAW，`PHOTO_TEMPO_MS 8000` 轮播 tick 在 `carpet_page_tick()` 里、熄屏不走；显示中的槽钉住（LVGL 重绘要重解码，读了一遍 lv_image/lv_image_decoder/lv_tjpgd 确认 VARIABLE 源没有同指针早退、缓存只认 FILE，一份静态 dsc 复用安全）；第 1 层宫格 + 五个场景页 + 明细页 + 12px 琥珀点；11-13 B §3：下拉改三场景横卡 `PICKER_CELLS` 缩到 3 条 + `build_picker` 重写 + `on_scene_clicked` 选场景换装回脸 + `nav_back()` 一律回脸 + 脸格单击进对话 + 11-13 B §5 右滑进氛围读 `muse_settings_album_default()`；**11-13 场景环动效这一版再加 59 行**：`col_slide_cb/animate_column_in/animate_picker_cards/entrance_anim` + `s_shown_col`，picker 三卡错峰 80ms 升起 260ms、其余页整列 settle 220ms，`translate_y` 带孩子移不开销图层、`lv_anim_delete` 防堆叠、露出的列变了才播，进脸/设置清记号下次重播；`sync_tile`/`detail_open` 各挂一次；**11-14 外页划动回中心这一版再加 28 行**：`gesture_settle` 的 `G_SWIPE_X/G_SWIPE_Y` 从绝对方向→落点改成中心枢纽 —— `s_tile!=0`（任何外格）横滑/竖滑一律 `nav_to(PG_FACE)` 回中心，只有脸格（`s_tile==0`）按四方向发散；唯一例外氛围格右滑仍轮换 clock→gallery→photo；判定引擎未动。台架 `bench_gesture(dx,dy,hold,reset_face)` 抽出公共体，`carpet_page_gesture_bench` 传 true（每次前回脸）、新增 `carpet_page_gesture_bench_from` 传 false（从当前格起判）；**11-16 星轨守护钟面这一版再加 140 行**：`build_clock_orbit()` 在时钟列底下铺整页装饰层 —— 28 颗固定种子星点 + 实心暗盘夜地球 + 三层轨道环（`lv_arc` 满环、去 knob）+ 四方位刻度 + 16px 卫星点 `lv_anim` 60s 无限绕轨（`orbit_sat_anim` 算 sin/cos 走 `lv_obj_set_pos`，不用 align 免得和布局打架）；`apply()` 里装饰层跟时钟列同显隐，别的页不漏；**11-16 星轨底图这一版（owner「你现在做的这个钟面和之前你给我看的demo效果不一样…能搬开源就搬开源」）把程序化装饰层换成整屏 RGB565 底图**：`build_clock_orbit()` 重写为 stage（`LV_PCT(100)`）+ `lv_image`（运行期拼 `lv_image_dsc_t`，cf=RGB565、stride=944，数据就是 rodata 里那份 `_binary_carpet_clock_bg_rgb565_start`）+ 卫星点沿**画出来的椭圆** rx193/ry178 绕轨（两张不复位快照落点回代 (189/193)²+(38/178)²≈1.0 证贴环）；星点/夜地球/三环/刻度那些程序化件全删，数字和日期还是 SNTP 真值、离线还是诚实「--:-- / 时间同步中 / 等首帧」；同版**钟面页返回药丸撤掉**（owner「很突兀，滑屏也能找到其他功能」，别的内页留着）。机制搬的是 Round-Clock 的 `main/assets/default.rgb565`（整屏壁纸图 + 叠加数字），图是我们自己的 demo 底图，不是它的素材；**11-16 B §1 守护灯点再加 23 行**：`carpet_page_build()` 多收第四参 `face_tile`（脸那格本组件照旧不画一个控件，只挂灯），`s_guard_dot = make_dot(face_tile)` + `lv_obj_align(TOP_MID, 0, 84)` 落在 Avatar 头顶正上方（实拍头部顶端 ≈106，y=84 是截图校正前的估值，实测落点好）；`carpet_page_tick()` 在 `s_tile` 判断之前按 `carpet_link_event_pending()` 刷显隐；脸格 tap 分支改成 `carpet_link_event_broadcast()` 先试播报，没事件（或被半句挡住）才走原来的直接进对话)
+  esp32/components/muse/carpet/carpet_page.h |  73 +   (新；11-20 +`carpet_page_bench_photo_scale()` 声明（`>photoscale` 台架口，0=自动/256=不缩，tick 里落地）；11-13 B §3 +`carpet_page_scene_bench()` 台架口；11-14 +`carpet_page_gesture_bench_from()` 声明 —— 和 `carpet_page_gesture_bench()` 同一条判定路但不先回脸，从当前露着那格起判，为称「外格划动回中心」；11-16 B §1 `carpet_page_build()` 签名加第四参 `face_tile`)
   esp32/components/muse/carpet/carpet_photo.c | 368 +   (新，11-18 B §5 相册接收侧：`carpet_photo_on_chunk()` 拼张（b64→2048B 块、seq 0 起连续，断档整张丢并留行、seq==0 重开、单张 ≤1MB 封顶）→ 3 槽 PSRAM 环（每槽整张 JPEG，满了淘汰最旧但**跳过钉住的那槽** —— 显示中的图 LVGL 重绘要重解码，不能被人抽走）；`carpet_photo_acquire(index)` 按代际排序取图并钉住；`carpet_photo_abort()` 只清拼装、环里的成品留着（断线不清相册）；`carpet_photo_bench()` = `>phototest`，把 embed 的测试 JPEG 现编 b64→cJSON args→**走线上同一个 `on_chunk`**，不是旁路；`carpet_photo_dump()` 印收齐/帧/drops/环账/钉 + `uxTaskGetStackHighWaterMark("lvgl")` 栈水位（12K 档峰值换算一起打）)
   esp32/components/muse/carpet/carpet_photo.h |  63 +   (新，11-18：on_chunk / abort / view / acquire / jpeg_size / dump / bench 七个入口 + 契约注释)
   esp32/components/muse/carpet/carpet_wake.c | 229 +   (新，11-12 语音唤醒词：只用 esp-sr 的 **WakeNet**，不上 AFE/AEC/MultiNet。`esp_srmodel_init("model")` → filter(ESP_WN_PREFIX) → `create(name, DET_MODE_90)`；喂的是 `idle_capture()` 那**唯一**的 20 ms/320 样本块，内部用累加器重切成引擎要的 512 样本/32 ms（**绝不新开第二个麦克风读者**，§16 那条坑）。`init()` 校验 chunk∈(0,1024]、单声道、16000 Hz，不对就 destroy 退出 —— 块长错了引擎会**静默永不命中**。三道不检测：设置关 / `carpet_audio_live()` 在念 / 一轮还没完（`s_inhibit`），命中后 62 块≈2 s 不应期。`>wake` 回读三行 `@wake`：ready/词/blocks/hits/dropped + detect 平均与最坏耗时 + 内部与 PSRAM 余量。**一个只有实读模型才发现的坑**：`esp_srmodel_get_wake_words()` 返回的是 `_MODEL_INFO_` 第 3 个下划线段原文，四个候选里只有「你好小安」那份写的是拼音 `nihaoxiaoan` ⇒ 屏上会教人念拼音，已加一行 strcmp 译回中文)
   esp32/components/muse/carpet/carpet_wake.h |  67 +   (新，那七个入口：init / ready / feed / take / inhibit / word / dump)
   esp32/components/muse/muse_app.c            |  11 +   (11-19 #82：`muse_settings_init()` 之后调 `carpet_mic_preload()`（含条件 include）—— NVS 刚挂载、voice_task 还没起，内部栈上读掉那一格；11-09 新入列：设置监听里 `MUSE_SETTING_STAY_ONLINE` 那一格 → `muse_wifi_apply()`，让已经在 nap 的那次当场结束)
-  esp32/components/muse/muse_input.c         | 497 + /   6 -   (11-18 相册：+`>phototest` 台架口（`carpet_photo_bench()`，喂完自动翻到相册页）+`carpet_photo.h` 的 include；11-17 句间空档：+`>audgap` 台架口（`carpet_audio_bench_gap()`，占串口约 3.5 秒，判据回读走 `>carpet` 那行 `@audio turn=… drops=…`——注意 `>audio` 是 1 kHz 放音探针不是回读）+`carpet_audio.h` 的 include；11-16 B §1：+`>event [<kind>|clear]` 守护灯点台架口（注入走 `carpet_link_bench_event()`、回读 `carpet_link_event_dump()`、清空 `carpet_link_event_clear()`）；11-14 外页划动回中心：+`>gestfrom [left|right|up|down|tap]` 台架口，照 `>gest` 那条但调 `carpet_page_gesture_bench_from()`（不先回脸、从当前格起判），printf 多印 `reset=%d`；11-13 B §5：+`>amb [clock|photo]` 读/改默认氛围（和设置页同一个 NVS key）；11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
+  esp32/components/muse/muse_input.c         | 517 + /   6 -   (11-20 新板：+`>photoscale <n>` 台架口（`carpet_page_bench_photo_scale()`，只立记号）+`>micraw`/`>micen` 两条麦克风硬件探针（新板 mic 判死用的就是它们：SD 线 toggles=0、使能后样本全零，CHIPEN 原理图硬接 3V3 ⇒ 硬件级，不是固件）；11-18 相册：+`>phototest` 台架口（`carpet_photo_bench()`，喂完自动翻到相册页）+`carpet_photo.h` 的 include；11-17 句间空档：+`>audgap` 台架口（`carpet_audio_bench_gap()`，占串口约 3.5 秒，判据回读走 `>carpet` 那行 `@audio turn=… drops=…`——注意 `>audio` 是 1 kHz 放音探针不是回读）+`carpet_audio.h` 的 include；11-16 B §1：+`>event [<kind>|clear]` 守护灯点台架口（注入走 `carpet_link_bench_event()`、回读 `carpet_link_event_dump()`、清空 `carpet_link_event_clear()`）；11-14 外页划动回中心：+`>gestfrom [left|right|up|down|tap]` 台架口，照 `>gest` 那条但调 `carpet_page_gesture_bench_from()`（不先回脸、从当前格起判），printf 多印 `reset=%d`；11-13 B §5：+`>amb [clock|photo]` 读/改默认氛围（和设置页同一个 NVS key）；11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
   esp32/components/muse/muse_pixel.h         |  20 +   (11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
@@ -135,17 +205,18 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
   esp32/components/muse/muse_settings.c      |  82 + /   2 -   (11-13 B §5：NVS 再多一条 `album_def`（u8，缺键=时钟）+ `album_default` 那两个函数；11-12 唤醒词：NVS 再多一条 `wake_on`（u8，**缺键=默认开** —— owner 要的就是免按键，默认关等于没做）+ 那两个函数 + 开机日志尾部 `wake %s`；11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
   esp32/components/muse/muse_settings.h      |  30 +   (11-13 B §5：`MUSE_SETTING_AMB_DEFAULT` + `muse_settings_album_default/set_album_default`；11-12 唤醒词：`MUSE_SETTING_WAKE` + `muse_settings_wake_on/set_wake_on`，同样刻意不加 CONFIG 闸（主机侧 harness 也 include 这份头）；11-08：`MUSE_LINK_URL_MAX` + 那两个声明，刻意不加 CONFIG 闸 —— 主机侧 harness 也 include 这份头；11-09：`MUSE_SETTING_STAY_ONLINE` + `muse_settings_stay_online/set_stay_online`)
-  esp32/components/muse/muse_settings_ui.c   | 333 + /  45 -   (11-13 B §5：「声音」页加「默认氛围用相册」一格 + 说明（全量 Noto fallback，不重跑子集）；11-12 唤醒词：「声音」页加一格 `Wake word`（**不新开页面**，owner 的规矩），说明那一行是**动态**的 —— 要念哪个词由 `carpet_wake_word()` 报（真在听的词不是屏幕上写的那个，是最难查的一种"唤醒词不灵"），模型没起来就直说「唤醒词没起来：model 分区里没有模型」。这一格的中文走 `muse_lang_montserrat()` 挂的**全量** Noto 16px fallback（7765 个码位），所以**不用重跑字库子集脚本** —— 那份 683 字的 `carpet_font.ttf` 只服务 `carpet_page.c`；11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态。11-09：熄屏页加 `s_stay_sw` 那一格，**放在五个时长选项上面**——圆屏一屏放不下五格再加一格，滚动条是关的、台架也没有滚的口)
+  esp32/components/muse/muse_settings_ui.c   | 333 + /  45 -   (11-13 B §5：「声音」页加「默认氛围用相册」一格 + 说明（全量 Noto fallback，不重跑子集）；11-12 唤醒词：「声音」页加一格 `Wake word`（**不新开页面**，owner 的规矩），说明那一行是**动态**的 —— 要念哪个词由 `carpet_wake_word()` 报（真在听的词不是屏幕上写的那个，是最难查的一种"唤醒词不灵"），模型没起来就直说「唤醒词没起来：model 分区里没有模型」。这一格的中文走 `muse_lang_montserrat()` 挂的**全量** Noto 16px fallback（7765 个码位），所以**不用重跑字库子集脚本** —— 那份 `carpet_font.ttf` 子集（1143 码位）只服务 `carpet_page.c`；11-08：WI-FI 子页多一行「Access point」复用现成的 `open_text` 键盘；中文化把这一页的文案接进 `muse_lang_menu()`，`w.detail`/`h.detail` 那两句整句也过表；折叠那轮加 `fold()`/`fold_toggle()` 一组 —— MUSE 页那四格 + 测试连接 + 配对说明收进默认折上的「Muse 云」，电量页那七行读数收进「电池诊断」，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里；bench 那条 `>ui.settings=<页>[+]` 的 `+` 在 `#if LV_USE_SNAPSHOT` 里，只为截图能拍到展开态。11-09：熄屏页加 `s_stay_sw` 那一格，**放在五个时长选项上面**——圆屏一屏放不下五格再加一格，滚动条是关的、台架也没有滚的口)
   esp32/components/muse/muse_ui.c            | 244 + /  19 -   (tile + 手势吞并修 + 圆点可点 + show_carpet；**11-13 一次划动一屏这一版再加 11 行**：carpet 构建下 `muse_ui_show_face`/`muse_ui_goto_tile`/`dot_clicked_cb` 三处跨格跳转一律 `LV_ANIM_OFF` —— 十字布局里对角格互跳（场景环↔功能、设置↔氛围）开动画会滚穿中心脸，一次划动飞过两三屏；瞬切不穿格，动效改落在露出那一屏的内容入场（见 carpet_page.c）。非 carpet 构建保持原 epaper 三元行为。**11-16 B §1**：`carpet_page_build(s_carpet, s_scene, s_amb, s_face)` 多传脸那格给守护灯点当爹 —— 行数没动（一处调用点换参）)
   esp32/components/muse/muse_ui.h            |  14 +
-  esp32/components/muse/muse_voice.c         | 212 +           (11-19 #82：voice_task 的 PSRAM 栈注释改写「碰不得 flash，**读也不行**」（原文 "never writes flash" 漏了读也会炸，正是这次崩溃的坑）；11-12 唤醒词：`idle_capture()` 里 +`carpet_wake_feed(s_chunk, MUSE_AUDIO_CHUNK)`（同一个块，不新读麦克风）；idle 循环里 `carpet_wake_take()` 命中 ⇒ 先 `muse_input_wake("voice")` 点亮，再按 `carpet_mic_armed()` 分三路：armed 就 `muse_wifi_power(FULL)` + `inhibit(true)` + **走按键同一条 `talk_to_phone(false, true)`** + `inhibit(false)`，没 armed 说「对着屏说话还没开」，没链路说「先让手机连上圆屏」。**免按键那一轮的句尾判据**（按下那条路不变，仍可提前松手发送）：1 秒滑窗取**最低**电平当底噪，阈值 = 底噪 +8 dB 且封顶 −25 dBFS；连续 700 ms 低于阈值且真出过声 ≥160 ms 就收口发送；2 秒还没人出声判成误触发、撤回这一轮并说「没听清，再说一次」（判据是 `loud < HF_MIN_LOUD` 不是 `!loud` —— 一声关门响就能把 loud 顶到 1，那样这道保险就废了，会一路录到 8 秒上限把一车噪声发上去）；11-11 晚：`talk_to_phone(bool barge_in)` —— 按下即录、松开整段发给手机那一条路；`BTN_TALK` 的 press 分支在**进 Hatch 那道闸之前**先看 `carpet_mic_armed()`， armed 就自己吃掉这次按键（`pre_reset()` + `continue`，不再走 Muse 云端那套）。owner 报的"按下键屏上让我装 Muse"就是这里：那条键是 BOOT=TALK，没配对时 `can_record()` 撞 `MUSE_HATCH_NOT_SET`，屏上打的是英文串「SET UP MUSE FIRST」；现在链路已经接上就改口成「对着屏说话还没开」，且带子里没配对的这句只留作真的没配时才出)
-  esp32/devices/sdkconfig.carpet             |  93 +   (新，11-18 相册：+`CONFIG_LV_USE_TJPGD=y` +`CONFIG_LV_USE_FS_MEMFS=y` +`CONFIG_LV_FS_MEMFS_LETTER=77`（TJPGD 的 VARIABLE 解码路拿 MEMFS 把 JPEG 字节包成文件，缺 MEMFS 直接 INVALID；盘符 0 会 `#error "Invalid drive letter"`，'M'=77）+ **关掉上游板级开的 PSRAM 执行三条**（`SPIRAM_FETCH_INSTRUCTIONS`/`SPIRAM_FETCH_RODATA`/`SPIRAM_XIP_FROM_PSRAM`）—— 开着时 .text/.rodata 搬进 PSRAM，8MB 被吃掉大半、`psram_free` 只剩 132K，相册 3 槽环根本拿不到内存；关掉后代码走 flash XIP，实测 `psram_free` ~5.9-6.0MB（音频 2MB 缓冲占上后 ~3.86M），flash 占用一个字节不变；11-12 唤醒词：+`CONFIG_MODEL_IN_FLASH=y` +`CONFIG_SR_WN_WN9_NIHAOXIAOAN_TTS2=y`（你好小安）+ 那一段**这块板上实读**的开销注释：app 镜像 3,346,432 B / 4M 槽余 847,872 B（20%）、srmodels.bin 291,068 B、create() 34.0 ms 吃内部 21,128 B（最大连续块 131072→98304）+ PSRAM 322,864 B、detect() 一块 32 ms 平均 2.74 ms 最坏 4.61 ms（≈8.6% 一个核）、带引擎稳态 `int=43K/29K min=32K`。**探针那份更大的数（21,140 B / 3.63 ms / 11%）量的是 wn9_nihaoxiaozhi_tts，它的 `_MODEL_INFO_` 是 wakenet9l = 重档，只能当上限看**；原有：含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
+  esp32/components/muse/muse_voice.c         | 290 + /   1 -   (11-22 会话窗口：新增一段 `#if CONFIG_MUSE_CARPET_CHAT_WINDOW` 包住的状态件（`s_win_until_us`/`s_win_turn_us`/`s_win_reply_live`/`s_turn_sent` + `window_open/window_close`，60 秒封顶 `WIN_LIFE_S`、12 秒无声判"没耳朵" `WIN_REPLY_WAIT_S`）；`talk_to_phone` 顶上清 `s_turn_sent`、`carpet_mic_end(true)` 之后立；唤醒词命中且这句真发出去才开窗（点脸/按键那两条不开）；idle 循环维护块：`carpet_audio_live()` 起头→落零判"放完"→ `inhibit(true)`+**同一条 `talk_to_phone(false, true)`** 接麦，这轮没说出去就静默关窗（"没听清"那句已由采集路径替说）；熄屏/闸关/60 秒到/12 秒无起头四种收口各说实话一句。窗口 Kconfig 关 ⇒ 逐字等价于今天装机构建；11-19 #82：voice_task 的 PSRAM 栈注释改写「碰不得 flash，**读也不行**」（原文 "never writes flash" 漏了读也会炸，正是这次崩溃的坑）；11-12 唤醒词：`idle_capture()` 里 +`carpet_wake_feed(s_chunk, MUSE_AUDIO_CHUNK)`（同一个块，不新读麦克风）；idle 循环里 `carpet_wake_take()` 命中 ⇒ 先 `muse_input_wake("voice")` 点亮，再按 `carpet_mic_armed()` 分三路：armed 就 `muse_wifi_power(FULL)` + `inhibit(true)` + **走按键同一条 `talk_to_phone(false, true)`** + `inhibit(false)`，没 armed 说「对着屏说话还没开」，没链路说「先让手机连上圆屏」。**免按键那一轮的句尾判据**（按下那条路不变，仍可提前松手发送）：1 秒滑窗取**最低**电平当底噪，阈值 = 底噪 +8 dB 且封顶 −25 dBFS；连续 700 ms 低于阈值且真出过声 ≥160 ms 就收口发送；2 秒还没人出声判成误触发、撤回这一轮并说「没听清，再说一次」（判据是 `loud < HF_MIN_LOUD` 不是 `!loud` —— 一声关门响就能把 loud 顶到 1，那样这道保险就废了，会一路录到 8 秒上限把一车噪声发上去）；11-11 晚：`talk_to_phone(bool barge_in)` —— 按下即录、松开整段发给手机那一条路；`BTN_TALK` 的 press 分支在**进 Hatch 那道闸之前**先看 `carpet_mic_armed()`， armed 就自己吃掉这次按键（`pre_reset()` + `continue`，不再走 Muse 云端那套）。owner 报的"按下键屏上让我装 Muse"就是这里：那条键是 BOOT=TALK，没配对时 `can_record()` 撞 `MUSE_HATCH_NOT_SET`，屏上打的是英文串「SET UP MUSE FIRST」；现在链路已经接上就改口成「对着屏说话还没开」，且带子里没配对的这句只留作真的没配时才出)
+  esp32/devices/sdkconfig.carpet             |  99 +   (新，11-22：+`CONFIG_MUSE_CARPET_CHAT_WINDOW=y` 和六行注释 —— 含 #76 未修时"窗口每轮发完 12 秒说实话关窗"是设计降级不是故障那句；11-18 相册：+`CONFIG_LV_USE_TJPGD=y` +`CONFIG_LV_USE_FS_MEMFS=y` +`CONFIG_LV_FS_MEMFS_LETTER=77`（TJPGD 的 VARIABLE 解码路拿 MEMFS 把 JPEG 字节包成文件，缺 MEMFS 直接 INVALID；盘符 0 会 `#error "Invalid drive letter"`，'M'=77）+ **关掉上游板级开的 PSRAM 执行三条**（`SPIRAM_FETCH_INSTRUCTIONS`/`SPIRAM_FETCH_RODATA`/`SPIRAM_XIP_FROM_PSRAM`）—— 开着时 .text/.rodata 搬进 PSRAM，8MB 被吃掉大半、`psram_free` 只剩 132K，相册 3 槽环根本拿不到内存；关掉后代码走 flash XIP，实测 `psram_free` ~5.9-6.0MB（音频 2MB 缓冲占上后 ~3.86M），flash 占用一个字节不变；11-12 唤醒词：+`CONFIG_MODEL_IN_FLASH=y` +`CONFIG_SR_WN_WN9_NIHAOXIAOAN_TTS2=y`（你好小安）+ 那一段**这块板上实读**的开销注释：app 镜像 3,346,432 B / 4M 槽余 847,872 B（20%）、srmodels.bin 291,068 B、create() 34.0 ms 吃内部 21,128 B（最大连续块 131072→98304）+ PSRAM 322,864 B、detect() 一块 32 ms 平均 2.74 ms 最坏 4.61 ms（≈8.6% 一个核）、带引擎稳态 `int=43K/29K min=32K`。**探针那份更大的数（21,140 B / 3.63 ms / 11%）量的是 wn9_nihaoxiaozhi_tts，它的 `_MODEL_INFO_` 是 wakenet9l = 重档，只能当上限看**；原有：含 tiny_ttf 三条；`CONFIG_SCREEN_LINK_URL` 就是这里那条出厂值；11-08 加 `CONFIG_MUSE_UI_LANG_ZH=y` 和 `CONFIG_LV_USE_SNAPSHOT=y` —— 后者是截图验收那条口的开关，关掉就不出 `SNAP BEGIN`)
+  esp32/devices/sdkconfig.muse-spotpear-s3-18 | 71 +   (新，11-20 #83：Spotpear JC3636W518 设备档 —— `MUSE_BOARD_SPOTPEAR_S3_18=y` + 16MB flash（flash_id 实测）+ S3R8 八线 PSRAM 80M + 32K I-cache/64K D-cache + PSRAM 静态缓冲/轻睡那组档（照 muse 设备档的写法，注释里说清为什么）；**引脚不在这份文件里**，全在 board_spotpear_s3_18.c 的 #define；PSRAM 执行三条这里开着、由最后加载的 sdkconfig.carpet 关掉（carpet 要 PSRAM 整块给相册/音频）；SDK token 照旧只进 build 目录那份被 gitignore 的 sdkconfig)
   esp32/main/app.c                           |  49 + /  10 -   (11-13 补一处**误导性读数**：`enter_advertising_state()` 在 carpet 构建下报 `off` 并直接 return —— 关了 BLE 之后心跳原本还在报 `setup=advertising … ble=advertising`，那是给一个根本没起来的协议栈贴标签，而这两格是下一轮排查唯一能读到的东西。已刷已验：`setup stage: idle -> off` + `hb … setup=off … ble=off`；11-12 唤醒词：carpet 构建**跳过 BLE 配网服务的启动**（`start_ble_setup_server_if_needed()` 顶上 `#if CONFIG_MUSE_CARPET_CARDS` 直接 return）。实测这一步吃 41 KB 内部 RAM：`after noise_ctrl_init int=102K/62K` → `after ble_start int=61K/52K`，稳态落到 `int=16K/8K`，**低于唤醒词引擎要的 21 KB 总量 / 12 KB 连续** ⇒ 不关 BLE 这功能根本装不下。关掉后 int 16K/8K → 73K/56K，带上引擎稳态 43K/29K。车联屏从来不用 BLE 配网（它从自己的 Wi-Fi 页入热点再拨 App 的 WebSocket），`ble_server_*` 在 `!s_started` 时本来就全是空操作，等 BLE 同步的调用方都在 `CONFIG_HOMEHUB_BLE_COMMANDS` 下而这个构建关着。**代价：这一版起 BLE 配网没了**，要退回官方行为把那个 `#if` 去掉；11-08：开机选网那条优先级倒过来 —— NVS 里用户填的网络 > 编译期那一条)
-  esp32/main/muse_glue.c                     |  74 + /  11 -   (11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
+  esp32/main/muse_glue.c                     |  80 + /  13 -   (11-21 #34：两条重扫阶梯的睡着封顶 `RETRY_MAX_US` 60s→30s、`AWAY_MAX_US` 600s→30s（11-19 实测热点回来等 10 分钟的真凶是 AWAY 那条 600s），注释里写明醒屏 15s 封顶/nap 离网路径/wifi_mgr 那条 60s 都不动及为什么；11-08 加：`dev_override_now()`，让看守任务在编译期 SSID 为空时也不再"别碰 Wi-Fi"；11-09 加：`DIAL_STALL_FAILS 4` 那条升级 —— Wi-Fi 还连着但抓屏链路连续 4 次拨号没通过就 `wifi_mgr_disconnect()` 走全量重连，并把 `err=` 原文一起打进 W 那行)
   esp32/partitions_muse.csv                  |   8 +   (11-12 唤醒词新入列：**只往尾巴上加一行** `model, data, spiffs, 0x822000, 0x300000,`（3 MB）。上面每一行的偏移一个都没动 ⇒ NVS(0x11000) 里的 Wi-Fi、`link_url`、`mic_mode`、`wake_on` 全保住，换这张表不用重新配网（用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对过，不是看着 csv 推的）。**分区名必须就叫 `model`**：esp-sr 的 CMakeLists 用 `partition_table_get_partition_info("--partition-name model")` 找它，找不到就只打印一句提示、不生成 `srmodels.bin`，运行期 `esp_srmodel_init("model")` 返回空 —— 现象是"编译刷机全成功、唤醒词永远不灵"。16 MB flash 到 0x1000000，这张表到 0xB22000，后面还空约 4.8 MB)
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 21 份被改文件的
-  原样副本，再 `git apply`，41 个文件全落对，字库、底图和测试 JPEG 三份二进制解出来字节数都一致），不是"看着应该能打上"。
+  原样副本，再 `git apply`，43 个文件全落对，字库、底图和测试 JPEG 三份二进制解出来字节数都一致），不是"看着应该能打上"。
   验法脚本：`D:/dev/tmp/verify_carpet_patch.py <patch> <muse_root> cdc169d <空目录>`，
   它同时做两件事 —— ① 在 baseline 空仓上 `git apply --check` + 真 apply；
   ② 把 apply 出来的每一份和**工作树**（就是真正编译刷机那份）逐字节比。
@@ -581,12 +652,19 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   它就是 §3 那条 `cp -r`，进 patch 反而会让对端机器多一份）：
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
-  git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet
-  git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet esp32/main \
+  git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet \
+      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18
+  git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet \
+      esp32/devices/sdkconfig.muse-spotpear-s3-18 esp32/main \
       esp32/partitions_muse.csv esp32/avatar/muse_pixel.c \
       > D:/dev/projects/carpet-sat-demo/firmware/screen/muse/muse-carpet.patch
-  git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet   # 别让状态多个暂存
+  git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet \
+      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18   # 别让状态多个暂存
   ```
+  **`boards/board_spotpear_s3_18.c` + `devices/sdkconfig.muse-spotpear-s3-18` 是 11-20 这轮（Spotpear 新板）加进路径清单的**：
+  板级文件在 `boards/` 下、设备档在 `devices/` 下，都不在 `esp32/components/muse/carpet` 里。
+  漏了它们，Kconfig 那一档和 CMake 的 srcs 引用会进补丁、板级实现却没进 ⇒ 对端机器 configure/编译直接失败。
+  和 partitions/muse_pixel 那两条同一个坑。
   **`esp32/partitions_muse.csv` 是 11-12 这轮加进路径清单的**：它在 `esp32/` 根下，
   不在原来那三个路径里，漏了它补丁就少一行 `model` 分区 ⇒ 对端机器全片刷也没有模型，
   唤醒词永远 `ready=0`，而编译刷机全都"成功"。
@@ -646,6 +724,24 @@ idf.py -B build-muse-s3-175-carpet ... -p COM8 app-flash
 ```
 
 板子插这台机器时是 **COM8**（就是那颗 USB-Serial-JTAG，同时也是第二控制台）。
+
+**Spotpear 新板（11-20 起）同一套步骤，换三个参数**：build 目录 `build-muse-s3-spotpear-carpet`、
+defaults 链第三层换 `devices/sdkconfig.muse-spotpear-s3-18`、串口 **COM9**：
+```bash
+idf.py -B build-muse-s3-spotpear-carpet -DIDF_TARGET=esp32s3 \
+    -DSDKCONFIG=build-muse-s3-spotpear-carpet/sdkconfig \
+    -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-spotpear-s3-18;devices/sdkconfig.carpet" \
+    reconfigure
+idf.py -B build-muse-s3-spotpear-carpet ... build
+idf.py -B build-muse-s3-spotpear-carpet ... -p COM9 flash      # 第一次同样必须全片（model 分区）
+```
+这台机器上实际走的是包装脚本 `D:/dev/tmp/build-spotpear.ps1` / `flash-spotpear.ps1`
+（日志落 `D:/dev/esp/build-spotpear.log` / `flash-spotpear.log`）。**包装脚本 exit 0 会撒谎**，
+判成败看日志里的 `FEXIT=0` + `Project build complete`；刷对了看 5 处 `Hash of data verified` + `FEXIT=0`。
+两遍 CMake configure（"Missing kconfig option. Re-run the build process…"）是正常现象不是错。
+COM9 那颗桥**不吃 DTR/RTS 复位**（和 COM8 的 USB-Serial-JTAG 不一样），要复位靠 esptool 刷机的默认复位或崩溃自重启。
+新板没有 PMU/电池/功放：`>power`/`>diag` 那些读数没有意义；mic 硬件级死（`>micraw` SD toggles=0、
+`>micen` 全零，CHIPEN 原理图硬接 3V3），喇叭只有 PCM5100A line-out（3.5mm/CN4），要出声得外接有源音箱 —— 这两条待 owner 拍。
 
 **四个必须照做的步骤，跳了会静默：**
 - `reconfigure`：新增 `components/` 目录**不是 ninja 的监视输入**，不 reconfigure 的现象是
@@ -876,14 +972,15 @@ Muse 给的中文只有 **16 px 位图**两档（`muse_font_cjk_16.c` 是 Unifon
 位图字体的字号是刻死的，**这一页嫌字小就没有"调大一号"这条路**。
 
 **先分清哪块屏面用哪份字，别为改设置页去重跑子集脚本**（11-13 唤醒词那一格就踩过这个疑问）：
-- **只有 `carpet_page.c`（车联页）用下面那份 683 码位的 `carpet_font.ttf` 子集 + tiny_ttf。**
+- **只有 `carpet_page.c`（车联页）用下面那份 1143 码位的 `carpet_font.ttf` 子集 + tiny_ttf**（11-21 用 fontTools 实解重读；每次重跑子集都会涨，别信旧数）。
 - **设置页和菜单走另一条**：`muse_lang.c` 的 `muse_lang_montserrat()` 把 Montserrat
   14/16/20/28 四档各复制一份、`.fallback` 挂到 `muse_font_cjk_noto_16`（**全量**位图，
   从它的 cmaps 实解出 **7765 个码位** = GB2312 那 6763 字 + ASCII 与标点）。
   所以设置页加中文格子**不需要动字库**，代价是中文只有 16 px 一档。
 
 做法是把老固件那套搬过来了：页面上用 LVGL 的 **tiny_ttf** 现算字号，字库是一份
-**只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，154,528 字节（683 个码位），
+**只收本页会画的字**的 TTF 子集 —— `carpet/carpet_font.ttf`，283,244 字节（1143 个码位，11-21 实解重读；
+154,528/683 是 11-13 那版的旧数），
 由 `../tools/muse_font_subset.py` 造：
 
 ```bash
@@ -902,7 +999,7 @@ cp D:/dev/tmp/carpet-muse.ttf firmware/screen/muse/font/carpet_font.ttf
 1. **改了车联页的文案就要重跑这一条**。漏收的字不是豆腐块 —— `fallback` 挂在 16 px 那份全量上，
    表现是**一行里字大小不一**，很好认，但也很容易被当成渲染 bug 去查半天。
 2. 那工具是**扫源码里的非 ASCII**，连注释一起扫（所以词表比页面真正画的字多，
-   这一版扫到 685 个码位、子集里真的收下 683 个，缺的 `⇒` 和 `・` 只出现在注释和 EXTRA 里、不会上屏）。
+   例如 11-13 那版扫到 685 个码位、子集里真的收下 683 个，缺的 `⇒` 和 `・` 只出现在注释和 EXTRA 里、不会上屏）。
    想再压尺寸就得不扫注释，但那会漏掉查表翻出来的中文，别省这一步。
 3. 字号阶梯三档：**30 px** 只给宫格那颗字（视觉锚点，不承担读）、**28 px** 页面标题与条目名、
    22 px 值/副行/按钮/场景名。再大就不行了 —— 不是字库的问题，是 466 的圆里塞不下：
