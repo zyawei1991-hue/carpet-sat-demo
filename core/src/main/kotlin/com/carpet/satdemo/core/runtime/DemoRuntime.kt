@@ -142,6 +142,8 @@ class DemoRuntime(
          */
         val attempts: Int = 0,
         val lastSos: SatResult? = null,
+        /** 最近一次预设短语（L3）。null = 这场演示还没发过，卡面要说实话而不是摆个样例 */
+        val lastPreset: DemoEngine.PresetSend? = null,
         val localIp: String? = null,
         /** 展示端接入点没起来的原因。非空 = 1Hz 在跑但屏连不上，首页必须说实话 */
         val serverError: String? = null,
@@ -425,6 +427,16 @@ class DemoRuntime(
     private fun cellOk() = lastCell.usable
 
     /**
+     * 发一条预设短语（L3）。档位那句话和卡面走同一份 [DemoEngine.PresetSend.statusLine] ——
+     * 日志里读到的就是用户会看到的（§6.1 红线一），而且每一档都不说"对方收到了"。
+     */
+    fun sendPreset(text: String): Job = scope.launch {
+        val out = engine.sendPreset(text, nowSec = clockMs() / 1000)
+        _status.value = _status.value.copy(lastPreset = out)
+        log(out.statusLine())
+    }
+
+    /**
      * 误触撤销。App 上那个"撤销 SOS"按钮走这里，圆屏上的按钮也走这里。
      *
      * 结果的话只能由 [SosCopy.cancelLine] 生成 —— 撤销比发送更容易说错，
@@ -582,6 +594,11 @@ class DemoRuntime(
         engine.tickTpi()?.let { noteTpi(it.state) }
         push(engine.drainProbe(now))
         push(engine.drainPending(now))
+        // drain 把攒下的预设片补出去后档位会自己往上走；卡面跟着动，
+        // 不然"排在手机上等发送窗口"那行会永远停在那儿骗人
+        engine.lastPreset?.let { p ->
+            if (p != _status.value.lastPreset) _status.value = _status.value.copy(lastPreset = p)
+        }
         // 倒计时以厂商星历为准，算不出来才退回模组粗估 —— 这条优先序在 DemoEngine 里，这里只管记一行
         val eph = engine.tickEphemeris()
         if (eph != null) noteEph(eph) else engine.nextPassInS = runCatching { engine.modem.secondsToNextPass() }.getOrNull()

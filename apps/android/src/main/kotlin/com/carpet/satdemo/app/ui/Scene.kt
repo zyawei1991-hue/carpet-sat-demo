@@ -80,7 +80,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
             // position 同理：它报的是"手机现在在哪"，而车辆页要的是"车在哪"，那是寻车那张卡的事；
             // 原始经纬度和 HDOP 留在「户外无网」那一串里，徒步的人才需要自己核对坐标
             // service 紧跟 status：车主看完"车现在怎么样"，下一句要的是"所以现在该做什么"
-            cards = listOf("sos", "link", "vehicle.status", "vehicle.service", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue"),
+            cards = listOf("sos", "link", "vehicle.status", "vehicle.service", "vehicle.energy", "vehicle.find", "fence", "pass", "terminal", "queue", "preset"),
             actions = listOf("寻车", "远程熄火", "报一下车况"),
             input = InputMode.TouchAndVoice,
             basePrivacy = PrivacyTier.Guarded,
@@ -93,7 +93,7 @@ enum class Scene(val label: String, val subtitle: String, val profile: SceneProf
         "无人区 · 徒步 · 救援",
         SceneProfile(
             headline = "pass",
-            cards = listOf("sos", "pass", "position", "tpi", "queue", "usage", "sentinel", "terminal"),
+            cards = listOf("sos", "pass", "position", "tpi", "queue", "preset", "usage", "sentinel", "terminal"),
             actions = listOf("记一条轨迹", "安静地报个位置"),
             input = InputMode.Touch,
             basePrivacy = PrivacyTier.Guarded,

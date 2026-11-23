@@ -292,6 +292,111 @@ class DemoEngine(
     }
 
     /**
+     * 预设短语发送的聚合档位。红线与 SOS 同一把尺：**每一档都不说"对方收到了"** ——
+     * 星上 ACK 只代表卫星收到（〔规 §3.1.4 注6〕），回执只有平台下行能给，而演示里没有平台。
+     */
+    enum class PresetStage { InPhoneQueue, HandedToTerminal, SatConfirmed }
+
+    /** 一次预设短语发送的结果账本：卡面和日志念同一份 */
+    data class PresetSend(
+        val text: String,
+        val bytes: Int,
+        val frames: Int,
+        val stage: PresetStage,
+        val atSec: Long,
+    ) {
+        /** 日志和卡面念同一句（§6.1 红线一）。每一档都不许出现"对方收到了/已送达" */
+        fun statusLine(): String {
+            val cost = "$bytes 字节 · $frames 片"
+            return when (stage) {
+                PresetStage.InPhoneQueue ->
+                    if (frames == 0) "「$text」编不出帧，这条没发出去"
+                    else "「$text」没写进模组，排在手机上等发送窗口（$cost）"
+                PresetStage.HandedToTerminal -> "「$text」已交给卫星模组，排队等发（$cost）"
+                PresetStage.SatConfirmed -> "「$text」卫星已收下，对方有没有收到还不能确认（$cost）"
+            }
+        }
+    }
+
+    /** 最近一次预设短语。没发过就是 null —— 卡面要说"还没发过预设消息"，不许摆个假样子 */
+    var lastPreset: PresetSend? = null
+        private set
+
+    /** 上一次预设短语的分片 hex → 是否已交终端。drain 补发时按这张表把档位往上推 */
+    private var presetFrames: Map<String, Boolean> = emptyMap()
+
+    /**
+     * 发一条预设短语（L3）。文本按 UTF-8 进 [SosFrameEncoder.encodeExt] 的分片骨架，
+     * 片数由 [MessageBudget] 按模组能力档定 —— 字节账必须当着用户算，这就是"剩余 M 字节"那格的来源。
+     *
+     * 发送形状照 SOS/心跳的既有分岔走：模组当场收下的进它的队列并留 App 盯梢副本，
+     * 一个字节都没写出去的进 [outbox] 等补发窗口。**没有定位也照发**（坐标填 0，和 SOS 同一口径），
+     * 挡住它才是骗人。
+     */
+    suspend fun sendPreset(text: String, nowSec: Long): PresetSend {
+        val payload = text.toByteArray(Charsets.UTF_8)
+        val budget = MessageBudget.from(modem.caps)
+        val f = fix
+        val frames = runCatching {
+            encoder.encodeExt(payload, f?.lat ?: 0.0, f?.lon ?: 0.0, nowSec, phoneBatteryPct, budget)
+        }.getOrDefault(emptyList())
+        if (frames.isEmpty()) {
+            lastPreset = PresetSend(text, payload.size, 0, PresetStage.InPhoneQueue, nowSec)
+            return lastPreset!!
+        }
+
+        val handed = LinkedHashMap<String, Boolean>()
+        var satDone = 0
+        var moduleDone = 0
+        frames.forEach { frame ->
+            val hex = frame.toHex()
+            val send = runCatching { modem.enqueueSfq(hex) }
+                .getOrDefault(SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY))
+            when {
+                send.accepted && send.result == SatResult.COMPLETE -> {
+                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    outbox.confirm(hex)
+                    handed[hex] = true
+                    satDone++
+                    moduleDone++
+                }
+                send.accepted -> {
+                    // 双写：模组"收下"只代表进了它自己的队列，盯梢副本照 SOS 那条留（E.6）
+                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    outbox.markHanded(hex, nowSec * 1000)
+                    handed[hex] = true
+                    moduleDone++
+                }
+                else -> {
+                    // 一个字节都没写出去：整片留在 [outbox] 里等补发窗口，档位停在"还在手机队列"
+                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    handed[hex] = false
+                }
+            }
+        }
+        presetFrames = handed
+        val stage = when {
+            satDone == frames.size -> PresetStage.SatConfirmed
+            moduleDone > 0 -> PresetStage.HandedToTerminal
+            else -> PresetStage.InPhoneQueue
+        }
+        lastPreset = PresetSend(text, payload.size, frames.size, stage, nowSec)
+        return lastPreset!!
+    }
+
+    /** drain 把攒下的帧补出去之后回调：上一次那条预设若因此交完，档位要跟着走 */
+    fun noteFrameHanded(hex: String) {
+        if (!presetFrames.containsKey(hex)) return
+        val now = presetFrames.toMutableMap()
+        now[hex] = true
+        presetFrames = now
+        val p = lastPreset ?: return
+        if (p.stage == PresetStage.InPhoneQueue && now.values.all { it }) {
+            lastPreset = p.copy(stage = PresetStage.HandedToTerminal)
+        }
+    }
+
+    /**
      * RECOVER 态把离线期间攒下的补发出去。一次 tick 只刷 [DRAIN_BURST] 条 ——
      * 真机上一条 SFQ 要过一次 BLE 写，一秒刷干净反而是假的，而且展示端正好想看
      * 那个数字往下掉。刷完才告诉状态机可以回 CELL；中途模块又不收了就停在 RECOVER。
@@ -311,6 +416,7 @@ class DemoEngine(
             // 双写的分岔（E.10 #8）：SOS 交出去之后 App 仍留一份盯着，模组偷偷丢了要能捡回来；
             // 心跳不留 —— 下一分钟就有一条新的盖过它，留着只是占掉 50 个槽里的一个
             if (entry.kind == OutboxClass.Telemetry) outbox.release(entry.hex) else outbox.markHanded(entry.hex, nowMs)
+            if (entry.kind == OutboxClass.Message) noteFrameHanded(entry.hex)
             if (sosParked && entry.hex == lastSosHex) sosParked = false
             flushed++
         }

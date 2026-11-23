@@ -1,5 +1,6 @@
 package com.carpet.satdemo.core.ai
 
+import com.carpet.satdemo.core.messages.Presets
 import com.carpet.satdemo.core.protocol.SatPhase
 
 /**
@@ -251,6 +252,33 @@ object BuiltinSkills {
                     fields = mapOf("phase" to (c.phase ?: "unknown")),
                     // 这句话永远是"待确认"，网关在这一档会直接拦住 —— 不可逆动作不由对话触发（§6.1）
                     line = "发 SOS 是不可逆动作，我不会替你在对话里按下去。首屏长按 3 秒，或用圆屏那颗侧键。",
+                )
+            },
+
+            // L3：语音认短语，但**发送这一档和 SOS 同权 —— 对话不替用户按出去**。
+            // 「遇到危险，请求救援」一旦上线就是有人要来救你，误发的代价不是重发一条能抹掉的。
+            // 认得出就报"替你选好了"，认不出就把 12 条按组念回去，指到卡上按
+            Skill(
+                id = "msg.preset",
+                title = "预设短语",
+                keywords = listOf("预设", "短语", "报平安", "发一条消息", "一切正常", "请求救援", "收到"),
+                needs = PermissionTier.ReadLocal,
+            ) { c ->
+                // 对话层没有"本句原话"这个字段（路由按关键词，取数只看上下文），
+                // 认短语就取屏上最近一句去对 12 条表 —— 认不出不硬认，念组名指到卡上
+                val q = c.screenTalk.lastOrNull() ?: ""
+                val hit = Presets.match(q)
+                SkillResult(
+                    skillId = "msg.preset",
+                    intent = "预设短语",
+                    fields = mapOf("matched" to (hit?.id ?: "")),
+                    line = if (hit == null) {
+                        "我不替你按发送。12 条预设短语在「预设短语」那张卡里，分测试、报平安、求救、应答四组，" +
+                            "点一条再按发送。你可以说\"发一切正常\"这种话，我帮你把那条挑出来放在屏上。"
+                    } else {
+                        "给你挑好了：「${hit.text}」（${hit.utf8Bytes} 字节）。发送是不可逆动作，" +
+                            "到「预设短语」那张卡上按发送 —— 对话里我不按。"
+                    },
                 )
             },
 

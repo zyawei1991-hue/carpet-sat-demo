@@ -352,6 +352,11 @@ class AppRuntime(private val host: Application) {
         runtime.pressSos()
     }
 
+    /** 发一条预设短语（L3）。档位聚合、盯梢副本、补发升级都在 engine/runtime 那两层，这里只是按钮的入口 */
+    fun sendPreset(text: String) {
+        runtime.sendPreset(text)
+    }
+
     /**
      * SOS 长按的三段倒计时。
      *

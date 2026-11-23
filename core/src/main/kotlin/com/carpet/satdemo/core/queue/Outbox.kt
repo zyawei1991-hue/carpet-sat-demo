@@ -27,6 +27,9 @@ enum class OutboxClass(val priority: Int) {
     /** 围栏越界、哨兵告警 —— 要排在心跳前面 */
     Alarm(1),
 
+    /** 预设短语文本消息（L3）—— 挤占次序和告警同档：比 SOS 靠后、比心跳靠前 */
+    Message(1),
+
     /** 心跳、遥测。队满时先从这一档丢 */
     Telemetry(2),
 }

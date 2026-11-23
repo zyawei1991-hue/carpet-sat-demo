@@ -41,9 +41,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.engine.DemoEngine
+import com.carpet.satdemo.core.messages.PresetGroup
+import com.carpet.satdemo.core.messages.Presets
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.link.LinkPhase
 import com.carpet.satdemo.core.link.SosCopy
+import com.carpet.satdemo.core.protocol.MessageBudget
 import com.carpet.satdemo.core.protocol.GnssSource
 import com.carpet.satdemo.core.protocol.AccessService
 import com.carpet.satdemo.core.protocol.SatPhase
@@ -745,5 +749,67 @@ fun UsageCard(s: CardScope) {
             style = Type.Caption,
             color = Ink.TextLow,
         )
+    }
+}
+
+/**
+ * 预设短语卡（L3，11-20 方案 §2.2）。12 条原话逐字收在 [Presets]，合作方拿自研 APP 对词，
+ * **这一屏的字和次序就是约定，不许就地润色**。
+ *
+ * 两段式操作（先点一条、再按发送）和 SOS 的三段长按是同一个道理：
+ * 「遇到危险，请求救援」不是微信消息，误触的代价是有人要来救你。
+ * 下面那行状态走 [DemoEngine.PresetSend.statusLine]，每一档都不说"对方收到了" ——
+ * 星上 ACK 只代表卫星收到（〔规 §3.1.4 注6〕），演示里没有平台，回执这一格只能空着。
+ */
+@Composable
+fun PresetCard(s: CardScope) {
+    val app = s.app
+    val st by app.status.collectAsState()
+    var group by rememberSaveable { mutableStateOf(PresetGroup.Report) }
+    var pickedId by rememberSaveable { mutableStateOf<String?>(null) }
+    val picked = pickedId?.let { Presets.byId(it) }
+    val budget = MessageBudget.from(app.runtime.engine.modem.caps)
+    val tone = when (st.lastPreset?.stage) {
+        DemoEngine.PresetStage.SatConfirmed -> Tone.Ok
+        DemoEngine.PresetStage.HandedToTerminal -> Tone.Wait
+        DemoEngine.PresetStage.InPhoneQueue -> Tone.Wait
+        null -> Tone.Neutral
+    }
+    InkCard(icon = MIcons.send, tone = tone) {
+        CardTitle("预设短语")
+        ChipBand(
+            Presets.ORDERED_GROUPS.map { g ->
+                ChipSpec(g.label, selected = g == group, onSelect = { group = g })
+            },
+            perRow = 4,
+        )
+        ChipBand(
+            Presets.of(group).map { p ->
+                ChipSpec(p.text, selected = p.id == picked?.id, onSelect = { pickedId = p.id })
+            },
+            perRow = 2,
+        )
+        picked?.let { p ->
+            // 字节账当着用户算：这就是"一条最多发多长"那格的分母，选一条就能看到它占多少
+            val fr = budget.fragments(p.utf8Bytes)
+            Text(
+                if (fr == Int.MAX_VALUE) "这条 ${p.utf8Bytes} 字节，超出单条上限 ${humanBytes(budget.maxPayloadBytes)}，发不了"
+                else "这条 ${p.utf8Bytes} 字节 · 拆 $fr 片发出",
+                style = Type.Caption,
+                color = if (fr == Int.MAX_VALUE) Ink.Alert else Ink.TextMid,
+            )
+        }
+        Button(
+            onClick = { picked?.let { app.sendPreset(it.text) } },
+            enabled = picked != null && budget.fragments(picked.utf8Bytes) != Int.MAX_VALUE,
+            colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextHigh),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (picked == null) "先点一条短语" else "发送「${picked.text}」") }
+        Text(
+            st.lastPreset?.statusLine() ?: "还没发过预设消息",
+            style = Type.Body,
+            color = if (st.lastPreset == null) Ink.TextMid else Ink.TextHigh,
+        )
+        Text("卫星确认收到 ≠ 对方已读。对方那边的回执要等平台下行，演示里没有平台", style = Type.Caption, color = Ink.TextLow)
     }
 }

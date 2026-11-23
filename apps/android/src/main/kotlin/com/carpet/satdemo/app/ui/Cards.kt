@@ -42,6 +42,7 @@ object Cards {
             CardDescriptor("pass", "卫星什么时候来", CardGroup.Satellite, setOf(Capability.Ephemeris)) { PassWindowCard(it) },
             CardDescriptor("terminal", "卫星终端", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TerminalCard(it) },
             CardDescriptor("queue", "待发消息", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { QueueCard(it) },
+            CardDescriptor("preset", "预设短语", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { PresetCard(it) },
             CardDescriptor("usage", "卫星用量", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { UsageCard(it) },
             CardDescriptor("tpi", "终端位置", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TpiCard(it) },
             CardDescriptor("position", "位置", CardGroup.Guard, setOf(Capability.PositionSource)) { PositionCard(it) },
