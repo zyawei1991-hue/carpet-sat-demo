@@ -26,8 +26,9 @@ import kotlin.test.assertTrue
  * 「这块屏此刻该说哪件事」的那张表。
  *
  * 之前这块屏看着像轮播，根因不是排版：卡是演示脚本按步数换的，和车里发生的事没有关系。
- * 现在决定来自状态本身，所以这里钉的是**优先序**，尤其是那两条最容易写错的：
- * 一次 12 分钟就轮到一次的过境，不能把一条还好的蜂窝顶下去；而呼救一旦没走完，它顶一切。
+ * 现在决定来自状态本身，所以这里钉的是**优先序**，尤其是这两条：
+ * 例行的过境**不许**把屏劫走（owner 2026-11-19：「卫星过境和用户平时都没啥关系，正常不用提醒」）；
+ * 呼救一旦没走完，它顶一切。
  */
 class CardPolicyTest {
 
@@ -58,19 +59,19 @@ class CardPolicyTest {
     }
 
     @Test
-    fun `网没了才轮到卫星卡，窗口内外两张脸不一样`() {
-        val waiting = CardPolicy.decide(snap(cellOk = false, inS = 100), now)
-        assertEquals(UiCard.sat, waiting.card)
-        assertEquals(UiEmotion.worried, waiting.emotion)
+    fun `网没了也不为一次例行过境弹卡`() {
+        // owner 2026-11-19：过境平时和车主没关系。断网时该说的是"上不了网"这件事本身，
+        // 而它的载体是状态卡那行链路话，不是一张把整块圆屏换成倒计时的卡
+        val waiting = CardPolicy.decide(snap(cellOk = false, inS = 100), now, lastNotableAtMs = now)
+        assertEquals(UiCard.status, waiting.card, "窗口还有 100 秒也不主动弹")
 
-        val open = CardPolicy.decide(snap(cellOk = false, inS = 0), now)
-        assertEquals(UiCard.sat, open.card)
-        assertEquals(UiEmotion.excited, open.emotion, "窗口开着，卫星顶上了 —— 这是好消息，不该一脸愁")
+        val open = CardPolicy.decide(snap(cellOk = false, inS = 0), now, lastNotableAtMs = now)
+        assertEquals(UiCard.status, open.card, "正在窗口里，同样不主动弹 —— 屏上不该自己跳卡")
     }
 
     @Test
-    fun `星历算不出窗口时不画倒计时卡`() {
-        // nextPassInS = null 是"不知道什么时候有窗"，不是"没有窗"：屏上该说的是状态盘里那行人话
+    fun `星历算不出窗口也不弹卡`() {
+        // nextPassInS = null 是"不知道什么时候有窗"，不是"没有窗"；反正这张表已经不看过境了
         val d = CardPolicy.decide(snap(cellOk = false, inS = null), now, lastNotableAtMs = now)
         assertEquals(UiCard.status, d.card)
     }

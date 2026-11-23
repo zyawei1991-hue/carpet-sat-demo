@@ -62,10 +62,10 @@ class AiGatewayTest {
         val locked = base.copy(phase = "locked", secondsToNextPass = 0)
         val line = g.ask("下一次过境什么时候", locked).text
         assertTrue(!line.contains("还有 0 秒") && !line.contains("0 秒后"), "已经锁住了还把倒计时念成 0，用户会以为星正在头顶：$line")
-        assertContains(line, "窗口内")
+        assertContains(line, "现在就能发")
         // 没锁、也还没算出时间：这条要明说没得说，不许拿 0 当数
         val none = base.copy(phase = "idle", secondsToNextPass = null, passWindowSec = null)
-        assertContains(g.ask("下一次过境什么时候", none).text, "还没有可用的过境时间")
+        assertContains(g.ask("下一次过境什么时候", none).text, "现在还说不准卫星什么时候经过")
     }
 
     @org.junit.jupiter.api.Test
@@ -383,7 +383,7 @@ class AiGatewayTest {
 
         val stale = base.copy(ephemerisFresh = false, secondsToNextPass = null)
         val p = AiGateway(provider = LocalRuleProvider()).ask("什么时候过境", stale)
-        assertContains(p.text, "星历已经过期")
+        assertContains(p.text, "卫星位置数据好几天没更新")
         assertTrue(!p.text.contains("没卫星信号"), "过期和没信号是两件事（附录 E.9）")
     }
 

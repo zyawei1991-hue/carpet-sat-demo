@@ -345,7 +345,7 @@ private fun PetCard(
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
             verticalArrangement = Arrangement.spacedBy(Grid.x8),
         ) {
-            listOf("有信号吗", "下次过境是什么时候", "额度还剩多少", "车在哪").forEach { q ->
+            listOf("有信号吗", "卫星什么时候来", "额度还剩多少", "车在哪").forEach { q ->
                 Chip(q, selected = false) { vm.ask(q) }
             }
         }
@@ -810,9 +810,9 @@ private fun SatelliteStrip(
                     // "561s" 同屏各写一次，加上顶部状态栏就是三次 —— 数只留一处，这句退成它的标签
                     when {
                         moduleOff -> "卫星终端没在线，要发的内容先攒在手机这边"
-                        left == null -> "还没取到星历。取到之后这里就是过顶倒计时"
-                        left <= 0 -> "窗口开着，现在就能发"
-                        else -> "距下次过顶"
+                        left == null -> "还没拿到卫星位置数据。拿到之后，这里就是还要等多久"
+                        left <= 0 -> "卫星在头顶，能直接发"
+                        else -> "卫星还有多久来"
                     },
                     style = Type.Body,
                     // 相位突变（尤其"终端离线"和"开窗"）是这一卡唯一的新闻，得能被读出来

@@ -32,8 +32,8 @@ object SosCopy {
         val base = when {
             platformAcked -> "平台已回执"
             send.result == SatResult.COMPLETE -> "卫星已收到，正等平台回执"
-            send.via == SatPath.QUEUED && send.result == SatResult.NO_ACK -> "已存入终端队列，过境时自动发"
-            send.result == SatResult.NO_ACK -> "卫星未确认，请在开阔处等待下次过境"
+            send.via == SatPath.QUEUED && send.result == SatResult.NO_ACK -> "已存进终端，卫星下次经过时会自动发"
+            send.result == SatResult.NO_ACK -> "卫星没确认，请在开阔处等下一次卫星经过"
             else -> "本次没发出去：" + failPhrase(send.reason)
         }
         // 三态里除了"平台已回执"，剩下的都必须给一个可动作的时间，否则用户只能干等
@@ -51,26 +51,26 @@ object SosCopy {
         !send.accepted -> "撤销没送出去：" + failPhrase(send.reason) + "｜原报文仍在终端里，请再试一次"
         alreadyHanded -> "撤销报文已排队，但原 SOS 已交给终端，不保证赶在它前面｜请留意平台是否仍然来电"
         send.result == SatResult.COMPLETE -> "撤销已发出，卫星已收到撤销报文｜正等平台确认"
-        send.via == SatPath.QUEUED -> "撤销已存入终端队列，过境时随原报文一起发"
+        send.via == SatPath.QUEUED -> "撤销已存进终端，卫星下次经过时随原报文一起发"
         else -> "撤销报文已发出，未获卫星确认｜若平台联系，请说明误触"
     }
 
     fun failPhrase(reason: SatFailReason?): String = when (reason) {
         SatFailReason.NO_REPLY -> "终端没有回应，检查供电和连线"
         SatFailReason.TOO_LONG -> "报文超出终端报的长度等级上限"
-        SatFailReason.QUEUE_FULL -> "终端缓存已满，等下次过境后再补"
-        SatFailReason.DROPPED_BY_TIMEOUT -> "上次过境没发出去，已重新排队"
+        SatFailReason.QUEUE_FULL -> "终端缓存已满，等下次卫星经过后再补"
+        SatFailReason.DROPPED_BY_TIMEOUT -> "上次卫星经过时没发出去，已重新排队"
         SatFailReason.TRANSMIT_FAILED -> "终端发射失败"
         SatFailReason.NOT_PROVISIONED -> "终端还没就绪，正在建立会话"
         SatFailReason.UPGRADING -> "终端正在升级固件，升级期间发不出去，完成后会自动补发"
         null -> "原因未知"
     }
 
-    /** 「距下次过顶 4 分 49 秒」。星历没到手时宁可写"未知"，也不要显示 0 秒 */
+    /** 「下一颗卫星还有 4 分 49 秒才经过」。星历没到手时宁可写"还不知道"，也不要显示 0 秒 */
     fun nextPassPhrase(nextPassInS: Long?): String? = when {
-        nextPassInS == null -> "下次过顶时间未知"
-        nextPassInS <= 0 -> "正在过境窗口内"
-        else -> "距下次过顶 " + minuteSecond(nextPassInS)
+        nextPassInS == null -> "下一颗卫星什么时候经过还不知道"
+        nextPassInS <= 0 -> "卫星正在头顶，现在就能发"
+        else -> "下一颗卫星还有 " + minuteSecond(nextPassInS) + "才经过"
     }
 
     private fun minuteSecond(sec: Long): String {

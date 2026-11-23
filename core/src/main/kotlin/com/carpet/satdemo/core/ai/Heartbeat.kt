@@ -50,7 +50,9 @@ class Heartbeat(
             },
             Rule("eph.stale", 30 * 60_000) { c ->
                 if (c.ephemerisFresh != false) null
-                else ProactiveTip("pass.window", "星历过期了，过境时间算不准。联网更新一次 —— 不是没卫星。")
+                // owner 11-19 那条「翻译成用户能看懂的信息」：不说过境、不说星历过期 ——
+                // 车主只要知道"卫星几点来这件事现在算不准，连一下网就好，卫星本身没问题"
+                else ProactiveTip("pass.window", "好几天没更新卫星位置了，什么时候有卫星经过会算不准。连网更新一次就好 —— 卫星本身没问题。")
             },
             Rule("terminal.offline", 5 * 60_000) { c ->
                 if (c.moduleOnline != false) null

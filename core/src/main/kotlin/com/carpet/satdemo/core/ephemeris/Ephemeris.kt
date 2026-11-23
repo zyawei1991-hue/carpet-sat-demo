@@ -69,10 +69,12 @@ enum class EphState { SUCCESS, NETWORK_ERROR, TIME_OUT, CALCULATION_FAILED, NO_F
 object EphemerisCopy {
     fun failMessage(state: EphState): String? = when (state) {
         EphState.SUCCESS -> null
-        EphState.NETWORK_ERROR -> "星历数据已过期，请联网更新后重试"
-        EphState.TIME_OUT -> "星历计算超时，稍后自动重试"
-        EphState.CALCULATION_FAILED -> "星历算不出过境窗口，可能是仰角阈值设得太高"
-        EphState.NO_FIX -> "还没有定位，暂时算不出过境窗口"
+        // owner 2026-11-19「翻译成用户能看懂的话」：不念「星历」「窗口」这些行话，
+        // 但 E.9 那条红线不变 —— 每句都得让人看出该动手的是联网/等/改设置，不是举天线
+        EphState.NETWORK_ERROR -> "还没拿到卫星位置数据：联网更新一次就有。卫星在天上，只是还不知道它几点经过"
+        EphState.TIME_OUT -> "卫星位置这会儿没算出来，稍后会自动再算一次"
+        EphState.CALCULATION_FAILED -> "算不出卫星几点经过：它从头顶升得不够高，可能要调低可通信仰角"
+        EphState.NO_FIX -> "还不知道车在哪，先等定位，才能算卫星几点经过"
     }
 
     /** 这些说法会把"星历过期"伪装成"卫星没信号"，红线，不许出现在文案里 */

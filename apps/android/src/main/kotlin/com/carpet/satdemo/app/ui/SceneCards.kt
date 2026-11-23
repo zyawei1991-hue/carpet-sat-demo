@@ -42,7 +42,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
 import com.carpet.satdemo.app.MaintStore
+import com.carpet.satdemo.core.ai.TurnFrom
+import com.carpet.satdemo.core.ai.TurnScene
 import com.carpet.satdemo.core.devices.Device
+import com.carpet.satdemo.core.devices.DeviceKind
 import com.carpet.satdemo.core.devices.DeviceLink
 import com.carpet.satdemo.core.maint.Severity
 import com.carpet.satdemo.core.maint.Suggestion
@@ -395,15 +398,44 @@ fun VehicleEnergyCard(s: CardScope) {
     }
 }
 
+/**
+ * 亲子三张卡（owner 2026-11-19「产品自己说话」）：**只展示手机此刻真的知道的东西** ——
+ * 孩子设备台账（[CardScope.devices] 里 ChildDevice 那几台）、生效隐私档（底座和家长取更严）、
+ * 屏上原话（[CardScope.chat] 里 family 那几条）、模型端点（[CardScope.aiEndpoint]）。
+ * 上一版这三张里全是编的（37 分钟屏幕时长、5 个新词、"孩子问了 3 次为什么"），
+ * 换一组新的假数没有意义，没真源的读数直接删掉、给如实空态。
+ *
+ * 这三张**不打**「示意数据 · 未接真源」标：标由屏上内容的 source 驱动（§3），
+ * 屏上现在每一条都是真源——台账、生效隐私档、对话时间线、端点。
+ * 「孩子的设备 0 台」如实说 0 台，这不是示意数据，是实况。
+ */
 @Composable
 fun KidsControlCard(s: CardScope) {
-    InkCard(icon = MIcons.kid, mock = s.mock(Capability.ChildDevice)) {
-        CardTitle("亲子管控", trailing = "设备：项圈")
-        ValueRow("今日屏幕时长", "37 分钟 / 上限 60")
-        ValueRow("内容白名单", "故事、英语、汉字")
-        ValueRow("夜间禁用", "21:30 – 06:30")
+    val kids = s.devices.collectAsState().value.filter { it.kind == DeviceKind.ChildDevice }
+    val base = s.scene.collectAsState().value.profile.basePrivacy
+    val choice = s.privacyChoice.collectAsState().value
+    InkCard(icon = MIcons.kid) {
+        CardTitle("亲子管控", trailing = "孩子的设备 ${kids.size} 台")
+        if (kids.isEmpty()) {
+            Text(
+                "还没接入孩子的设备：限时、内容白名单这些要等设备上了台账才有东西可管",
+                style = Type.Caption,
+                color = Ink.TextLow,
+            )
+        } else {
+            kids.forEach { d -> ValueRow(d.title, linkLabel(d.link), tone = uiTone(d.tone)) }
+        }
+        ValueRow("生效隐私档", PrivacyTier.effective(base, choice).label)
+        Text("场景默认和家长设置取更严的那个", style = Type.Caption, color = Ink.TextLow)
+    }
+}
+
+@Composable
+fun KidsGrowthCard(s: CardScope) {
+    InkCard(icon = MIcons.growth) {
+        CardTitle("成长记录")
         Text(
-            "规则在家长手机上定，孩子那边没有「取消」",
+            "还没有同步过来的记录。新词、打卡、录音存在孩子设备本机，设备接入后这里才有数",
             style = Type.Caption,
             color = Ink.TextLow,
         )
@@ -411,22 +443,23 @@ fun KidsControlCard(s: CardScope) {
 }
 
 @Composable
-fun KidsGrowthCard(s: CardScope) {
-    InkCard(icon = MIcons.growth, mock = s.mock(Capability.ChildDevice)) {
-        CardTitle("成长记录")
-        ValueRow("今天新词", "5 个")
-        ValueRow("连续打卡", "12 天")
-        ValueRow("上次录音", "昨天 19:04")
-        Text("记录默认留在这台手机上，云端只存摘要", style = Type.Caption, color = Ink.TextLow)
-    }
-}
-
-@Composable
 fun KidsAiCard(s: CardScope) {
-    InkCard(icon = MIcons.model, mock = s.mock(Capability.AiAgent)) {
+    val endpoint = s.aiEndpoint.collectAsState().value
+    val quote = s.chat.collectAsState().value.lastOrNull {
+        it.scene == TurnScene.family && it.from == TurnFrom.Ai && it.text.isNotBlank()
+    }
+    InkCard(icon = MIcons.model) {
         CardTitle("AI 育儿", trailing = "只摘要，不判断")
-        Text("「今天孩子主动问了 3 次『为什么』，集中在机械类。」", style = Type.Body)
-        Text("「建议：把睡前故事换成齿轮主题的绘本。」", style = Type.Body)
+        if (quote == null) {
+            Text("屏上亲子页还没聊过天，这里就没有可引用的原话", style = Type.Caption, color = Ink.TextLow)
+        } else {
+            Text("「${quote.text}」", style = Type.Body)
+        }
+        ValueRow(
+            "模型端点",
+            if (endpoint.configured) endpoint.model else "没配：回答走本机话术",
+            tone = if (endpoint.configured) Tone.Ok else Tone.Wait,
+        )
         Text(
             "AI 不给孩子下结论，也不替家长处罚",
             style = Type.Caption,

@@ -99,15 +99,29 @@ private fun phaseCn(p: SatPhase?): String = when (p) {
 }
 
 /**
- * 「下一次过顶」那半句。**窗口内 secondsToNextPass 就是 0**，照字面念成了"还有 0 秒"，
- * 用户会以为星正在头顶，而其实我们已经锁住了 —— 那时候该说的是"正在窗口内"。
+ * 「下一颗卫星什么时候经过」那半句。**窗口内 secondsToNextPass 就是 0**，照字面念成了"还有 0 秒"，
+ * 用户会以为星正在头顶，而其实我们已经锁住了 —— 那时候该说的是"现在就能发"。
  * 空串表示这事现在没得说（还没算出过境时间），由调用方决定兜底话。
+ *
+ * 措辞不说过境/过顶（owner 2026-11-19：要翻译成用户能看懂的话）：
+ * 车主听得懂的是"卫星什么时候经过、那时候能不能发"，不是"窗口""过顶"这种行话。
  */
 internal fun passSentence(c: SkillContext): String = when {
-    phaseOf(c.phase)?.let { it in IN_WINDOW } == true -> "正在过境窗口内。"
+    phaseOf(c.phase)?.let { it in IN_WINDOW } == true -> "卫星正在头顶，现在就能发。"
     c.secondsToNextPass == null -> ""
-    c.secondsToNextPass <= 0 -> "窗口已经打开。"
-    else -> "下一次过顶还有 ${c.secondsToNextPass} 秒。"
+    c.secondsToNextPass <= 0 -> "卫星已经到位，现在就能发。"
+    else -> "还要 ${humanSpan(c.secondsToNextPass)}，下一颗卫星经过时才能发。"
+}
+
+/** 秒数说成人话：180 秒说成"3 分钟"，90 秒说成"1 分 30 秒" —— 没人会去心算 90 秒是多久 */
+internal fun humanSpan(sec: Int): String {
+    val m = sec / 60
+    val s = sec % 60
+    return when {
+        m <= 0 -> "$s 秒"
+        s == 0 -> "$m 分钟"
+        else -> "$m 分 $s 秒"
+    }
 }
 
 /**
@@ -145,8 +159,10 @@ object BuiltinSkills {
 
             Skill(
                 id = "pass.window",
-                title = "下次过境",
-                keywords = listOf("过境", "过顶", "窗口", "什么时候能发", "卫星"),
+                title = "卫星什么时候来",
+                // keywords 仍留着「过境/过顶/窗口」：车主可能还是这么问，路由要接得住；
+                // 改的只是**说出去的话**，不是**听得懂的话**
+                keywords = listOf("过境", "过顶", "窗口", "什么时候能发", "卫星", "什么时候来"),
                 needs = PermissionTier.ReadLocal,
             ) { c ->
                 val s = c.secondsToNextPass
@@ -161,9 +177,9 @@ object BuiltinSkills {
                     // 星历过期时不能说"没有卫星"，那是两件事（附录 E.9）
                     line = when {
                         c.ephemerisFresh == false ->
-                            "星历已经过期，窗口算不准了。联网更新一次才能给时间 —— 这不是说没卫星。"
-                        else -> passSentence(c).ifEmpty { "还没有可用的过境时间。" } +
-                            (c.passWindowSec?.takeIf { it > 0 }?.let { "窗口大约 $it 秒。" } ?: "")
+                            "卫星位置数据好几天没更新了，什么时候经过会算不准。连网更新一次就好 —— 卫星还在，只是不知道它几点到。"
+                        else -> passSentence(c).ifEmpty { "现在还说不准卫星什么时候经过。" } +
+                            (c.passWindowSec?.takeIf { it > 0 }?.let { "经过时能发 ${humanSpan(it)}。" } ?: "")
                     },
                 )
             },

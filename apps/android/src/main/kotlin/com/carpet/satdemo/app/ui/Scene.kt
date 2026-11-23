@@ -2,6 +2,8 @@ package com.carpet.satdemo.app.ui
 
 import androidx.compose.runtime.Composable
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.core.ai.AiEndpoint
+import com.carpet.satdemo.core.ai.Turn
 import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.runtime.DemoRuntime
 import com.carpet.satdemo.core.vehicle.ReadingBoard
@@ -189,6 +191,15 @@ class CardScope(val app: AppRuntime, val status: DemoRuntime.Status) {
 
     /** 全局开关位。设备中心那张卡的「允许圆屏接入」读它 */
     val flags: StateFlow<AppRuntime.Flags> = app.flags
+
+    /**
+     * 屏上原话：那一份唯一的对话时间线。亲子那几张卡只许**引用**这里的真实句子，
+     * 不许现场编一句"漂亮话" —— 编出来的摘要正是 §5.3 最尴尬的那种假真源。
+     */
+    val chat: StateFlow<List<Turn>> = app.chat
+
+    /** 当前真正配上的模型端点。AI 那张卡「接没接上模型」由它说，不由美术说 */
+    val aiEndpoint: StateFlow<AiEndpoint> = app.aiEndpoint
 
     fun avail(c: Capability): Availability = app.availability(c)
 

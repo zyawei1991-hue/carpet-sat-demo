@@ -275,7 +275,7 @@ fun SosCard(s: CardScope) {
         }
         if (!idle) {
             Text(
-                "没确认时换到开阔处再按一次，比等下次过境快",
+                "没确认时换到开阔处再按一次，比等下一颗卫星快",
                 style = Type.Caption,
                 color = Ink.TextLow,
             )
@@ -413,7 +413,7 @@ fun PassWindowCard(s: CardScope) {
     // 版式就是真数据那一版的形状（一个大数字 + 一行说明 + 一根条），落地时一个字都不位移
     if (s.snap == null) {
         InkCard(icon = MIcons.pass, tone = Tone.Neutral) {
-            CardTitle("下次过境")
+            CardTitle("卫星什么时候来")
             SkeletonBar(width = 112.dp, height = 28.dp)
             SkeletonBar(width = 188.dp)
         }
@@ -425,12 +425,12 @@ fun PassWindowCard(s: CardScope) {
         // 那条路要走定位，不是走星历
         val canRetry = sat?.ephState != null && sat.ephState != EphState.NO_FIX
         InkCard(icon = MIcons.pass, tone = Tone.Neutral, mock = mock) {
-            CardTitle("下次过境")
+            CardTitle("卫星什么时候来")
             BlockError(
                 reason = when {
-                    sat?.ephState == null -> "这一屏没有星历源，算不出窗口"
-                    ephOk -> "星历可用，但这一轮还没排上窗口"
-                    else -> sat?.ephFail ?: "星历暂时算不出来：先连一次网，不必举着天线等"
+                    sat?.ephState == null -> "这一屏还没拿到卫星位置数据，算不出时间"
+                    ephOk -> "卫星位置是新的，但这几个小时排不出能发的时间"
+                    else -> sat?.ephFail ?: "暂时算不出卫星几点经过：先连一次网，不用举着天线等"
                 },
                 lastOkAtMs = sat?.ephOkAtMs,
                 busy = retrying,
@@ -447,11 +447,11 @@ fun PassWindowCard(s: CardScope) {
     val tone = if (sat?.phase == SatPhase.locked || inWindow) Tone.Ok else Tone.Sat
     val c = tone.color
     InkCard(icon = MIcons.pass, tone = tone, mock = mock) {
-        CardTitle("下次过境", trailing = sat?.satName?.let { "锁定 $it" })
+        CardTitle("卫星什么时候来", trailing = sat?.satName?.let { "锁定 $it" })
         // 第一行只回答"还要等多久"这一个问题：数字等宽（1Hz 跳秒不抖行），后面跟一句人话
         if (left == null) {
             // 窗口算出来了、进入时间没算出来：这是真状态，不许画一个 0:00 让人以为现在就能发
-            Text("这一轮窗口已知，进入时间还在算", style = Type.Body, color = Ink.TextMid)
+            Text("知道这一轮卫星会来，几点到还在算", style = Type.Body, color = Ink.TextMid)
         } else {
             Row(
                 verticalAlignment = Alignment.Bottom,
@@ -465,7 +465,7 @@ fun PassWindowCard(s: CardScope) {
                     Text(t, style = Type.Numeric.copy(color = c))
                 }
                 Text(
-                    if (inWindow) "窗口开着，能直接发" else "后进入窗口",
+                    if (inWindow) "卫星在头顶，能直接发" else "后卫星来，那时候能发",
                     style = Type.Body,
                     color = Ink.TextMid,
                     modifier = Modifier.padding(bottom = 2.dp),
@@ -476,13 +476,13 @@ fun PassWindowCard(s: CardScope) {
         if (left != null && !inWindow && dur > 0) {
             StackedBar(listOf(left.toInt().coerceAtLeast(1) to Ink.Track, dur.toInt() to c))
             // "还要等"不再重复念一遍：上面的大数字就是它。图例只解释第二段是什么
-            LegendDot(c, "之后窗口能发", minuteOnly(dur))
+            LegendDot(c, "卫星在的时候能发", minuteOnly(dur))
         }
         // 仰角和"够不够用"合成一句：分开写的话没人会分别读它们
         maxEl?.let { el ->
             Text(
-                if (el < 20) "最大仰角 %.0f°，偏低：楼和山体容易挡".format(el)
-                else "最大仰角 %.0f°，够用".format(el),
+                if (el < 20) "卫星最高只升 %.0f°，偏低：楼和山体容易挡住".format(el)
+                else "卫星最高升 %.0f°，够高，挡不太住".format(el),
                 style = Type.Caption,
                 color = if (el < 20) Ink.Wait else Ink.TextMid,
             )
@@ -737,7 +737,7 @@ fun UsageCard(s: CardScope) {
             ValueRow("交给终端 / 总额度", if (u.capacity > 0) "${u.handedOver} / ${u.capacity}" else "${u.handedOver} / 还不知道")
             ValueRow("还在手机里排队", "${u.waiting} 条")
             ValueRow("没发出去丢掉的", if (u.dropped > 0) "${u.dropped} 条" else "0", if (u.dropped > 0) Tone.Alert else Tone.Neutral)
-            ValueRow("过境后收回来", "${u.reclaimed} 条")
+            ValueRow("卫星用完收回来", "${u.reclaimed} 条")
         }
         Text(
             if (u.model == null) "还没认出台端型号，总额度先空着"

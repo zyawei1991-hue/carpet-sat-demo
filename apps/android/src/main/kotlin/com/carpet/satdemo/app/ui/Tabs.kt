@@ -97,7 +97,7 @@ fun VehicleTab(app: AppRuntime, status: DemoRuntime.Status, modifier: Modifier =
             ask,
             screenOnThisPage = vm.isScreenOnPage(status.screenPage),
             placeholder = "问一句这辆车",
-            prompts = listOf("车在哪", "下次过境", "围栏开着吗"),
+            prompts = listOf("车在哪", "卫星什么时候来", "围栏开着吗"),
             onAsk = vm::ask,
         )
         CardStream(cards, scope, grouped = true)
@@ -170,7 +170,7 @@ fun MeTab(
             ToggleRow("允许圆屏接入", ready.flags.acceptScreens, "开着才能把新圆屏配对进来；关掉后陌生设备一律拒绝") {
                 vm.setAcceptScreens(it)
             }
-            ToggleRow("演示模式", ready.flags.demoMode, "把等待和过境都缩到几分钟，演示时一次看完") {
+            ToggleRow("演示模式", ready.flags.demoMode, "把等待和卫星经过都缩到几分钟，演示时一次看完") {
                 vm.setDemoMode(it)
             }
         }

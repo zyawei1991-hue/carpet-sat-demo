@@ -100,6 +100,9 @@ class MaintCardRenderTest {
         // 1.20.0 把「工单」口语化成「保养单」，测试跟着界面走，不跟文档走
         compose.onNodeWithText("生成保养单").performClick()
         compose.waitForIdle()
+        // 806454c 起工单原文又收进一层折叠：不点它就是一张"没展开"的图，还自以为测过了
+        compose.onNodeWithText("看工单原文").performClick()
+        compose.waitForIdle()
         // 保养单展开了：VIN 那两行就在 describe() 里，说明勾中的两项真的拼成了单
         compose.onNode(hasText("VIN…", substring = true)).assertExists()
         // 红线：还没接上行，就不许有任何"已经送到"的说法（substring，防它藏在长句里）

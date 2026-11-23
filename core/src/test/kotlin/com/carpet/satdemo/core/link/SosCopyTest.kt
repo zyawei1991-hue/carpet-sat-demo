@@ -72,8 +72,8 @@ class SosCopyTest {
     @Test
     fun `排队路径说不清过境就不算发出去`() {
         val line = SosCopy.statusLine(SatSend(SatResult.NO_ACK, SatPath.QUEUED, messageId = 7))
-        assertTrue(line.contains("终端队列"), "排队态要说清楚是存进了队列：$line")
-        assertTrue(line.contains("下次过顶"), "还没过境，必须给出可等的动作：$line")
+        assertTrue(line.contains("终端"), "排队态要说清楚是存进了终端：$line")
+        assertTrue(line.contains("卫星下次经过"), "还没过境，必须给出可等的动作：$line")
     }
 
     /** NO_ACK 和 FAIL 该做的动作不一样（前者等过境、后者换开阔地重发），文案不能撞车 */
@@ -102,9 +102,9 @@ class SosCopyTest {
     /** 星历没到手时显示 0 秒，会被读成"马上就好" —— 这是最坏的一种撒谎 */
     @Test
     fun `没有星历时不说零秒`() {
-        assertTrue(SosCopy.nextPassPhrase(null)!!.contains("未知"))
+        assertTrue(SosCopy.nextPassPhrase(null)!!.contains("还不知道"))
         assertFalse(SosCopy.nextPassPhrase(null)!!.contains("0"))
         assertTrue(SosCopy.nextPassPhrase(289L)!!.contains("4 分 49 秒"))
-        assertTrue(SosCopy.nextPassPhrase(-1L)!!.contains("窗口内"))
+        assertTrue(SosCopy.nextPassPhrase(-1L)!!.contains("现在就能发"))
     }
 }

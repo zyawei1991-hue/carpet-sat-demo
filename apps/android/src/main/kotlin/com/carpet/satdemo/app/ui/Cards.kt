@@ -39,7 +39,7 @@ object Cards {
             // 卫星守护：数据全部来自 StatePayload / DemoRuntime，没有一张卡可以自己编数
             CardDescriptor("sos", "紧急求助", CardGroup.Guard, setOf(Capability.SatelliteLink)) { SosCard(it) },
             CardDescriptor("link", "链路", CardGroup.Inline, setOf(Capability.SatelliteLink)) { LinkCard(it) },
-            CardDescriptor("pass", "下次过境", CardGroup.Satellite, setOf(Capability.Ephemeris)) { PassWindowCard(it) },
+            CardDescriptor("pass", "卫星什么时候来", CardGroup.Satellite, setOf(Capability.Ephemeris)) { PassWindowCard(it) },
             CardDescriptor("terminal", "卫星终端", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { TerminalCard(it) },
             CardDescriptor("queue", "待发消息", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { QueueCard(it) },
             CardDescriptor("usage", "卫星用量", CardGroup.Satellite, setOf(Capability.SatelliteLink)) { UsageCard(it) },

@@ -17,12 +17,6 @@ import com.carpet.satdemo.core.protocol.UiEmotion
  */
 object CardPolicy {
 
-    /**
-     * 窗口外还有这么多秒也算"要过境了"——屏上那个 mm:ss 倒计时得先于窗口出现。
-     * 但这条只在**蜂窝不顶用**时才生效，理由见 [decide] 里那段注释。
-     */
-    const val SOON_IN_S = 120
-
     /** 答句上屏之后留这么久。过了就回到该说的事，不让一句话一直占着整张圆屏 */
     const val DIALOG_FRESH_MS = 30_000
 
@@ -76,18 +70,13 @@ object CardPolicy {
         if (snap.fence.active && !snap.fence.inside) {
             return Decision(UiCard.status, UiEmotion.worried, "已越界")
         }
-        // 倒计时卡**不抢一条还好的蜂窝**。这条限定是有代价的取舍：
-        // 星座 12 分钟一轮，光按"窗口还有 N 秒"切卡的话，屏每 12 分钟就会被一次
-        // 谁都不关心的过境劫走，坐在车里的家长看到的是同一张卫星卡反复弹上来。
-        // 只有网没了、卫星开始变成"唯一那条路"时，它才真的值得占住整块屏。
-        val inS = snap.sat.nextPassInS
-        if (inS != null && inS <= SOON_IN_S && !snap.link.cellOk) {
-            return if (inS <= 0) Decision(UiCard.sat, UiEmotion.excited, "窗口开着，卫星顶上了")
-            else Decision(UiCard.sat, UiEmotion.worried, "蜂窝不顶用，窗口还有 ${inS}s")
-        }
+        // 过境窗口**不再自己抢屏**（owner 2026-11-19：「卫星过境和用户平时都没啥关系，正常不用提醒」）。
+        // 原来这里有一条"蜂窝不顶用且窗口 ≤120s 就切倒计时卡"的分支，代价是每次例行的 12 分钟
+        // 一圈都能把屏劫走一次。现在窗口信息留在状态卡那行里，车主想看就看，屏不再主动弹。
+        // 呼救没走完那一条仍在上面 —— 那时候过境确实和车主有关，但那是 SOS 卡，不是这条。
         // 戳屏排在对话之前：有人刚在这块玻璃上做过动作，先给他一张会动的脸，
         // 否则"点了没反应"就是他被劝退的那一秒。
-        // 但它排在上面三条安全话轮之后 —— 一次触摸不能把倒计时、越界、过境窗口劫走，
+        // 但它排在上面两条安全话轮之后 —— 一次触摸不能把越界、呼救劫走，
         // 这也是屏只能发请求、不能自己切卡的全部理由
         if (pokeAtMs != null && nowMs - pokeAtMs < POKE_FRESH_MS) {
             return Decision(UiCard.emotion, UiEmotion.excited, "刚被戳了一下")

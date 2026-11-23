@@ -76,7 +76,7 @@ class DemoEngineEphemerisTest {
         assertEquals(modemValue, e.nextPassInS, "星历失灵时宁可退回粗估，也别把倒计时整条抹掉")
 
         val sat = e.snapshot().sat
-        assertEquals("星历数据已过期，请联网更新后重试", sat.ephFail)
+        assertEquals("还没拿到卫星位置数据：联网更新一次就有。卫星在天上，只是还不知道它几点经过", sat.ephFail)
         for (forbidden in EphemerisCopy.FORBIDDEN) {
             assertFalse(sat.ephFail!!.contains(forbidden), "把星历问题说成卫星问题，用户会举着天线干等（E.9）：${sat.ephFail}")
         }
@@ -89,6 +89,6 @@ class DemoEngineEphemerisTest {
         val (e, _) = engineWith(c, EphResult(EphState.SUCCESS, emptyList(), 1L))
         val status = e.tickEphemeris()!!
         assertEquals(EphState.NO_FIX, status.state)
-        assertEquals("还没有定位，暂时算不出过境窗口", e.snapshot().sat.ephFail)
+        assertEquals("还不知道车在哪，先等定位，才能算卫星几点经过", e.snapshot().sat.ephFail)
     }
 }

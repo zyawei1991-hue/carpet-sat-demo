@@ -697,7 +697,7 @@ class AppRuntime(private val host: Application) {
     val voicePreviewing: StateFlow<Boolean> get() = voice.previewing
 
     /** 在手机上试听一句：不经过圆屏，用来先把"引擎有没有声"和"圆屏收没收"分开 */
-    fun previewVoice(text: String = "我在。信号正常，卫星还有十二分钟过顶。") {
+    fun previewVoice(text: String = "我在。信号正常，十二分钟后卫星就来。") {
         voice.speakOnPhone(text)
     }
 
@@ -895,7 +895,7 @@ class AppRuntime(private val host: Application) {
         dialog.log.append(
             Turn(
                 from = TurnFrom.Ai,
-                text = "我在。问「链路」「过境」「额度」「圆屏配对」「车在哪」都能答。",
+                text = "我在。问「链路」「卫星什么时候来」「额度」「圆屏配对」「车在哪」都能答。",
                 source = ReplySource.LocalRule,
                 turnId = "t-greet",
             ),
@@ -976,8 +976,8 @@ class AppRuntime(private val host: Application) {
                 _ephRetrying.value = false
                 say(
                     when {
-                        status == null -> "这一屏没有星历源，重试没有东西可算"
-                        status.state == EphState.SUCCESS -> "星历重算完了，窗口出来了"
+                        status == null -> "这一屏还没拿到卫星位置数据，重试没有东西可算"
+                        status.state == EphState.SUCCESS -> "卫星位置重算完了，几点能发排出来了"
                         else -> "还是算不出来：" + (status.failMessage ?: "终端没回应")
                     },
                 )

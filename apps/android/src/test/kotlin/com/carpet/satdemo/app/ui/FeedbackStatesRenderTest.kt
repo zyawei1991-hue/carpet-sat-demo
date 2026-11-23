@@ -93,14 +93,14 @@ class FeedbackStatesRenderTest {
                     InkCard {
                         Text("这一块坏了：说清哪没拿到、上次成功是几点、能做什么", style = Type.Caption)
                         BlockError(
-                            reason = "星历数据已过期，联网更新后重试",
+                            reason = "还没拿到卫星位置数据：联网更新一次就有。卫星在天上，只是还不知道它几点经过",
                             lastOkAtMs = EPOCH_0914,
                             onRetry = { },
                         )
                         // 按下去那一下换成不可点的同尺寸标签：字换了但卡片不能跟着抖
-                        BlockError(reason = "星历数据已过期，联网更新后重试", lastOkAtMs = EPOCH_0914, busy = true, onRetry = { })
+                        BlockError(reason = "还没拿到卫星位置数据：联网更新一次就有。卫星在天上，只是还不知道它几点经过", lastOkAtMs = EPOCH_0914, busy = true, onRetry = { })
                         // 从没成功过：那一行整个不写；没定位时「重试」也不给，按十次也是这句
-                        BlockError(reason = "还没有定位，暂时算不出过境窗口")
+                        BlockError(reason = "还不知道车在哪，先等定位，才能算卫星几点经过")
                     }
                 }
             }

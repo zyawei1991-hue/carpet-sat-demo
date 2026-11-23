@@ -21,13 +21,14 @@ class AnswerMoodTest {
     fun `说不好就担心`() {
         assertEquals(UiEmotion.worried, AnswerMood.of("这件事我现在没有数据，不能凭印象答。"))
         assertEquals(UiEmotion.worried, AnswerMood.of("已经越界了。"))
-        assertEquals(UiEmotion.worried, AnswerMood.of("还没有可用的过境时间。"))
+        assertEquals(UiEmotion.worried, AnswerMood.of("现在还说不准卫星什么时候经过。"))
     }
 
-    /** 现场最常出现的那一句：链路是好的，倒计时还在走 —— 读成好消息，不是担心 */
+    /** 现场最常出现的那一句：链路是好的，只是还没到时间 —— 读成好消息，不是担心 */
     @Test
-    fun `在线就是在线，哪怕后面还有数字`() {
-        assertEquals(UiEmotion.happy, AnswerMood.of("当前相位 待命，GT1005 在线。下一次过顶还有 678 秒。"))
+    fun `在线就是在线，哪怕还要等一会儿`() {
+        assertEquals(UiEmotion.happy, AnswerMood.of("当前相位 待命，GT1005 在线。还要 11 分 18 秒，下一颗卫星经过时才能发。"))
+        assertEquals(UiEmotion.happy, AnswerMood.of("当前相位 已锁定，GT1005 在线。卫星正在头顶，现在就能发。"))
     }
 
     @Test

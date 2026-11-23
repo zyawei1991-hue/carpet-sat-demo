@@ -444,7 +444,7 @@ private enum class Field { SAT, DIALOG, SOS, CARD, EMOTION, NONE }
 
 private fun pageRows(page: ScreenPage): List<Pair<String, Field>> = when (page) {
     ScreenPage.vehicle -> listOf("卫星" to Field.SAT, "对话" to Field.DIALOG, "呼救" to Field.SOS)
-    ScreenPage.kids -> listOf("对话" to Field.DIALOG, "过境" to Field.SAT, "安全" to Field.SOS)
+    ScreenPage.kids -> listOf("对话" to Field.DIALOG, "卫星" to Field.SAT, "安全" to Field.SOS)
     ScreenPage.avatar -> listOf("答句" to Field.DIALOG, "情绪" to Field.EMOTION)
     ScreenPage.clock -> listOf("钟面" to Field.CARD)
     ScreenPage.gallery -> listOf("图片" to Field.NONE)
