@@ -91,6 +91,18 @@ class AudioChunksTest {
         assertNull(AudioChunks.wavToPcm16k("not a wav at all".toByteArray()))
     }
 
+    @Test
+    fun `峰值当场量：全零和有声分得开`() {
+        // #76 的收口件：屏侧「播放中 level 0.00」时，这一把尺先分清是解码出了零还是链路出了零
+        val silent = ByteArray(64)
+        assertEquals(0, AudioChunks.peakAmp(silent))
+        // 0x0100=256 和 -32768（0x8000）：绝对值最大落在 MIN_VALUE 上，正好踩那条补码特判
+        val loud = byteArrayOf(0, 1, 0, 0, 0, 0, 0, 0, 0x00.toByte(), 0x80.toByte(), 0, 0)
+        assertEquals(32768, AudioChunks.peakAmp(loud))
+        // 落单的最后 1 字节（奇数长）不许读越界
+        assertEquals(0, AudioChunks.peakAmp(ByteArray(3)))
+    }
+
     private fun framesOf(body: ByteArray) = AudioChunks.commands("t-abcdefghij-999", body, 1_700_000_000_000)
 
     /** 造一份 WAV：fmt 块后面可以带 0 或 2 个字节的扩展（System.Speech 带 2） */

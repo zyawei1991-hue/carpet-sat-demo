@@ -121,6 +121,23 @@ object AudioChunks {
     fun secondsOf(pcmBytes: Int): Double = pcmBytes.toDouble() / (SAMPLE_RATE * 2)
 
     /**
+     * s16le 单声道 PCM 的绝对值峰值（max|s|，0 = 整段静音）。
+     * #76 的收口件：合成出全零 PCM 曾被当成"链路/屏坏了"查了两天，
+     * 峰值当场量一次，"解码出了零"和"传输出了零"才分得开。
+     */
+    fun peakAmp(pcm: ByteArray): Int {
+        var max = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val v = ((pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)).toShort().toInt()
+            val a = if (v == Short.MIN_VALUE.toInt()) 32768 else kotlin.math.abs(v)
+            if (a > max) max = a
+            i += 2
+        }
+        return max
+    }
+
+    /**
      * 任意 WAV → 屏要的形状（[SAMPLE_RATE] / 单声道 / s16le）。format 里缺项或不是 16 位就返回 null。
      *
      * 为什么不能直接用 [wavToPcm]：手机上 `android.speech.tts` 的 `synthesizeToFile` 输出的是

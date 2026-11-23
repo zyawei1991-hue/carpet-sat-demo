@@ -135,7 +135,16 @@ class DemoGuardService : Service() {
             u.model == null || u.capacity <= 0 -> null
             else -> "${u.model} 剩 ${u.slotsLeft} 条"
         }
+        // #8 旧账「围栏越界只发到屏、不发家长手机」：越界这一行进通知栏，
+        // 家长没开着 App 也看得见；在内不打扰，那一格宁可空着
+        val f = st.snapshot?.fence
+        val fence = when {
+            f == null || !f.active || f.inside -> null
+            else -> "已越界${f.name?.let { " $it" } ?: ""}" +
+                (f.distM?.let { "，距边界 ${kotlin.math.abs(it).toInt()} 米" } ?: "")
+        }
         return listOfNotNull(
+            fence,
             "链路 $link",
             "圆屏 ${st.clients} 台",
             if (u.waiting > 0) "待补发 ${u.waiting} 条" else null,

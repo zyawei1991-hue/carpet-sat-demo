@@ -871,7 +871,15 @@ class ScreenVoice(
                 return null
             }
             // 系统引擎这条路同样量一次峰值：TTS 合成出零和网络那条是两种病因，日志要认得出来
+            val amp = AudioChunks.peakAmp(pcm)
             log("屏幕语音：解码 PCM ${pcm.size} B，peak=${peakOf(pcm)}（源 system）")
+            // #76 收口：peak=0 就是合成器交回来一段静音，推给屏只会换来"屏不出声"。
+            // 本机接住、把原因摆在设置页 —— 静音从"要现场猜"变成"当场可查可听"
+            if (amp == 0) {
+                speakHere(engine, text)
+                gate("这句合成出来是一段静音，屏收不到声音，先在手机上念了")
+                return null
+            }
             _source.value = "system"
             val frames = AudioChunks.commands(turnId, pcm, System.currentTimeMillis(), seqStart, bytesBefore + pcm.size)
             if (frames.isEmpty()) {
@@ -947,18 +955,28 @@ class ScreenVoice(
                 log(
                     "屏幕语音：解码 PCM ${pcm.size} B，peak=${peakOf(pcm)}（mp3 ${mp3.size} B，源 ${_source.value ?: "-"}）"
                 )
-                // commands() 超帧上限会抛：那是一句"编不进 4096"的硬错，别让它把整句吞掉
-                val frames = runCatching {
-                    AudioChunks.commands(turnId, pcm, System.currentTimeMillis(), seqStart, bytesBefore + pcm.size)
-                }.onFailure {
-                    log("屏幕语音：语音切块失败（${it.message}），这句只在本机响")
-                }.getOrDefault(emptyList())
-                if (frames.isNotEmpty()) {
-                    link.broadcast(frames)
-                    log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
-                    screenGot = true
-                    sentBytes = pcm.size
-                    sentFrames = frames.size
+                val amp = AudioChunks.peakAmp(pcm)
+                log(
+                    "屏幕语音：解码 PCM ${pcm.size} B，peak=${peakOf(pcm)}（mp3 ${mp3.size} B，源 ${_source.value ?: "-"}）"
+                )
+                // #76 收口：解码回来全零就不推 —— 推了屏也是"播放中 level 0.00"，等于把静音事故原样转交给现场。
+                // 这一段不置 screenGot，下面"屏一个字节都没收到"那条本机路会接住；换源重合成是下一步
+                if (amp > 0) {
+                    // commands() 超帧上限会抛：那是一句"编不进 4096"的硬错，别让它把整句吞掉
+                    val frames = runCatching {
+                        AudioChunks.commands(turnId, pcm, System.currentTimeMillis(), seqStart, bytesBefore + pcm.size)
+                    }.onFailure {
+                        log("屏幕语音：语音切块失败（${it.message}），这句只在本机响")
+                    }.getOrDefault(emptyList())
+                    if (frames.isNotEmpty()) {
+                        link.broadcast(frames)
+                        log("屏幕语音：网络合成 ${AudioChunks.secondsOf(pcm.size)} 秒语音已推给屏，${frames.size} 块")
+                        screenGot = true
+                        sentBytes = pcm.size
+                        sentFrames = frames.size
+                    }
+                } else {
+                    log("屏幕语音：网络合成的 PCM 全零（peak=0.00，源 ${_source.value ?: "-"}），这句不推给屏")
                 }
             }
         }
@@ -1017,18 +1035,8 @@ class ScreenVoice(
         }
     }
 
-    /** 16k 单声道 s16le 的绝对值峰值（0.00–1.00），和屏侧 mic 那条同一个算法：max|s|/32768 */
-    private fun peakOf(pcm: ByteArray): String {
-        var max = 0
-        var i = 0
-        while (i + 1 < pcm.size) {
-            val v = ((pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)).toShort().toInt()
-            val a = if (v == Short.MIN_VALUE.toInt()) 32768 else kotlin.math.abs(v)
-            if (a > max) max = a
-            i += 2
-        }
-        return "%.2f".format(max / 32768.0)
-    }
+    /** 16k 单声道 s16le 的绝对值峰值（0.00–1.00），算法在 [AudioChunks.peakAmp]，和屏侧 mic 那条同一把尺 */
+    private fun peakOf(pcm: ByteArray): String = "%.2f".format(AudioChunks.peakAmp(pcm) / 32768.0)
 
     fun release() {
         runCatching { stopPhonePlayer() }
