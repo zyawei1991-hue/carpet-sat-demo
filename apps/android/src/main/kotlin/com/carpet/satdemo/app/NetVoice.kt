@@ -8,6 +8,7 @@ import android.media.MediaPlayer
 import com.carpet.satdemo.core.ai.AudioChunks
 import com.carpet.satdemo.core.ai.AzureSpeech
 import com.carpet.satdemo.core.ai.EdgeSpeech
+import com.carpet.satdemo.core.ai.SynthLru
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -53,22 +54,38 @@ internal object NetVoice {
     /** 晓伊的基频，把音色档的音高倍数换算成 prosody 的赫兹偏移 */
     private const val XIAOYI_BASE_HZ = 324.0
 
-    /** 这句是谁念的：`azure` = Azure 晓伊，`edge` = Edge 晓伊，`baidu` = 百度那条兜底 */
+    /** 这句是谁念的：`azure` = Azure 晓伊，`edge` = Edge 晓伊，`baidu` = 百度那条兜底；带 `·缓存` = §5.1-3 命中的旧合成 */
     @Volatile
     var lastSource: String? = null
         private set
 
+    /** §5.1-3：6 MB 够用一整晚 —— 固定提醒就那几句，重复命中撑死占零头 */
+    private val cache = SynthLru(6L * 1024 * 1024)
+
     /**
      * 合成一句，拿回 MP3 字节（null = 三条路都不通）。
+     * 同一句 + 同一音色档只走一趟云端：冷却到点原样再来的主动播报从这里开始不再重打。
      * 不做重试：答句晚了三秒比晚六秒更糟，失败就换下一条。
-     *
-     * Azure（D13 的正路，配了 key 才参与）排在 Edge 前面：同一个晓伊，
-     * 但走的是微软公开契约，不吃"接口改算法"那种整条翻车的险。
      */
     fun fetch(text: String, tone: VoiceTone): ByteArray? {
         val body = text.trim().take(MAX_CHARS)
         if (body.isEmpty()) return null
+        val key = "$body|${tone.rate}|${tone.pitch}"
+        cache.get(key)?.let { hit ->
+            // 报"哪条路给的"时带上·缓存：日志里这一格不许冒充这现打了一趟
+            lastSource = "${hit.source}·缓存"
+            return hit.bytes
+        }
+        val mp3 = synthesize(body, tone) ?: return null
+        cache.put(key, SynthLru.Entry(mp3, lastSource ?: "-"))
+        return mp3
+    }
 
+    /**
+     * 真打一趟云端。Azure（D13 的正路，配了 key 才参与）排在 Edge 前面：同一个晓伊，
+     * 但走的是微软公开契约，不吃"接口改算法"那种整条翻车的险。
+     */
+    private fun synthesize(body: String, tone: VoiceTone): ByteArray? {
         val ratePercent = Math.round((tone.rate - 1f) * 100f)
         val pitchHz = Math.round(XIAOYI_BASE_HZ * (tone.pitch - 1.0)).toInt()
 
