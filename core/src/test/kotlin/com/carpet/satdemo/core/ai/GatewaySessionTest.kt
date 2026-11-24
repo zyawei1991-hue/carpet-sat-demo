@@ -38,8 +38,8 @@ class GatewaySessionTest {
             sessionWindowMs = sessionWindowMs,
         )
 
-        fun ask(q: String, scene: TurnScene? = null) =
-            runBlocking { gw.ask(q, SkillContext(scene = "车"), scene) }
+        fun ask(q: String, scene: TurnScene? = null, turnId: String? = null) =
+            runBlocking { gw.ask(q, SkillContext(scene = "车"), scene, turnId) }
     }
 
     @Test
@@ -79,5 +79,31 @@ class GatewaySessionTest {
         r.ask("娃说了啥", TurnScene.family)
         assertTrue(r.spy.seen.last().isEmpty(), r.spy.seen.last().toString())
         assertFalse(r.logs.any { it.contains("守护") }, "过期日志只报清掉的那条道")
+    }
+
+    @Test
+    fun `轮次 id 随历史每条进网关 正文里不掺前缀`() {
+        val r = Rig()
+        r.ask("你好呀", turnId = "t-1")
+        r.ask("它刚才说什么了", turnId = "t-2")
+        // 第二轮模型看到的上一轮：一问一答都带着 t-1，正文干净（前缀只在上线序列化时钉）
+        assertEquals(listOf("t-1", "t-1"), r.spy.seen[1].map { it.turnId })
+        assertEquals(listOf("你好呀", "第1答。"), r.spy.seen[1].map { it.content })
+    }
+
+    @Test
+    fun `轮次 id 钉在发给模型的正文前`() {
+        var sentBody = ""
+        val p = OpenAiCompatProvider(
+            AiEndpoint("https://gw.example/v1", "k", "m"),
+            transport = { _, body, _ -> sentBody = body; """{"choices":[{"message":{"content":"好。"}}]}""" },
+        )
+        runBlocking {
+            p.complete("事实", listOf(ChatTurn("user", "今天心情不错", "t-1"), ChatTurn("assistant", "那就好", "t-1")), "然后呢")
+        }
+        assertTrue(sentBody.contains("[t-1] 今天心情不错"), sentBody)
+        assertTrue(sentBody.contains("[t-1] 那就好"), sentBody)
+        // 本轮问句没带 id 就不许凭空钉
+        assertFalse(sentBody.contains("[null] 然后呢"), sentBody)
     }
 }

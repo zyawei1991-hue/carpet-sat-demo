@@ -79,6 +79,8 @@ class AiGateway(
         question: String,
         ctx: SkillContext,
         scene: TurnScene? = null,
+        /** §5.2 多轮指代：这一轮的轮次 id，进历史、发给模型时钉在正文前 */
+        turnId: String? = null,
         onSentence: (String) -> Unit = {},
         onLocalFirst: (AiReply) -> Unit = {},
     ): AiReply {
@@ -97,6 +99,7 @@ class AiGateway(
                 else AiReply(noMatch(persona), skill = null, source = ReplySource.LocalFallback),
                 q,
                 persona,
+                turnId,
             )
         }
 
@@ -112,6 +115,7 @@ class AiGateway(
                 ),
                 q,
                 persona,
+                turnId,
             )
         }
 
@@ -158,14 +162,15 @@ class AiGateway(
             ),
             q,
             persona,
+            turnId,
         )
     }
 
-    private fun record(reply: AiReply, question: String, persona: Persona): AiReply {
+    private fun record(reply: AiReply, question: String, persona: Persona, turnId: String?): AiReply {
         // 历史按人格分道（§5.2），入哪条道、下次从哪条道取，都跟这轮的人格走
         val t = trackFor(persona)
-        t.turns.addLast(ChatTurn("user", question))
-        t.turns.addLast(ChatTurn("assistant", reply.text))
+        t.turns.addLast(ChatTurn("user", question, turnId))
+        t.turns.addLast(ChatTurn("assistant", reply.text, turnId))
         while (t.turns.size > MAX_TURNS) t.turns.removeFirst()
         t.lastMs = nowMs()
         return reply

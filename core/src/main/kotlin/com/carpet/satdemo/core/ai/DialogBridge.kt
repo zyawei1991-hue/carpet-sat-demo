@@ -107,7 +107,7 @@ class DialogBridge(
         var streamed = false
         try {
             val reply = gateway.ask(
-                q, context(id), personaScene,
+                q, context(id), personaScene, turnId = id,
                 onSentence = { s ->
                     val line = s.trim()
                     if (line.isNotEmpty()) launch {

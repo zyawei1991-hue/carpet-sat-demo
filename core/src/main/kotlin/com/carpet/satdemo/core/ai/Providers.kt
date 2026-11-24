@@ -93,7 +93,11 @@ fun baseUrlCandidates(raw: String): List<String> {
     }.distinct()
 }
 
-data class ChatTurn(val role: String, val content: String)
+/** [turnId]：§5.2 多轮指代 —— 历史每条带轮次 id，序列化时钉在正文前，模型接「它」「那个」有个能指的东西 */
+data class ChatTurn(val role: String, val content: String, val turnId: String? = null) {
+    /** 发给模型的那份文本：有轮次 id 就带上前缀 */
+    val wireText: String get() = turnId?.let { "[$it] $content" } ?: content
+}
 
 interface AiProvider {
     val label: String
@@ -461,7 +465,7 @@ class OpenAiCompatProvider(
         history.takeLast(6).forEach { h ->
             if (has) append(',')
             append("{\"role\":\"").append(if (h.role == "assistant") "assistant" else "user")
-                .append("\",\"content\":\"").append(escape(h.content)).append("\"}")
+                .append("\",\"content\":\"").append(escape(h.wireText)).append("\"}")
             has = true
         }
         if (has) append(',')
@@ -513,7 +517,7 @@ class OpenAiCompatProvider(
         append("{\"role\":\"system\",\"content\":\"").append(escape(systemOf(persona))).append("\"},")
         append("{\"role\":\"system\",\"content\":\"").append(escape("已知事实（只有这些是真的，缺的就说缺）：\n$facts")).append("\"}")
         history.takeLast(6).forEach { h ->
-            append(",{\"role\":\"").append(h.role).append("\",\"content\":\"").append(escape(h.content)).append("\"}")
+            append(",{\"role\":\"").append(h.role).append("\",\"content\":\"").append(escape(h.wireText)).append("\"}")
         }
         append(",{\"role\":\"user\",\"content\":\"").append(escape(question)).append("\"}")
         append("]")
