@@ -30,11 +30,20 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 43 个文件、9205 行新增 / 105 行删，三份是二进制素材：283,244 字节的字库、
-  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，16,226 行 / 886,309 字节，
+- 我们的全部改动 = 44 个文件、10295 行新增 / 149 行删，三份是二进制素材：283,244 字节的字库、
+  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，17,474 行 / 970,456 字节，
   `git diff --binary` 打的，三份二进制在里面都是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-22 夜（会话窗口 + 相册自动跳这一版）在本机实读的。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-25（小墨烘焙头像）在本机实读的。
   下面逐文件表的首列数字这一轮也按 `git diff --numstat` 全表重读了一遍（往轮只改总数没改表，有过漂移）。
+  **小墨烘焙头像这一轮（11-25）**：owner 11-23 拍板「按建议做」—— AI 出 idle/listening/speaking，
+  happy 用 idle 身子 + speaking 脸，error 用 idle + 本地愁眉小嘴；统一压进现有 `C_*` 语义调色板，
+  生成 64×64 五态索引头 `avatar/muse_pixel_sprites.h`（67,710 字节，编译后约 20 KB）。渲染器把源图反向最近邻映射到
+  会呼吸/ bob/ hop 的现有几何，再叠程序化眨眼、说话口型、摆铃和三套道具；场景遮罩仍由旧几何生成，脸不重画。
+  COM8 已全量构建（app 0x3e1000，分区余 3%）并 app-flash 哈希校验；Spotpear 新屏同一补丁也构建通过（app 0x3e1000，
+  余 3%）；`:core:test --rerun-tasks --no-build-cache` 实跑 386/386、0 失败。五态 + 三场景真机截图逐张实看通过，
+  speaking 两张帧比到口型与铃铛位置变化。**连续眨眼没单独截到，保留未测**；源图/烘焙脚本/量化预览/真机证据在
+  `firmware/screen/muse/avatar/` 与 `firmware/screen/tools/bake_xiaomo.py`。补丁空仓 `git apply: OK (44 sections)`、
+  `byte-compare: 44/44 identical`。
   **会话窗口 + 相册自动跳这一轮（11-22）**：owner 拍板 `docs/DECISIONS.md` D16/D16.5 落地两件屏侧活。
   ①**收图自动跳相册页**（`carpet_page.c` `photo_refresh()`：`pv.gen` 变化 = 新收齐一张 → `nav_to(PG_PHOTO)`，
   熄屏不跳；旧入口照 11-14 规矩不动 —— owner 原话「我目前都没见过相册页面从哪里进去」）。
@@ -199,8 +208,9 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/components/muse/muse_input.c         | 517 + /   6 -   (11-20 新板：+`>photoscale <n>` 台架口（`carpet_page_bench_photo_scale()`，只立记号）+`>micraw`/`>micen` 两条麦克风硬件探针（新板 mic 判死用的就是它们：SD 线 toggles=0、使能后样本全零，CHIPEN 原理图硬接 3V3 ⇒ 硬件级，不是固件）；11-18 相册：+`>phototest` 台架口（`carpet_photo_bench()`，喂完自动翻到相册页）+`carpet_photo.h` 的 include；11-17 句间空档：+`>audgap` 台架口（`carpet_audio_bench_gap()`，占串口约 3.5 秒，判据回读走 `>carpet` 那行 `@audio turn=… drops=…`——注意 `>audio` 是 1 kHz 放音探针不是回读）+`carpet_audio.h` 的 include；11-16 B §1：+`>event [<kind>|clear]` 守护灯点台架口（注入走 `carpet_link_bench_event()`、回读 `carpet_link_event_dump()`、清空 `carpet_link_event_clear()`）；11-14 外页划动回中心：+`>gestfrom [left|right|up|down|tap]` 台架口，照 `>gest` 那条但调 `carpet_page_gesture_bench_from()`（不先回脸、从当前格起判），printf 多印 `reset=%d`；11-13 B §5：+`>amb [clock|photo]` 读/改默认氛围（和设置页同一个 NVS key）；11-13 B §3：+`>scene=1|2|3` 造场景换装；11-12 唤醒词：+`>wake` 读 / `>wake on|off` 改（和设置页那一格同一个 NVS key），回读走 `carpet_wake_dump()`；原有：>carpet / >page 回读 + bench 命令 ui=carpet + `>say` 造答句 + `>audio` 放音 + `>audtest` 造音频 + `>maint` 造养护帧 + 11-08：`>url` 读/改/清、`>wifi clear`、`>zh` 回读 + 11-09：nap 闸门认 `muse_settings_stay_online()`、`>stay` 回读口、`naps=`/`drops=` 两个 RAM 计数 + 11-09 深夜：`CARPET_DIAG`/`CARPET_DIAG_TICK` 两个宏（carpet 外=空话）接在 `power_off()` 顶、`set_asleep()`、`update_power()` 三档、`update_wifi_nap()`、POWER 键 press/long/release、输入循环里的 USB 通断和 30 秒兜底，加 `>diag`/`>diag clear` + 11-10：`muse_input_wake(why)` —— POWER 键那条 `set_asleep(false, …)` 的公开口 + 11-11 晚：`>micup`/`>mic`/`>mictest` 三条 + `>wifi set <ssid十六进制> <pass十六进制|->`（中文 SSID 带空格没法裸着往串口塞，走和屏上键盘同一个 `muse_settings_set_wifi()`；口令只报字节数不回显）+ 前面那两条 `hexval()`/`hex_bytes()`)
   esp32/components/muse/muse_input.h         |   9 +   (11-10 新入列：`muse_input_wake()` 那一句原型 + 它那份注释，说清它是按键同一条重路 —— 点亮面板、当场回连 Wi-Fi，不是轻量唤醒)
   esp32/components/muse/muse_lang.c          |  57 +   (11-08 新入列：给设置页那几档字体挂 CJK fallback，照越南语那份 `copies` 的做法；标题那档 unscii 整体换成带 fallback 的一档)
-  esp32/components/muse/muse_pixel.h         |  20 +   (11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
-  esp32/avatar/muse_pixel.c                  | 330 +   (11-13 B §3 新入列，**在 components/muse 之外**：`muse_pixel_set_scene()` 实现 + `update_palette()` 里给绒毛 `C_BD..C_BH` 混场景色、按帧 `k=1-expf(-dt*7)` 约 0.5 s 过渡，脸 `C_SKIN*` 不动。**11-13 换装道具这一版再加 224 行**：13 个道具色 `C_BELT..C_TIE`（含 `C_CAR` 车身红）+ `s_costume_pop` 浮现 ramp（每次换场景清零、`1-expf(-dt*8)` 约 0.4 s 涨到 1）+ `cpx/c_disc/c_ellipse` 三个 ordered-dither 画笔 + `draw_vehicle/draw_kids/draw_suit/draw_costume`。车=安全带斜挎上胸（末端金属扣止于左肋）+ 胸前一只侧视小汽车（车厢梯形顶 + 车窗 + 横条车身 + 两轮 + 前灯）；亲子=左爪呼吸玩偶 + 右旁滑滑梯；对话=正装外套（两臂染袖色、袖口露绒毛爪）+ 白衬衫 V + 亮翻领 + 打结尖角领带 + 口袋巾。道具随 pop 用 dither 浮现再下滑入位，脸一律不动（「还是它换了装扮」）。**11-13 owner 回退「这个安全带和方向盘、还有数字分身这个穿正装的你自己看看对吗」这一版重画**：旧版带尾糊进盘缘成一团黑「6」、盘是粗缘全十字像「圆圈加十字」还压在脚上；正装裸绒毛臂像马甲、领带是平头红条（无结无尖）、翻领和外套同色看不见。重画 `draw_vehicle`（带止左肋 + 扣、盘细缘三辐圆毂落下腹、两者留空隙）+ `draw_suit`（臂内染外套色保留缝线 + 绒毛爪尖、领带结 + 带身 + 尖角、`C_SUITL` 调亮当翻领、宽衬衫 V）。**11-13 owner 再回退「这方向盘怎么变成肚脐眼了，你如果觉得这个元素不好体现换个其他元素也可以啊」这一版**：方向盘在 64px 正面姿势（臂在两侧、没手握着）下就是「居中圈 + 毂」= 肚脐，改不好；`draw_vehicle` 把盘整块换成侧视小汽车车徽（`C_CAR` 红车身 + 两车窗 + 两轮 + 白前灯，横长条形不是中心圆点），安全带保留；face-1.png 466×466 实看是汽车不是肚脐，face-2/3 无回归。**11-13 owner 又回退「小红车也太抽象了，能让他坐在小红车里吗」这一版**：侧视车徽太小太抽象，改成 avatar 坐进一辆红色小车（正面视角）——`draw_vehicle` 重写：头露在浅蓝挡风玻璃（`C_GLASS` 宽梯形 + 暗红框 + 白反光斜条）上方，宽而平的红车身（`C_CAR`/`C_CARD`，底部平收不再收成蛋尖）裹住下半身、比 avatar 宽，两只白前灯 + 中网格栅 + 亮保险杠（`C_CARL`），底下两只大轮子（`C_WHEEL` r3.2 + `C_WHEEL2` 轮毂）露出下半，两爪（`C_BL`）搭车沿；安全带斜挎胸前透过玻璃可见。face-1.png 466×466 实看是「avatar 坐在红色小车里」，face-2/3 无回归。**重打 patch 的路径清单必须含 `esp32/avatar/muse_pixel.c`**，漏了它声明进补丁、实现却没进 ⇒ 对端机器 undefined reference)
+  esp32/components/muse/muse_pixel.h         |  24 + / 4 -   (11-25 注释改为烘焙五态 + 程序化动画；11-13 B §3 新入列：`muse_pixel_set_scene(int)` 声明 + 那段「按场景调色不新画」注释)
+  esp32/avatar/muse_pixel_sprites.h          | 876 +   (新，11-25 小墨五态 64×64 索引数据 + `XIAOMO_PALETTE[]`；由 `firmware/screen/tools/bake_xiaomo.py` 固定 LF 输出，重打 patch 必须带上)
+  esp32/avatar/muse_pixel.c                  | 540 + / 43 -   (11-25 小墨：`muse_pixel_sprites.h` 五态索引图反向最近邻映射到动态几何；保留程序化眨眼/口型/摆铃/换装，error 改用烘焙愁脸；11-13 B §3 新入列，**在 components/muse 之外**：`muse_pixel_set_scene()` 实现 + `update_palette()` 里给绒毛 `C_BD..C_BH` 混场景色、按帧 `k=1-expf(-dt*7)` 约 0.5 s 过渡，脸 `C_SKIN*` 不动。**11-13 换装道具这一版再加 224 行**：13 个道具色 `C_BELT..C_TIE`（含 `C_CAR` 车身红）+ `s_costume_pop` 浮现 ramp（每次换场景清零、`1-expf(-dt*8)` 约 0.4 s 涨到 1）+ `cpx/c_disc/c_ellipse` 三个 ordered-dither 画笔 + `draw_vehicle/draw_kids/draw_suit/draw_costume`。车=安全带斜挎上胸（末端金属扣止于左肋）+ 胸前一只侧视小汽车（车厢梯形顶 + 车窗 + 横条车身 + 两轮 + 前灯）；亲子=左爪呼吸玩偶 + 右旁滑滑梯；对话=正装外套（两臂染袖色、袖口露绒毛爪）+ 白衬衫 V + 亮翻领 + 打结尖角领带 + 口袋巾。道具随 pop 用 dither 浮现再下滑入位，脸一律不动（「还是它换了装扮」）。**11-13 owner 回退「这个安全带和方向盘、还有数字分身这个穿正装的你自己看看对吗」这一版重画**：旧版带尾糊进盘缘成一团黑「6」、盘是粗缘全十字像「圆圈加十字」还压在脚上；正装裸绒毛臂像马甲、领带是平头红条（无结无尖）、翻领和外套同色看不见。重画 `draw_vehicle`（带止左肋 + 扣、盘细缘三辐圆毂落下腹、两者留空隙）+ `draw_suit`（臂内染外套色保留缝线 + 绒毛爪尖、领带结 + 带身 + 尖角、`C_SUITL` 调亮当翻领、宽衬衫 V）。**11-13 owner 再回退「这方向盘怎么变成肚脐眼了，你如果觉得这个元素不好体现换个其他元素也可以啊」这一版**：方向盘在 64px 正面姿势（臂在两侧、没手握着）下就是「居中圈 + 毂」= 肚脐，改不好；`draw_vehicle` 把盘整块换成侧视小汽车车徽（`C_CAR` 红车身 + 两车窗 + 两轮 + 白前灯，横长条形不是中心圆点），安全带保留；face-1.png 466×466 实看是汽车不是肚脐，face-2/3 无回归。**11-13 owner 又回退「小红车也太抽象了，能让他坐在小红车里吗」这一版**：侧视车徽太小太抽象，改成 avatar 坐进一辆红色小车（正面视角）——`draw_vehicle` 重写：头露在浅蓝挡风玻璃（`C_GLASS` 宽梯形 + 暗红框 + 白反光斜条）上方，宽而平的红车身（`C_CAR`/`C_CARD`，底部平收不再收成蛋尖）裹住下半身、比 avatar 宽，两只白前灯 + 中网格栅 + 亮保险杠（`C_CARL`），底下两只大轮子（`C_WHEEL` r3.2 + `C_WHEEL2` 轮毂）露出下半，两爪（`C_BL`）搭车沿；安全带斜挎胸前透过玻璃可见。face-1.png 466×466 实看是「avatar 坐在红色小车里」，face-2/3 无回归。**重打 patch 的路径清单必须含 `esp32/avatar/muse_pixel.c`**，漏了它声明进补丁、实现却没进 ⇒ 对端机器 undefined reference)
   esp32/components/muse/muse_pmu.c           |  35 +   (11-09 深夜新入列：`muse_pmu_init()` 的 `key_irqs` 分支在**清 INTSTS 之前**把已锁存的按键/中断抄给诊断 —— 那两格原本是开机即清，断电回来谁也问不到；加 `muse_pmu_diag_regs()` 纯读那一列七个寄存器，不改任何行为)
   esp32/components/muse/muse_pmu.h           |   8 +   (同上：`MUSE_PMU_DIAG_REGS 7` + 那个原型，都在 `#if CONFIG_MUSE_CARPET_CARDS` 里)
   esp32/components/muse/muse_settings.c      |  82 + /   2 -   (11-13 B §5：NVS 再多一条 `album_def`（u8，缺键=时钟）+ `album_default` 那两个函数；11-12 唤醒词：NVS 再多一条 `wake_on`（u8，**缺键=默认开** —— owner 要的就是免按键，默认关等于没做）+ 那两个函数 + 开机日志尾部 `wake %s`；11-08：NVS 多一条 `link_url`；11-09：再多一条 `stay_online`（u8，缺键=默认关）+ 那两个函数 + 开机日志尾部 `nap %s`)
@@ -216,7 +226,7 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   esp32/partitions_muse.csv                  |   8 +   (11-12 唤醒词新入列：**只往尾巴上加一行** `model, data, spiffs, 0x822000, 0x300000,`（3 MB）。上面每一行的偏移一个都没动 ⇒ NVS(0x11000) 里的 Wi-Fi、`link_url`、`mic_mode`、`wake_on` 全保住，换这张表不用重新配网（用 IDF 自己的 `gen_esp32part.py` 解出编译产物逐行对过，不是看着 csv 推的）。**分区名必须就叫 `model`**：esp-sr 的 CMakeLists 用 `partition_table_get_partition_info("--partition-name model")` 找它，找不到就只打印一句提示、不生成 `srmodels.bin`，运行期 `esp_srmodel_init("model")` 返回空 —— 现象是"编译刷机全成功、唤醒词永远不灵"。16 MB flash 到 0x1000000，这张表到 0xB22000，后面还空约 4.8 MB)
   ```
   这份 patch 在这台机器上**用 baseline 干净树验过能打上**（空仓只放 baseline 那 21 份被改文件的
-  原样副本，再 `git apply`，43 个文件全落对，字库、底图和测试 JPEG 三份二进制解出来字节数都一致），不是"看着应该能打上"。
+  原样副本，再 `git apply`，44 个文件全落对，字库、底图、测试 JPEG 和五态头文件解出来都与工作树逐字节一致），不是"看着应该能打上"。
   验法脚本：`D:/dev/tmp/verify_carpet_patch.py <patch> <muse_root> cdc169d <空目录>`，
   它同时做两件事 —— ① 在 baseline 空仓上 `git apply --check` + 真 apply；
   ② 把 apply 出来的每一份和**工作树**（就是真正编译刷机那份）逐字节比。
@@ -653,18 +663,21 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   ```bash
   cd D:/dev/projects/muse-gadget-sdk-main
   git add -N esp32/components/muse/carpet esp32/devices/sdkconfig.carpet \
-      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18
+      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18 \
+      esp32/avatar/muse_pixel_sprites.h
   git diff --binary cdc169d -- esp32/components/muse esp32/devices/sdkconfig.carpet \
       esp32/devices/sdkconfig.muse-spotpear-s3-18 esp32/main \
-      esp32/partitions_muse.csv esp32/avatar/muse_pixel.c \
+      esp32/partitions_muse.csv esp32/avatar/muse_pixel.c esp32/avatar/muse_pixel_sprites.h \
       > D:/dev/projects/carpet-sat-demo/firmware/screen/muse/muse-carpet.patch
   git reset -q esp32/components/muse/carpet esp32/devices/sdkconfig.carpet \
-      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18   # 别让状态多个暂存
+      esp32/components/muse/boards/board_spotpear_s3_18.c esp32/devices/sdkconfig.muse-spotpear-s3-18 \
+      esp32/avatar/muse_pixel_sprites.h   # 别让状态多个暂存
   ```
   **`boards/board_spotpear_s3_18.c` + `devices/sdkconfig.muse-spotpear-s3-18` 是 11-20 这轮（Spotpear 新板）加进路径清单的**：
   板级文件在 `boards/` 下、设备档在 `devices/` 下，都不在 `esp32/components/muse/carpet` 里。
   漏了它们，Kconfig 那一档和 CMake 的 srcs 引用会进补丁、板级实现却没进 ⇒ 对端机器 configure/编译直接失败。
-  和 partitions/muse_pixel 那两条同一个坑。
+  和 partitions/muse_pixel 那两条同一个坑。`esp32/avatar/muse_pixel_sprites.h` 是小墨五态烘焙图，
+也必须进 add/diff/reset 三处路径清单；漏了它 `muse_pixel.c` 会因缺头文件编译失败。
   **`esp32/partitions_muse.csv` 是 11-12 这轮加进路径清单的**：它在 `esp32/` 根下，
   不在原来那三个路径里，漏了它补丁就少一行 `model` 分区 ⇒ 对端机器全片刷也没有模型，
   唤醒词永远 `ready=0`，而编译刷机全都"成功"。
