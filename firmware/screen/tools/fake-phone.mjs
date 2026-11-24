@@ -16,6 +16,10 @@
  *   node fake-phone.mjs --mic-close          即使 --v4-ready 也收到 mic_chunk 就关链（专称屏侧熔断）
  *   node fake-phone.mjs --no-v4              ack 只申报 [3]，验屏那边 armed=0、一条上行都不发
  *   node fake-phone.mjs --micdir ./out       上行 WAV 落哪儿（默认脚本旁边的 mic-capture/）
+ *   node fake-phone.mjs --v4-ready --chat-window
+ *                                         每轮回 3 秒非零 PCM，验会话窗口起播与被动等空档
+ *   node fake-phone.mjs --v4-ready --chat-window --chat-gap 3000
+ *                                         同 turn_id 两段 1.5 秒 PCM，中间空 3 秒，验续播不丢账
  *
  * 【2026-11-13：屏那道闸**只看 ack.protocols 里有没有 4**，整帧的 `v` 它不看了。】
  * 原来这里写"屏认整帧 v、光 protocols 里那个 4 不算许可"，那句是错的：真机称到 ack 外层
@@ -55,20 +59,18 @@ const IDS = new Set(argList('id').length ? argList('id') : ['WS175B-A3F7']);
 const REJECT = process.argv.includes('--reject');
 const DROP_AT = (() => { const v = argList('drop')[0]; return v ? Number(v) : null; })();
 const STATE_FILE = argList('state')[0];
-/* v4 上行的三条人。为什么要做成开关而不是直接写死：现在装在手机上的那版 App
- * 在 ack 里申报了 4，可 CommandType 里没有 mic_chunk —— 它的入站解码是严格枚举 +
- * runCatching，收到这一帧的处理是**当场关连接**（protocol/screen-link.md「第一条要求
- * 不是音频，是让屏先知道对面是几版」）。所以这一台假手机要能同时演这三种人：
- *   默认            整帧 v=3、protocols:[3,4]、收到 mic_chunk 就 close —— **今天装机那版 App**
- *   --v4-ready      整帧 v=4、真拼段落 WAV 回 dialog —— App 补完 mic_chunk 之后（CONTRACT_VERSION 抬到 4）
- *   --no-v4         protocols 只给 [3] —— 更早那版，屏那边 armed 该是 0
+/* v4 上行的三种测试人设。屏那道闸只看 ack.protocols 是否含 4，外层 envelope 的 v 不参与：
+ *   默认            外层 v=3、protocols:[3,4]，但收到 mic_chunk 就 close，演“申报早、处理未落地”
+ *   --v4-ready      外层 v=4、protocols:[4]，真拼段落 WAV 回 dialog，演完整 v4 App
+ *   --no-v4         protocols 只给 [3]，演未申报 v4，屏那边 armed 应为 0
  * --mic-close 再叠在 --v4-ready 上强行关链，专门称屏侧那三道闸里的**熔断**：
  * `>mic` 里 rejected 该从 0 变 1，而且第二次按不该再把链路搞断。 */
 const NO_V4 = process.argv.includes('--no-v4');
 const READY = process.argv.includes('--v4-ready');
 const MIC_CLOSE = process.argv.includes('--mic-close');
-/* 每一帧 envelope 的 `v`：装机这版的 ScreenCodec.CONTRACT_VERSION 还是 3，补完上行才是 4
- * —— 而屏那道闸现在认的就是这个数（光 protocols 里那个 4 不算许可）。 */
+const CHAT_WINDOW = process.argv.includes('--chat-window');
+const CHAT_GAP_MS = Number(argList('chat-gap')[0] || 0);
+/* 外层 v 只让假手机更像真 App；屏的上行闸不读它，只看 ack.protocols。 */
 const ENV_V = READY ? 4 : 3;
 /* 收到 mic_chunk 拼段还是关链：没准备好就等于关链，和真 App 一致。 */
 const micKills = () => MIC_CLOSE || !READY;
@@ -230,6 +232,42 @@ const server = net.createServer(sock => {
   const send = obj => { if (ws && !ws.destroyed) ws.write(encodeText(JSON.stringify(obj))); };
   const mic = makeMicAssembler();
 
+  function sendChatAudio(turn) {
+    const rate = 16000;
+    const block = 2560;
+    const pcm = Buffer.alloc(rate * 2 * 3);
+    let peak = 0;
+    for (let i = 0; i < pcm.length / 2; i++) {
+      const sample = Math.round(0.25 * 32767 * Math.sin(2 * Math.PI * 440 * i / rate));
+      pcm.writeInt16LE(sample, i * 2);
+      peak = Math.max(peak, Math.abs(sample));
+    }
+    function sendSentence(part, seqStart, totalBefore, label) {
+      const frames = Math.ceil(part.length / block);
+      for (let i = 0; i < frames; i++) {
+        const chunk = part.subarray(i * block, Math.min((i + 1) * block, part.length));
+        send({
+          v: ENV_V, t: 'command', seq: ++seq,
+          command: {
+            cmd: 'audio_chunk',
+            args: { turn_id: turn, seq: seqStart + i, total: totalBefore + part.length, rate, b64: chunk.toString('base64') },
+          },
+        });
+      }
+      log(`audio↓ ${turn} ${label} · ${frames} 帧 ${part.length} B / ${(part.length / (rate * 2)).toFixed(2)} s · total=${totalBefore + part.length} · peak=${peak}`);
+    }
+    if (CHAT_GAP_MS > 0) {
+      const split = pcm.length / 2;
+      sendSentence(pcm.subarray(0, split), 0, 0, '句1');
+      setTimeout(() => {
+        if (!ws || ws.destroyed) return;
+        sendSentence(pcm.subarray(split), split / block, split, '句2');
+      }, CHAT_GAP_MS);
+    } else {
+      sendSentence(pcm, 0, 0, '整轮');
+    }
+  }
+
   sock.on('data', chunk => {
     acc = Buffer.concat([acc, chunk]);
 
@@ -297,9 +335,8 @@ const server = net.createServer(sock => {
       if (!NO_V4) ack.protocols = READY ? [4] : [3, 4];
       else ack.protocols = [3];
       log(NO_V4 ? 'ack：--no-v4，只申报 [3] —— 屏那边 armed 该是 0'
-                : (READY ? `ack：--v4-ready，整帧 v=${ENV_V}、mic_chunk 落 WAV 到 ${MIC_OUT}`
-                         : `ack：整帧 v=${ENV_V}、protocols [3,4] —— 今天装机那版 App 的样子：` +
-                           `屏那边 armed 该是 0（那条 W 就是它给的理由），发上来了就 close`));
+                : (READY ? `ack：--v4-ready，外层 v=${ENV_V}、protocols [4]；mic_chunk 落 WAV 到 ${MIC_OUT}`
+                         : `ack：外层 v=${ENV_V}、protocols [3,4]；申报 v4 但收到 mic_chunk 就 close`));
       send({ v: ENV_V, t: 'ack', seq: ++seq, ack });
       return;
     }
@@ -307,8 +344,7 @@ const server = net.createServer(sock => {
       const c = m.command || {};
       if (c.cmd !== 'mic_chunk') {
         /* 其余 cmd 这台假手机本来就没实现，认下来回一条 ack 就够，别装死。
-         * 唯独 mic_chunk 不能走这条路 —— 今天真 App 的严格枚举不认它是**关链**，
-         * 所以那一种由 micKills() 演（默认档就是它）。 */
+         * mic_chunk 单独走 micKills()，用默认档演“申报 v4 但入站处理未落地”的关链。 */
         log(`command↑ ${c.cmd} args=${JSON.stringify(c.args ?? {}).slice(0, 120)}`);
         send({ v: ENV_V, t: 'ack', seq: ++seq, ack: { for_seq: m.seq } });
         return;
@@ -336,6 +372,7 @@ const server = net.createServer(sock => {
                   text: '这句是上行走通了的证据。真 App 会先转写再答题。',
                   source: 'local_rule', origin: 'screen' },
       });
+      if (CHAT_WINDOW) sendChatAudio(done.turn);
       return;
     }
     if (m.t === 'bye') { log('客户端道别（bye），台账当场标离线 —— 这条是对的'); cleanup(); return; }

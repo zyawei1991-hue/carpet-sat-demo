@@ -2380,10 +2380,10 @@ index 66a02a3..00a3b89 100644
      }
 diff --git a/esp32/components/muse/carpet/carpet_audio.c b/esp32/components/muse/carpet/carpet_audio.c
 new file mode 100644
-index 0000000..90e542f
+index 0000000..83c7d43
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_audio.c
-@@ -0,0 +1,599 @@
+@@ -0,0 +1,706 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -2462,6 +2462,7 @@ index 0000000..90e542f
 +static size_t s_played;       /* 已交给 codec 的字节 */
 +static unsigned s_expect_seq; /* 下一块该有的 seq，不连续就整段丢 */
 +static bool s_live;           /* 播放任务认为还有声音要放 */
++static bool s_uplink;         /* 麦克风采集期间只收下下行音频，等采集结束再播，避免录进自己的答句 */
 +static volatile float s_level;
 +static uint32_t s_frames, s_drops;
 +static uint32_t s_gaps, s_gap_ms;           /* 开口之后停下来等过数据几回 / 一共停了多久（毫秒，累计） */
@@ -2551,7 +2552,7 @@ index 0000000..90e542f
 +    s_total = total;
 +    s_expect_seq = seq + 1;
 +    snprintf(s_turn, sizeof s_turn, "%s", turn);
-+    s_live = true;
++    s_live = !s_uplink;
 +    s_frames++;
 +    xSemaphoreGive(s_lock);
 +
@@ -2599,9 +2600,10 @@ index 0000000..90e542f
 +static void player_task(void *arg)
 +{
 +    (void)arg;
-+    int64_t empty_since = 0;   /* 真·一个字节都不剩的起点，只给 1.5 秒判死用 */
-+    int64_t stall_t0 = 0;      /* 本轮"开口之后又停下来等数据"的起点 */
-+    bool spoke = false;        /* 本轮开过口没有：没开口前的攒缓冲不算停顿 */
++    int64_t empty_since = 0;      /* 真·一个字节都不剩的起点，只给 1.5 秒判死用 */
++    int64_t prebuffer_since = 0;  /* 开场攒不够 200 ms 的起点，超时也开口，不能永久等 */
++    int64_t stall_t0 = 0;         /* 本轮"开口之后又停下来等数据"的起点 */
++    bool spoke = false;           /* 本轮开过口没有：没开口前的攒缓冲不算停顿 */
 +
 +    for (;;) {
 +        size_t take_bytes = 0;
@@ -2611,6 +2613,7 @@ index 0000000..90e542f
 +        xSemaphoreTake(s_lock, portMAX_DELAY);
 +        if (!s_live || !s_buf) {
 +            empty_since = 0;
++            prebuffer_since = 0;
 +            if (stall_t0) {
 +                s_gap_ms += (uint32_t)((esp_timer_get_time() - stall_t0) / 1000);
 +                stall_t0 = 0;
@@ -2649,10 +2652,21 @@ index 0000000..90e542f
 +             * 存量本来就永远不到 6,400 字节，于是放 200 毫秒、停 200 毫秒重新攒，来回抖。
 +             * 开口之后只看"有没有数据"（`avail == 0` 那条负责），开场那 200 毫秒的余量
 +             * 留着吸收到达抖动 —— 这才是流式播放该有的样子。 */
-+            xSemaphoreGive(s_lock);        /* 还没攒够 200 毫秒，别开口 */
-+            vTaskDelay(pdMS_TO_TICKS(20));
-+            continue;
++            if (!prebuffer_since) prebuffer_since = esp_timer_get_time();
++            bool open_now = esp_timer_get_time() - prebuffer_since > (int64_t)UNDERRUN_MS * 1000;
++            xSemaphoreGive(s_lock);
++            if (!open_now) {
++                vTaskDelay(pdMS_TO_TICKS(20));
++                continue;
++            }
++            xSemaphoreTake(s_lock, portMAX_DELAY);
++            if (!s_live || s_wrote == s_played) {
++                prebuffer_since = 0;
++                xSemaphoreGive(s_lock);
++                continue;
++            }
 +        }
++        prebuffer_since = 0;
 +        if (stall_t0) {
 +            s_gap_ms += (uint32_t)((esp_timer_get_time() - stall_t0) / 1000);
 +            stall_t0 = 0;
@@ -2668,17 +2682,22 @@ index 0000000..90e542f
 +        xSemaphoreGive(s_lock);
 +
 +        if (finished) {
-+            s_level = 0;
-+            muse_state_set_level(0);
-+            printf("@audio 放完 %u 字节 / %.1f 秒\n", (unsigned)s_played,
-+                   (float)s_played / (AUDIO_RATE * 2));
-+            fflush(stdout);
 +            /* 停嘴留账（见 pause_locked）：这一句放完了，但 §4 的下一句可能还在路上，
 +             * 它要接的是这个 turn_id、这个 expect_seq。整轮真说完时下一句永远不来，
-+             * 这份账会被下一个 turn_id 的帧在 feed() 里换掉，不会串轮 */
++             * 这份账会被下一个 turn_id 的帧在 feed() 里换掉，不会串轮。
++             * 第一次判完到第二次拿锁之间 feed() 可能已经追加了下一句，必须复核，
++             * 否则会把刚置为 live 的新句又停掉，出现 drops=0 却永远不出声。 */
 +            xSemaphoreTake(s_lock, portMAX_DELAY);
-+            pause_locked(false, NULL);
++            finished = s_total > 0 && s_wrote >= s_total && s_wrote == s_played;
++            if (finished) pause_locked(false, NULL);
 +            xSemaphoreGive(s_lock);
++            if (finished) {
++                s_level = 0;
++                muse_state_set_level(0);
++                printf("@audio 放完 %u 字节 / %.1f 秒\n", (unsigned)s_played,
++                       (float)s_played / (AUDIO_RATE * 2));
++                fflush(stdout);
++            }
 +            continue;
 +        }
 +
@@ -2728,6 +2747,29 @@ index 0000000..90e542f
 +        return false;
 +    }
 +    return feed(jt->valuestring, (unsigned)js->valueint, (size_t)jn->valueint, decoded, olen);
++}
++
++bool carpet_audio_begin_uplink(bool interrupt)
++{
++    if (!s_lock) s_lock = xSemaphoreCreateMutex();
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    if (s_live && !interrupt) {
++        xSemaphoreGive(s_lock);
++        return false;
++    }
++    s_uplink = true;
++    reset_locked();
++    xSemaphoreGive(s_lock);
++    return true;
++}
++
++void carpet_audio_end_uplink(void)
++{
++    if (!s_lock) return;
++    xSemaphoreTake(s_lock, portMAX_DELAY);
++    s_uplink = false;
++    if (s_turn[0] && s_wrote > s_played) s_live = true;
++    xSemaphoreGive(s_lock);
 +}
 +
 +void carpet_audio_abort(const char *why)
@@ -2806,10 +2848,12 @@ index 0000000..90e542f
 + *
 + * 修之前这条必挂：第一句放完走的是"放完即清账"，第二句 seq=25 撞上 expect_seq=0
 + * 被判"seq 不连续"整段丢 —— 现场听感就是 owner 2026-11-16 第 4 条「长对话只念了头一句」。
-+ * 期望回读：喂完几秒后 `>audio` 给 `drops=0`、`played≈112000`、`turn=audgap`。
++ * 期望回读：喂完几秒后 `>carpet` 给 `drops=0`、`played≈112000`、`turn=<参数>`。
++ * 可传不同 turn_id 连续称三轮；不传就是 audgap。
 + */
-+void carpet_audio_bench_gap(void)
++void carpet_audio_bench_gap(const char *turn)
 +{
++    if (!turn || !*turn) turn = "audgap";
 +    const size_t seg1 = 64000;              /* 第一句 2.0 秒 = 25 块整 */
 +    const size_t seg2 = 48000;              /* 第二句 1.5 秒 = 18 块整 + 1 块 1920 */
 +    const size_t total1 = seg1;             /* 第一句期间整轮就是它自己 */
@@ -2830,7 +2874,7 @@ index 0000000..90e542f
 +            size_t g = at / 2 + i;
 +            s[i] = (int16_t)(0.25f * 32767.0f * sinf(2.0f * (float)M_PI * 392.0f * (float)g / AUDIO_RATE));
 +        }
-+        ok = bench_send(b64, "audgap", seq, total1, s_bench, n);
++        ok = bench_send(b64, turn, seq, total1, s_bench, n);
 +        sent += n;
 +    }
 +    if (!ok) {
@@ -2838,7 +2882,7 @@ index 0000000..90e542f
 +        heap_caps_free(b64);
 +        return;
 +    }
-+    printf("@audgap 第一句 25 块喂完（%u 字节），空 3 秒模拟第二句的合成耗时……\n", (unsigned)sent);
++    printf("@audgap %s 第一句 25 块喂完（%u 字节），空 3 秒模拟第二句的合成耗时……\n", turn, (unsigned)sent);
 +    fflush(stdout);
 +    vTaskDelay(pdMS_TO_TICKS(3000));
 +    for (size_t at = 0; at < seg2 && ok; at += MAX_BLOCK_BYTES, seq++) {
@@ -2848,14 +2892,77 @@ index 0000000..90e542f
 +            size_t g = (seg1 + at) / 2 + i;   /* 相位接在整轮后面，两句之间不劈相 */
 +            s[i] = (int16_t)(0.25f * 32767.0f * sinf(2.0f * (float)M_PI * 330.0f * (float)g / AUDIO_RATE));
 +        }
-+        ok = bench_send(b64, "audgap", seq, total2, s_bench, n);
++        ok = bench_send(b64, turn, seq, total2, s_bench, n);
 +        sent += n;
 +    }
 +    heap_caps_free(b64);
-+    printf("@audgap 第二句%s，一共喂到 %u/%u 字节。几秒后用 >audio 读：期望 drops=0 played≈%u turn=audgap\n",
-+           ok ? "也接上了（19 块）" : "**被拒了 —— 句间空档的账没留住**",
-+           (unsigned)sent, (unsigned)total2, (unsigned)total2);
++    printf("@audgap %s 第二句%s，一共喂到 %u/%u 字节。几秒后用 >carpet 读：期望 drops=0 played≈%u turn=%s\n",
++           turn, ok ? "也接上了（19 块）" : "**被拒了 —— 句间空档的账没留住**",
++           (unsigned)sent, (unsigned)total2, (unsigned)total2, turn);
 +    fflush(stdout);
++}
++
++void carpet_audio_bench_hold(void)
++{
++    carpet_audio_abort("audhold");
++    if (!carpet_audio_begin_uplink(false)) {
++        printf("@audhold 开麦交接没成\n");
++        fflush(stdout);
++        return;
++    }
++    char *b64 = heap_caps_malloc(B64_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!b64) {
++        carpet_audio_end_uplink();
++        printf("@audhold 编码缓冲要不到\n");
++        fflush(stdout);
++        return;
++    }
++    int16_t *s = (int16_t *)s_bench;
++    for (size_t i = 0; i < MAX_BLOCK_BYTES / 2; i++) {
++        s[i] = (int16_t)(0.25f * 32767.0f * sinf(2.0f * (float)M_PI * 392.0f * (float)i / AUDIO_RATE));
++    }
++    bool ok = bench_send(b64, "audhold", 0, MAX_BLOCK_BYTES, s_bench, MAX_BLOCK_BYTES);
++    size_t played = 0, total = 0;
++    bool live = false;
++    float level = 0;
++    bool hit = ok && carpet_audio_state("audhold", &played, &total, &live, &level);
++    printf("@audhold recording hit=%d total=%u played=%u live=%d level=%.2f\n",
++           hit, (unsigned)total, (unsigned)played, live, (double)level);
++    fflush(stdout);
++    carpet_audio_end_uplink();
++    vTaskDelay(pdMS_TO_TICKS(200));
++    hit = carpet_audio_state("audhold", &played, &total, &live, &level);
++    printf("@audhold released hit=%d total=%u played=%u live=%d level=%.2f\n",
++           hit, (unsigned)total, (unsigned)played, live, (double)level);
++    fflush(stdout);
++    heap_caps_free(b64);
++}
++
++void carpet_audio_bench_prebuffer(void)
++{
++    carpet_audio_abort("audpre");
++    char *b64 = heap_caps_malloc(B64_BUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    if (!b64) {
++        printf("@audpre 编码缓冲要不到\n");
++        fflush(stdout);
++        return;
++    }
++    int16_t *s = (int16_t *)s_bench;
++    const size_t n = 640;
++    const size_t total = 64000;
++    for (size_t i = 0; i < n / 2; i++) {
++        s[i] = (int16_t)(0.25f * 32767.0f * sinf(2.0f * (float)M_PI * 392.0f * (float)i / AUDIO_RATE));
++    }
++    bool ok = bench_send(b64, "audpre", 0, total, s_bench, n);
++    vTaskDelay(pdMS_TO_TICKS(1800));
++    size_t played = 0, reported_total = 0;
++    bool live = false;
++    float level = 0;
++    bool hit = ok && carpet_audio_state("audpre", &played, &reported_total, &live, &level);
++    printf("@audpre hit=%d total=%u played=%u live=%d level=%.2f\n",
++           hit, (unsigned)reported_total, (unsigned)played, live, (double)level);
++    fflush(stdout);
++    heap_caps_free(b64);
 +}
 +
 +/*
@@ -2962,7 +3069,7 @@ index 0000000..90e542f
 +    }
 +    char turn[40] = "-";
 +    size_t wrote = 0, total = 0, played = 0;
-+    int live = 0;
++    int live = 0, uplink = 0;
 +    float level = 0;
 +    uint32_t frames = 0, drops = 0, gaps = 0, gap_ms = 0;
 +    const char *why = "-";
@@ -2970,13 +3077,13 @@ index 0000000..90e542f
 +    xSemaphoreTake(s_lock, portMAX_DELAY);
 +    if (s_turn[0]) snprintf(turn, sizeof turn, "%s", s_turn);
 +    wrote = s_wrote; total = s_total; played = s_played;
-+    live = (int)s_live; level = s_level;
++    live = (int)s_live; uplink = (int)s_uplink; level = s_level;
 +    frames = s_frames; drops = s_drops; why = s_last_drop;
 +    gaps = s_gaps; gap_ms = s_gap_ms;
 +    xSemaphoreGive(s_lock);
 +
-+    printf("@audio turn=%s wrote=%u total=%u played=%u live=%d level=%.2f frames=%u drops=%u last=%s gaps=%u gap_ms=%u\n",
-+           turn, (unsigned)wrote, (unsigned)total, (unsigned)played, live,
++    printf("@audio turn=%s wrote=%u total=%u played=%u live=%d uplink=%d level=%.2f frames=%u drops=%u last=%s gaps=%u gap_ms=%u\n",
++           turn, (unsigned)wrote, (unsigned)total, (unsigned)played, live, uplink,
 +           (double)level, (unsigned)frames, (unsigned)drops, why,
 +           (unsigned)gaps, (unsigned)gap_ms);
 +    fflush(stdout);
@@ -2985,10 +3092,10 @@ index 0000000..90e542f
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_audio.h b/esp32/components/muse/carpet/carpet_audio.h
 new file mode 100644
-index 0000000..26e15b2
+index 0000000..6abc544
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_audio.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,76 @@
 +/*
 + * 契约 v3 的语音通道：`command{cmd:"audio_chunk"}` 进来的 PCM 字节 → 喇叭。
 + *
@@ -3027,6 +3134,11 @@ index 0000000..26e15b2
 + */
 +void carpet_audio_abort(const char *why);
 +
++/* 麦克风开收时原子清掉旧答句并暂时压住新下行；interrupt=false 遇正在播放则拒绝开麦。
++ * 采集期间到达的音频仍按 seq 入账，但不置 live，end_uplink() 后再续播，避免半路被 abort 丢掉。 */
++bool carpet_audio_begin_uplink(bool interrupt);
++void carpet_audio_end_uplink(void);
++
 +/*
 + * 这一轮的声音放到哪了。给首屏那条带用的两件事：
 + *   played/total —— 念稿第几页跟着**播放位置**走，不再按 2.5 秒一页估
@@ -3048,9 +3160,15 @@ index 0000000..26e15b2
 + * 只在串口那条任务里调；它只负责喂数据，播在播放任务里，所以不占串口。 */
 +void carpet_audio_bench(int seconds);
 +
-+/* 开发口 `>audgap`：同 turn_id 两句、中间真空 3 秒，称"句间空档后续帧接不接得住"。
-+ * 期望 `>audio` 回读 drops=0、played≈112000。只在串口任务里调，全程约 3.5 秒。 */
-+void carpet_audio_bench_gap(void);
++/* 开发口 `>audgap [turn_id]`：同 turn_id 两句、中间真空 3 秒，称"句间空档后续帧接不接得住"。
++ * 期望 `>carpet` 回读 drops=0、played≈112000。只在串口任务里调，全程约 3.5 秒。 */
++void carpet_audio_bench_gap(const char *turn);
++
++/* 开发口 `>audhold`：开麦期间喂一段下行，必须先 live=0/played=0，松手后再续播。 */
++void carpet_audio_bench_hold(void);
++
++/* 开发口 `>audpre`：首块不足 200 ms，1.5 秒后也必须开口，不能永久等。 */
++void carpet_audio_bench_prebuffer(void);
 +
 +/* `>carpet` 回读里那一行：收了几个字节、总共说多少、放到哪、电平、丢过几次。 */
 +void carpet_audio_dump(void);
@@ -10892,10 +11010,10 @@ index 0000000..88c2ebe
 +void carpet_link_event_dump(void);
 diff --git a/esp32/components/muse/carpet/carpet_mic.c b/esp32/components/muse/carpet/carpet_mic.c
 new file mode 100644
-index 0000000..54007b4
+index 0000000..8744042
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.c
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,529 @@
 +/*
 + * 契约 v4 上行「对着屏说话」的屏侧那半：攒段 → 组帧 → 发。
 + *
@@ -11206,7 +11324,7 @@ index 0000000..54007b4
 +static int s_cur_peak;
 +static int s_last_peak;
 +
-+bool carpet_mic_begin(void)
++bool carpet_mic_begin(bool interrupt)
 +{
 +    if (s_dead) return false;
 +    int idx = -1;
@@ -11219,6 +11337,10 @@ index 0000000..54007b4
 +        ESP_LOGW(TAG, "上一句还没发完，这一次按下不采");
 +        return false;
 +    }
++    if (!carpet_audio_begin_uplink(interrupt)) {
++        strlcpy(s_last_err, "答句正在起播，这一轮先等", sizeof(s_last_err));
++        return false;
++    }
 +    s_cur = idx;
 +    s_cur_peak = 0;
 +    s_seg[idx].len = 0;
@@ -11227,12 +11349,6 @@ index 0000000..54007b4
 +    s_last_err[0] = '\0';
 +    snprintf(s_turn, sizeof(s_turn), "m-%06lx-%lu", (unsigned long)(s_boot_tag & 0xffffffUL),
 +             (unsigned long)(++s_turn_n));
-+    /* 上一轮的声音先停：这一段是**麦克风**在听，让喇叭继续念会把答句录进下一句里。
-+     * 规矩是 owner 2026-11-11 拍的那一条的一半 —— 屏起头这一轮只由屏出声，
-+     * 而"放音期间停上行"就在这一行落地。文字那句不动（carpet_audio_abort 只管声音）。
-+     * **不看 live 也要清**：§4 句间空档里账是停嘴留账（pause），这一刻 live 恰好是假 ——
-+     * 光凭它放行，第二句的帧会在新一轮录音播到一半时从喇叭里冒出来，录进去的全是屏自己。 */
-+    carpet_audio_abort("对着屏说话");
 +    return true;
 +}
 +
@@ -11270,6 +11386,7 @@ index 0000000..54007b4
 +void carpet_mic_end(bool send)
 +{
 +    if (s_cur < 0) return;
++    carpet_audio_end_uplink();
 +    seg_t *sg = &s_seg[s_cur];
 +    size_t bytes = sg->len;
 +    if (!send || bytes == 0) {
@@ -11403,8 +11520,8 @@ index 0000000..54007b4
 +        printf("@mictest 上行地基没起来（>mic 看为什么）\n");
 +        return;
 +    }
-+    if (!carpet_mic_begin()) {
-+        printf("@mictest 没段缓冲可用（上一句还在发）\n");
++    if (!carpet_mic_begin(true)) {
++        printf("@mictest 没段缓冲可用（上一句还在发，或答句起播竞态）\n");
 +        return;
 +    }
 +    static int16_t chunk[MUSE_AUDIO_CHUNK];
@@ -11428,10 +11545,10 @@ index 0000000..54007b4
 +}
 diff --git a/esp32/components/muse/carpet/carpet_mic.h b/esp32/components/muse/carpet/carpet_mic.h
 new file mode 100644
-index 0000000..57c626e
+index 0000000..8b38771
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_mic.h
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,125 @@
 +/*
 + * 契约 v4 的上行：「对着屏说话」。
 + *
@@ -11514,8 +11631,9 @@ index 0000000..57c626e
 +
 +
 +/* 按下（已经过了"太短就不算说话"那道判据）：开始攒这一段。
-+ * 返回 false = 两只段缓冲都还在发上一句，这一轮别采。 */
-+bool carpet_mic_begin(void);
++ * interrupt=false 时若答句正在播就拒绝开麦；显式按键传 true，仍可打断。
++ * 返回 false = 两只段缓冲都在发上一句，或 passive 开麦撞上正在起播的答句。 */
++bool carpet_mic_begin(bool interrupt);
 +
 +/* 采集循环里交一个块进来（`muse_audio_read` 刚拿到的那 320 帧）。满了就封顶在 8 秒。 */
 +void carpet_mic_feed(const int16_t *pcm, size_t frames);
@@ -14495,7 +14613,7 @@ index d27f69e..6345222 100644
      muse_state_init();
  #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..d9101ca 100644
+index 7c579bb..2efa7e3 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,28 @@
@@ -14701,7 +14819,7 @@ index 7c579bb..d9101ca 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +994,404 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +994,425 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -14758,9 +14876,19 @@ index 7c579bb..d9101ca 100644
 +    }
 +    /* §4 句间空档那一称：同 turn_id 两句、中间真空 3 秒（越过 1.5 秒判死线），
 +     * 第二句的 seq 接着数、total 换成整轮累计 —— 和手机 ScreenVoice 的账本一模一样。
-+     * 放完几秒后用 `>audio` 读：期望 drops=0、played≈112000。占串口约 3.5 秒。 */
-+    if (!strcmp(line, "audgap")) {
-+        carpet_audio_bench_gap();
++     * 可带不同 turn_id 连续称三轮；放完几秒后用 `>carpet` 读 drops=0、played≈112000。 */
++    if (!strncmp(line, "audgap", 6) && (line[6] == '\0' || line[6] == ' ')) {
++        const char *turn = line + 6;
++        while (*turn == ' ') turn++;
++        carpet_audio_bench_gap(turn);
++        return true;
++    }
++    if (!strcmp(line, "audhold")) {
++        carpet_audio_bench_hold();
++        return true;
++    }
++    if (!strcmp(line, "audpre")) {
++        carpet_audio_bench_prebuffer();
 +        return true;
 +    }
 +    /* 相册通道的台架口：把固件里嵌的测试 JPEG 按线上形状（2048 一块、b64、seq/total）
@@ -14852,6 +14980,17 @@ index 7c579bb..d9101ca 100644
 +        carpet_mic_bench(line[7] == ' ' ? atoi(line + 8) : 2);
 +        return true;
 +    }
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
++    /* 串口台架专用：不伪造唤醒识别，只直接请求窗口状态机，验四条收口与放完接麦。 */
++    if (!strncmp(line, "winbench", 8) && (line[8] == '\0' || line[8] == ' ')) {
++        const char *mode = line + 8;
++        while (*mode == ' ') mode++;
++        muse_voice_window_bench(mode);
++        printf("@winbench req=%s\n", *mode ? mode : "open");
++        fflush(stdout);
++        return true;
++    }
++#endif
 +    /* 本机造一帧"到点的养护"，称 #73 那三条让路和那枚琥珀点：`>maint` 是 worried，
 +     * `>maint off` 是中性（少了这一条就退不回 IDLE，脸会一直"想"着）。
 +     * 和 `>audtest` 同一个道理：不联网、不接模型，这块板在哪都能称。 */
@@ -15106,7 +15245,7 @@ index 7c579bb..d9101ca 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1426,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1447,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -15119,7 +15258,7 @@ index 7c579bb..d9101ca 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1534,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1555,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -16634,26 +16773,32 @@ index a671bbc..a56b3dc 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..37ed186 100644
+index 000104e..31068ac 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
-@@ -38,6 +38,13 @@
+@@ -38,6 +38,11 @@
  #include "muse_settings.h"
  #include "muse_state.h"
  #include "muse_wifi.h"
 +#if CONFIG_MUSE_CARPET_CARDS
 +#include "carpet/carpet_mic.h"    /* 「对着屏说话」：这一轮的语音交给手机，不去 Muse 云 */
 +#include "carpet/carpet_wake.h"   /* 免按键：听见那个词就替人按了一下键，后面整条路不变 */
-+#if CONFIG_MUSE_CARPET_CHAT_WINDOW
-+#include "carpet/carpet_audio.h"  /* 会话窗口：答句在屏上放完那一刻，重新开麦 */
-+#endif
++#include "carpet/carpet_audio.h"  /* 开麦与答句播放的原子交接 */
 +#endif
  #if CONFIG_MUSE_REALTIME_VOICE
  #include "muse_voice_call.h"
  #include "muse_voice_call_core.h"
-@@ -221,6 +228,13 @@ static void idle_capture(void)
+@@ -215,21 +220,29 @@ static void pre_put(void)
+ }
+ 
+ /* One 20 ms idle read: feeds the pre-roll ring and the settings mic meter. */
+-static void idle_capture(void)
++static bool idle_capture(void)
+ {
+     if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
          vTaskDelay(pdMS_TO_TICKS(20));
-         return;
+-        return;
++        return false;
      }
 +#if CONFIG_MUSE_CARPET_CARDS
 +    /* 唤醒词就挂在这儿：这是全机**唯一**那个麦克风读者，另起一个读者会等满 1 秒令牌
@@ -16665,7 +16810,18 @@ index 000104e..37ed186 100644
      if (s_monitor) {
          float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
          s_monitor_db = db > s_monitor_db ? db : s_monitor_db * 0.9f + db * 0.1f;
-@@ -414,6 +428,174 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
+     }
+     if (s_settle > 0) {
+         s_settle--;
+-        return;
++        return true;
+     }
+     pre_put();
++    return true;
+ }
+ 
+ /* Consume through the requested edge, leaving later edges for the next
+@@ -414,6 +427,237 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
  
  static void go_idle(const char *caption);
  
@@ -16698,47 +16854,109 @@ index 000104e..37ed186 100644
 +#define HF_MIN_LOUD 8          /* 至少 160 ms 真有人出声 */
 +#define HF_NOTHING_CHUNKS 100  /* 2 秒还没人出声：判成误触发 */
 +#define HF_THRESH_CAP (-25.0f)
++#define GAP_VAD_WINDOW 25     /* 500 ms 内至少 8 块有声，才当孩子接着说话 */
++#define GAP_THRESH_FLOOR (-45.0f)
 +
 +#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
-+/* 会话窗口：一次「你好小安」开场，此后每轮答句在屏上放完就自动重新开麦；
-+ * 满 60 秒、说没听清、熄屏、断闸，四种收口。
-+ * 「放完」这个判据只有**屏自己念答句**时才听得见（carpet_audio 的落点）。
-+ * 答句要是从手机那头念（#76 没修的现状），发完 12 秒等不到任何一段音频起头，
-+ * 当场判这轮没耳朵、关窗说实话 —— 窗口宁可关，不能空转：空转的窗口会在
-+ * 孩子沉默的 8 秒里不停把环境噪声往手机发。 */
++/* 会话窗口：一次「你好小安」开场，答句停播后保留同一轮音频账，被动等下一句或人声；
++ * 12 秒没人也没下一句、60 秒寿命、熄屏、断闸，四种收口。
++ * 停播不等于整轮结束：App 的长答会隔几秒再用同 turn_id、续 seq、累计 total 发下一句。
++ * 这段等待里不调用 carpet_mic_begin()，否则它会清掉还没到的下一句。 */
 +#define WIN_LIFE_S 60
 +#define WIN_REPLY_WAIT_S 12
 +static int64_t s_win_until_us;   /* 0 = 关着 */
 +static int64_t s_win_turn_us;    /* 这一句交出去的时刻 */
++static int64_t s_win_gap_us;     /* 答句停播后开始等人/等下一句的时刻 */
 +static bool s_win_reply_live;    /* 这轮已经听到答句音频起头 */
++static bool s_win_reply_gap;     /* 停播后还没判定整轮结束 */
 +static bool s_turn_sent;         /* talk_to_phone 走到过 carpet_mic_end(true) */
++static bool s_window_bench_forced;
++static volatile unsigned s_window_bench_req;
++enum { WIN_BENCH_OPEN = 1, WIN_BENCH_SLEEP, WIN_BENCH_TIMEOUT, WIN_BENCH_WAKE };
 +
 +static void window_open(void)
 +{
 +    int64_t now = esp_timer_get_time();
 +    s_win_until_us = now + (int64_t)WIN_LIFE_S * 1000000;
 +    s_win_turn_us = now;
++    s_win_gap_us = 0;
 +    s_win_reply_live = false;
++    s_win_reply_gap = false;
++    printf("@window open life=%ds reply_wait=%ds\n", WIN_LIFE_S, WIN_REPLY_WAIT_S);
++    fflush(stdout);
 +}
 +
 +static void window_close(const char *why)
 +{
 +    if (!s_win_until_us) return;
 +    s_win_until_us = 0;
++    s_win_reply_gap = false;
++    s_window_bench_forced = false;
++    carpet_wake_inhibit(false);
++    printf("@window close reason=%s\n", why ? why : "gate-or-unheard");
++    fflush(stdout);
 +    if (why) go_idle(why);
 +}
 +#endif
 +
 +/* 只有一条采集任务用它，放 .bss（200 B 内部）而不是那 6144 字节的任务栈上。 */
 +static float s_hf_win[HF_WINDOW];
++static float s_gap_win[HF_WINDOW];
++static bool s_gap_recent[GAP_VAD_WINDOW];
++static size_t s_gap_n, s_gap_loud, s_gap_silent, s_gap_recent_loud;
++static float s_gap_peak_db, s_gap_floor_db;
 +
-+static void talk_to_phone(bool barge_in, bool hands_free)
++static void window_gap_vad_reset(void)
++{
++    s_gap_n = s_gap_loud = s_gap_silent = s_gap_recent_loud = 0;
++    s_gap_peak_db = -100.0f;
++    s_gap_floor_db = -100.0f;
++    memset(s_gap_recent, 0, sizeof s_gap_recent);
++}
++
++static bool window_gap_heard(void)
++{
++    float db = muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK);
++    s_gap_win[s_gap_n % HF_WINDOW] = db;
++    s_gap_n++;
++    size_t have = s_gap_n < HF_WINDOW ? s_gap_n : HF_WINDOW;
++    float floor_db = s_gap_win[0];
++    for (size_t i = 1; i < have; i++) {
++        if (s_gap_win[i] < floor_db) floor_db = s_gap_win[i];
++    }
++    float thresh = floor_db + 8.0f;
++    if (thresh > HF_THRESH_CAP) thresh = HF_THRESH_CAP;
++    if (thresh < GAP_THRESH_FLOOR) thresh = GAP_THRESH_FLOOR;
++    bool loud = db >= thresh;
++    size_t slot = (s_gap_n - 1) % GAP_VAD_WINDOW;
++    if (s_gap_n > GAP_VAD_WINDOW && s_gap_recent[slot]) s_gap_recent_loud--;
++    s_gap_recent[slot] = loud;
++    if (loud) {
++        s_gap_loud++;
++        s_gap_recent_loud++;
++        s_gap_silent = 0;
++    } else {
++        s_gap_silent++;
++    }
++    if (db > s_gap_peak_db) s_gap_peak_db = db;
++    if (floor_db < s_gap_floor_db) s_gap_floor_db = floor_db;
++    if (s_gap_recent_loud >= HF_MIN_LOUD) {
++        printf("@window gap speech db=%.1f floor=%.1f thresh=%.1f peak=%.1f loud=%zu recent=%zu after=%.2fs\n",
++               db, floor_db, thresh, s_gap_peak_db, s_gap_loud, s_gap_recent_loud,
++               (double)(esp_timer_get_time() - s_win_gap_us) / 1e6);
++        fflush(stdout);
++        return true;
++    }
++    return false;
++}
++
++static void talk_to_phone(bool barge_in, bool hands_free, bool speech_primed)
 +{
 +#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
 +    s_turn_sent = false;
 +#endif
-+    if (!carpet_mic_begin()) {
-+        go_idle("上一句还在发，稍等一下");
++    if (!carpet_mic_begin(barge_in || !hands_free)) {
++        go_idle(carpet_audio_live() ? "等这句说完再说" : "上一句还在发，稍等一下");
 +        return;
 +    }
 +    muse_state_set_mode(MUSE_MODE_LISTENING);
@@ -16746,6 +16964,7 @@ index 000104e..37ed186 100644
 +    muse_state_set_caption(hands_free ? "在听，说完停一下" : "在听");
 +
 +    size_t n = 0;
++    size_t win_n = 0, loud = speech_primed ? HF_MIN_LOUD : 0, silent_run = 0;
 +    if (barge_in) {
 +        /* 按下的时候还有声音在放：那 200 毫秒是它自己的尾音，不进这一段。
 +         * （begin() 已经把排着的语音清了，这里清的是已经在 DMA 里的那一截。） */
@@ -16759,6 +16978,7 @@ index 000104e..37ed186 100644
 +         * 那比丢字轻得多，手机那头的提示词本来就该忽略它。 */
 +        for (size_t i = 0; i < s_pre_fill; i++) {
 +            pre_get(i, s_chunk);
++            if (hands_free && muse_audio_dbfs(s_chunk, MUSE_AUDIO_CHUNK) >= GAP_THRESH_FLOOR) loud++;
 +            carpet_mic_feed(s_chunk, MUSE_AUDIO_CHUNK);
 +            n += MUSE_AUDIO_CHUNK;
 +        }
@@ -16767,7 +16987,6 @@ index 000104e..37ed186 100644
 +    size_t limit = carpet_mic_limit_frames();
 +    size_t stop_at = limit;
 +    bool released = false;
-+    size_t win_n = 0, loud = 0, silent_run = 0;
 +    while (n + MUSE_AUDIO_CHUNK <= stop_at) {
 +        if (muse_audio_read(s_chunk, MUSE_AUDIO_CHUNK) != ESP_OK) {
 +            break;
@@ -16840,7 +17059,7 @@ index 000104e..37ed186 100644
  /*
   * Plays Hatch's reply as it arrives, with its text as the caption. Returns
   * true if interrupted by a new press. *delivered: the VM has the note.
-@@ -533,7 +715,12 @@ static const char *not_ready_reason(void)
+@@ -533,7 +777,12 @@ static const char *not_ready_reason(void)
      muse_hatch_status_t st;
      muse_hatch_status(&st);
      switch (st.state) {
@@ -16853,7 +17072,7 @@ index 000104e..37ed186 100644
      case MUSE_HATCH_OFFLINE: return "NO WI-FI";
      default: return "CAN'T REACH MUSE";
      }
-@@ -897,8 +1084,16 @@ static bool can_record(void)
+@@ -897,8 +1146,16 @@ static bool can_record(void)
      muse_hatch_status_t st;
      muse_hatch_status(&st);
      if (st.state == MUSE_HATCH_NOT_SET) {
@@ -16870,21 +17089,77 @@ index 000104e..37ed186 100644
      }
      if ((!ready || s_held_count) && s_held_count >= HELD_MAX) {
          go_idle("NOTES STILL WAITING TO SEND");
-@@ -1217,6 +1412,83 @@ static void voice_task(void *arg)
+@@ -1163,6 +1420,42 @@ static void voice_task(void *arg)
+     bool pending_down = false;
+     muse_audio_selftest();
+     for (;;) {
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++        if (s_window_bench_req) {
++            unsigned req = s_window_bench_req;
++            s_window_bench_req = 0;
++            if (req == WIN_BENCH_WAKE) {
++                s_window_bench_forced = false;
++                muse_state_set_asleep(false);
++                muse_input_wake("window-bench");
++            } else if (req == WIN_BENCH_SLEEP) {
++                muse_state_set_asleep(true);
++            } else if (req == WIN_BENCH_TIMEOUT) {
++                s_window_bench_forced = true;
++                /* Wake here before the NVS-writing input path reaches a PSRAM stack. */
++                if (muse_state_asleep()) muse_state_set_asleep(false);
++                muse_input_wake("window-bench");
++                muse_wifi_power(MUSE_WIFI_FULL);
++                if (!s_win_until_us) window_open();
++                int64_t now = esp_timer_get_time();
++                s_win_until_us = now + 3000000;
++                s_win_turn_us = now;
++                s_win_gap_us = 0;
++                s_win_reply_live = false;
++                s_win_reply_gap = false;
++                printf("@window bench timeout in 3s\n");
++                fflush(stdout);
++            } else {
++                s_window_bench_forced = true;
++                if (muse_state_asleep()) muse_state_set_asleep(false);
++                muse_input_wake("window-bench");
++                muse_wifi_power(MUSE_WIFI_FULL);
++                window_open();
++            }
++            pre_reset();
++            continue;
++        }
++#endif
+         bool wake = false;
+         if (!pending_down) {
+             muse_input_event_t ev;
+@@ -1189,6 +1482,9 @@ static void voice_task(void *arg)
+              * between beacons as xiaozhi's idle does; a press wakes it fully. */
+             muse_wifi_power(rest ? MUSE_WIFI_REST : battery ? MUSE_WIFI_DOZE : MUSE_WIFI_FULL);
+             if (rest) {
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++                if (s_win_until_us) window_close("屏幕熄了，窗口先收");
++#endif
+                 /* Wait for waking, USB power or a bench request without
+                  * polling (the timeout is only a backstop, or a look for
+                  * Wi-Fi to send saved notes), so the CPU can stay asleep. */
+@@ -1216,7 +1512,125 @@ static void voice_task(void *arg)
+                 pre_reset();
              }
              /* The 20 ms read paces this loop. */
-             idle_capture();
+-            idle_capture();
++            bool captured = idle_capture();
 +#if CONFIG_MUSE_CARPET_CARDS
 +            /* 唤醒词命中 = 替人按了一下那个键。**闸一道都不放宽**：能不能真发上去
 +             * 仍由 carpet_mic_armed() 判（本地 mic_mode + 对面申报过 v4 + 没被熔断）。
 +             * 没开的时候不出声也不发，只把真正的原因写在屏上 —— 否则"说了没反应"
 +             * 分不清是词没听见还是闸没开，而那两件事的修法完全不同。 */
 +            if (carpet_wake_take()) {
++                if (muse_state_asleep()) muse_state_set_asleep(false);
 +                muse_input_wake("voice");
 +                if (carpet_mic_armed()) {
 +                    muse_wifi_power(MUSE_WIFI_FULL);
 +                    carpet_wake_inhibit(true);
-+                    talk_to_phone(false, true);
++                    talk_to_phone(false, true, false);
 +                    carpet_wake_inhibit(false);
 +#if CONFIG_MUSE_CARPET_CHAT_WINDOW
 +                    /* 命中开场、这句真发出去了，才给 60 秒的窗口；
@@ -16902,11 +17177,12 @@ index 000104e..37ed186 100644
 +            /* 点 Avatar 进对话（B §1 的唯一兜底）：和唤醒词命中走同一条免按键采集，
 +             * 闸一道都不放宽。记号由 LVGL 任务在点脸那一格时立下（carpet_page.c）。 */
 +            if (carpet_mic_talk_take()) {
++                if (muse_state_asleep()) muse_state_set_asleep(false);
 +                muse_input_wake("touch");
 +                if (carpet_mic_armed()) {
 +                    muse_wifi_power(MUSE_WIFI_FULL);
 +                    carpet_wake_inhibit(true);
-+                    talk_to_phone(false, true);
++                    talk_to_phone(false, true, false);
 +                    carpet_wake_inhibit(false);
 +                } else if (carpet_mic_link_up()) {
 +                    go_idle("对着屏说话还没开");
@@ -16917,27 +17193,66 @@ index 000104e..37ed186 100644
 +                continue;
 +            }
 +#if CONFIG_MUSE_CARPET_CHAT_WINDOW
-+            /* 窗口维护：放完→重新开麦；没耳朵/超时/熄屏→说实话关窗。
++            /* 窗口维护：停播后先保留音频账，等下一句或人声；没耳朵/超时/熄屏→关窗。
 +             * 放在唤醒和点脸之后、按键事件之前：这三条路不会同时开火。 */
 +            if (s_win_until_us) {
 +                int64_t now = esp_timer_get_time();
-+                if (muse_state_asleep() || !carpet_mic_armed()) {
++                if (muse_state_asleep() || (!s_window_bench_forced && !carpet_mic_armed())) {
 +                    window_close(muse_state_asleep() ? "屏幕熄了，窗口先收" : NULL);
++                } else if (s_win_reply_gap) {
++                    if (carpet_audio_live()) {
++                        s_win_reply_gap = false;
++                        s_win_reply_live = true;
++                        carpet_wake_inhibit(false);
++                        pre_reset();
++                        printf("@window reply resumed\n");
++                        fflush(stdout);
++                    } else if (captured && s_settle == 0 && window_gap_heard()) {
++                        s_win_reply_gap = false;
++                        muse_wifi_power(MUSE_WIFI_FULL);
++                        carpet_wake_inhibit(true);
++                        talk_to_phone(false, true, true);
++                        carpet_wake_inhibit(false);
++                        if (s_turn_sent) {
++                            s_win_turn_us = esp_timer_get_time();
++                        } else if (carpet_audio_live()) {
++                            s_win_reply_gap = true;
++                            window_gap_vad_reset();
++                        } else {
++                            window_close(NULL);
++                        }
++                        pre_reset();
++                        continue;
++                    } else if (now - s_win_gap_us > (int64_t)WIN_REPLY_WAIT_S * 1000000) {
++                        printf("@window gap quiet peak=%.1f floor=%.1f loud=%zu after=%.2fs\n",
++                               s_gap_peak_db, s_gap_floor_db, s_gap_loud,
++                               (double)(now - s_win_gap_us) / 1e6);
++                        fflush(stdout);
++                        carpet_wake_inhibit(false);
++                        go_idle("没听清，再说一次");
++                        window_close(NULL);
++                        pre_reset();
++                        continue;
++                    } else if (now > s_win_until_us) {
++                        window_close("到一会儿了，想接着聊再喊「你好小安」");
++                        pre_reset();
++                        continue;
++                    }
 +                } else if (carpet_audio_live()) {
++                    if (!s_win_reply_live) {
++                        printf("@window reply live\n");
++                        fflush(stdout);
++                    }
 +                    s_win_reply_live = true;
 +                } else if (s_win_reply_live) {
-+                    /* 起头有过、现在没了：这句放完了，接麦。 */
 +                    s_win_reply_live = false;
-+                    muse_wifi_power(MUSE_WIFI_FULL);
++                    s_win_reply_gap = true;
++                    s_win_gap_us = now;
++                    window_gap_vad_reset();
 +                    carpet_wake_inhibit(true);
-+                    talk_to_phone(false, true);
-+                    carpet_wake_inhibit(false);
-+                    if (s_turn_sent) {
-+                        s_win_turn_us = esp_timer_get_time();
-+                    } else {
-+                        window_close(NULL);  /* 没听清那句已经替话说过了，不再补一句 */
-+                    }
 +                    pre_reset();
++                    printf("@window reply gap wait\n");
++                    fflush(stdout);
 +                    continue;
 +                } else if (now - s_win_turn_us > (int64_t)WIN_REPLY_WAIT_S * 1000000) {
 +                    window_close("这轮答句没从屏上念，窗口收在；连上会出声的 App 再开");
@@ -16954,7 +17269,7 @@ index 000104e..37ed186 100644
              if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                  continue;
              }
-@@ -1255,6 +1527,19 @@ static void voice_task(void *arg)
+@@ -1255,6 +1669,19 @@ static void voice_task(void *arg)
          }
  #endif
          muse_input_clear_call_pending(s_press_mark);
@@ -16966,7 +17281,7 @@ index 000104e..37ed186 100644
 +        if (carpet_mic_armed()) {
 +            bool barge = pending_down;
 +            pending_down = false;
-+            talk_to_phone(barge, false);
++            talk_to_phone(barge, false, false);
 +            pre_reset();
 +            continue;
 +        }
@@ -16974,7 +17289,7 @@ index 000104e..37ed186 100644
          if (!can_record()) {
              pending_down = false;
              continue;
-@@ -1301,7 +1586,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
+@@ -1301,7 +1728,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
          muse_state_set_caption("AUDIO INIT FAILED");
          return ESP_FAIL;
      }
@@ -16987,6 +17302,38 @@ index 000104e..37ed186 100644
      if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", 6144, NULL, 6, NULL, MUSE_AUDIO_CORE,
                                          MUSE_BIG_CAPS) != pdPASS) {
          /* Without the task nothing would ever rest the codecs, which
+@@ -1343,6 +1774,17 @@ void muse_voice_request_mp3test(void)
+     muse_state_nudge();
+ }
+ 
++void muse_voice_window_bench(const char *mode)
++{
++#if CONFIG_MUSE_CARPET_CARDS && CONFIG_MUSE_CARPET_CHAT_WINDOW
++    if (!mode || !*mode || !strcmp(mode, "open")) s_window_bench_req = WIN_BENCH_OPEN;
++    else if (!strcmp(mode, "sleep")) s_window_bench_req = WIN_BENCH_SLEEP;
++    else if (!strcmp(mode, "timeout")) s_window_bench_req = WIN_BENCH_TIMEOUT;
++    else if (!strcmp(mode, "wake")) s_window_bench_req = WIN_BENCH_WAKE;
++    muse_state_nudge();
++#endif
++}
++
+ bool muse_voice_resting(void)
+ {
+     return s_resting;
+diff --git a/esp32/components/muse/muse_voice.h b/esp32/components/muse/muse_voice.h
+index 5fecf46..54243b4 100644
+--- a/esp32/components/muse/muse_voice.h
++++ b/esp32/components/muse/muse_voice.h
+@@ -68,6 +68,9 @@ void muse_voice_request_loopback(void);
+ /* Bench test: decodes and plays a built-in MP3 reply. */
+ void muse_voice_request_mp3test(void);
+ 
++/* Serial-only chat-window scenarios: open, sleep, timeout, wake. */
++void muse_voice_window_bench(const char *mode);
++
+ /* Asleep with nothing to play: codecs off, Wi-Fi dozing. */
+ bool muse_voice_resting(void);
+ 
 diff --git a/esp32/devices/sdkconfig.carpet b/esp32/devices/sdkconfig.carpet
 new file mode 100644
 index 0000000..fa53c9f
