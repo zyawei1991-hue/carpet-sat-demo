@@ -24,6 +24,10 @@ sealed interface MeUiState {
         val flags: FlagsUi,
         val sentinel: Boolean,
         val fence: Boolean,
+        /** 断联提醒开没开。开没开由 core 的判定状态出，界面不许自己记一个布尔 */
+        val leaveBehind: Boolean = false,
+        /** 那一行下面跟着的现值话。空 = 用开关自带的说明 */
+        val leaveBehindLine: String = "",
         val guardRunning: Boolean,
         val assistant: MeAssistantUi,
         /** 它现在的名字。空 = 还没起名，界面上先给起名入口 */
@@ -64,6 +68,14 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
         )
     }
 
+    private data class GuardPart(val armed: Boolean, val line: String)
+
+    private val guardFlow = combine(app.status, app.leaveBehindLine) { _, line ->
+        // 借 status 那一拍驱动：断联的现值只有 1Hz 在跑的时候才在动，
+        // 单独读一次 leaveBehindLine 会让"已断联 12 秒"那行停在布防那一刻
+        GuardPart(app.leaveBehindArmed(), line)
+    }
+
     private val assistantFlow = combine(app.aiEndpoint, app.aiGranted, app.petName) { ep, g, name ->
         MeAssistantUi(
             endpoint = ep,
@@ -73,11 +85,13 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
         )
     }
 
-    val uiState: StateFlow<MeUiState> = combine(runtimeFlow, assistantFlow) { r, a ->
+    val uiState: StateFlow<MeUiState> = combine(runtimeFlow, assistantFlow, guardFlow) { r, a, g ->
         MeUiState.Ready(
             flags = FlagsUi(r.acceptScreens, r.demoMode),
             sentinel = r.sentinel,
             fence = r.fence,
+            leaveBehind = g.armed,
+            leaveBehindLine = g.line,
             guardRunning = r.running,
             assistant = a,
             petName = a.petName,
@@ -93,6 +107,8 @@ class MeViewModel(private val app: AppRuntime) : ViewModel() {
     fun setSentinel(on: Boolean) = app.setSentinel(on)
 
     fun setFence(on: Boolean, name: String) = app.setFence(on, name)
+
+    fun setLeaveBehind(on: Boolean) = app.setLeaveBehind(on)
 
     fun setGranted(tier: PermissionTier) = app.setAiGranted(tier)
 

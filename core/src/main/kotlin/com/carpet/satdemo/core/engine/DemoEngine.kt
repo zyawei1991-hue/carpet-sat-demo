@@ -276,6 +276,13 @@ class DemoEngine(
     fun fenceBreached(): Boolean = fence.active && !fence.inside
 
     /**
+     * 当下这个定位。断联提醒布防时要拿它当停车圈的圆心 ——
+     * 之前 [AppRuntime] 那条 `setFence` 只传名字不传圆，围栏在 App 侧永远越不了界，
+     * 差的就是这一句读口（见 [setFence] 那段注释）。
+     */
+    val currentFix: GnssState? get() = fix
+
+    /**
      * 心跳。CELL 态由 App 自己走蜂窝上报，这里只处理卫星那一路；
      * 模块没收下就进 [pending]，别丢。
      */
@@ -335,15 +342,32 @@ class DemoEngine(
      */
     suspend fun sendPreset(text: String, nowSec: Long): PresetSend {
         val payload = text.toByteArray(Charsets.UTF_8)
+        val out = sendFrames(payload, nowSec, OutboxClass.Message, bookkeep = true)
+        lastPreset = out
+        return out
+    }
+
+    /**
+     * 告警帧（断联提醒走这条）。和预设短语同一套分片骨架，差的只有两件事：
+     * 排队档位是 [OutboxClass.Alarm] —— 压不进模组那 50 个槽时先丢遥测，不丢这一条；
+     * 以及**不顶 [lastPreset]**，那一格写的是"最近一条预设短语"，被告警盖掉就是卡面在说假话。
+     */
+    suspend fun sendAlarm(text: String, nowSec: Long): PresetSend =
+        sendFrames(text.toByteArray(Charsets.UTF_8), nowSec, OutboxClass.Alarm, bookkeep = false)
+
+    private suspend fun sendFrames(
+        payload: ByteArray,
+        nowSec: Long,
+        cls: OutboxClass,
+        bookkeep: Boolean,
+    ): PresetSend {
+        val text = String(payload, Charsets.UTF_8)
         val budget = MessageBudget.from(modem.caps)
         val f = fix
         val frames = runCatching {
             encoder.encodeExt(payload, f?.lat ?: 0.0, f?.lon ?: 0.0, nowSec, phoneBatteryPct, budget)
         }.getOrDefault(emptyList())
-        if (frames.isEmpty()) {
-            lastPreset = PresetSend(text, payload.size, 0, PresetStage.InPhoneQueue, nowSec)
-            return lastPreset!!
-        }
+        if (frames.isEmpty()) return PresetSend(text, payload.size, 0, PresetStage.InPhoneQueue, nowSec)
 
         val handed = LinkedHashMap<String, Boolean>()
         var satDone = 0
@@ -354,7 +378,7 @@ class DemoEngine(
                 .getOrDefault(SatSend.failed(SatPath.QUEUED, SatFailReason.NO_REPLY))
             when {
                 send.accepted && send.result == SatResult.COMPLETE -> {
-                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    outbox.offer(hex, cls, nowMs = nowSec * 1000)
                     outbox.confirm(hex)
                     handed[hex] = true
                     satDone++
@@ -362,26 +386,25 @@ class DemoEngine(
                 }
                 send.accepted -> {
                     // 双写：模组"收下"只代表进了它自己的队列，盯梢副本照 SOS 那条留（E.6）
-                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    outbox.offer(hex, cls, nowMs = nowSec * 1000)
                     outbox.markHanded(hex, nowSec * 1000)
                     handed[hex] = true
                     moduleDone++
                 }
                 else -> {
                     // 一个字节都没写出去：整片留在 [outbox] 里等补发窗口，档位停在"还在手机队列"
-                    outbox.offer(hex, OutboxClass.Message, nowMs = nowSec * 1000)
+                    outbox.offer(hex, cls, nowMs = nowSec * 1000)
                     handed[hex] = false
                 }
             }
         }
-        presetFrames = handed
+        if (bookkeep) presetFrames = handed
         val stage = when {
             satDone == frames.size -> PresetStage.SatConfirmed
             moduleDone > 0 -> PresetStage.HandedToTerminal
             else -> PresetStage.InPhoneQueue
         }
-        lastPreset = PresetSend(text, payload.size, frames.size, stage, nowSec)
-        return lastPreset!!
+        return PresetSend(text, payload.size, frames.size, stage, nowSec)
     }
 
     /** drain 把攒下的帧补出去之后回调：上一次那条预设若因此交完，档位要跟着走 */

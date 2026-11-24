@@ -191,6 +191,16 @@ fun MeTab(
                 "车开出这个范围就用卫星发一条，不用等手机信号") {
                 confirmHaptic(); vm.setFence(it, "西湖景区")
             }
+            // 遗留车内这一版只做断联：高温要车内温度探头、体征要手环硬件，都没有数据源。
+            // 说明里就把这条边界写出来，别让用户以为它在看着温度
+            ToggleRow(
+                "断联提醒（遗留车内）",
+                ready.leaveBehind,
+                ready.leaveBehindLine.ifBlank {
+                    "带手机走远、车上那台设备没跟上：断链满 60 秒且已离开停车圈就报警，不看温度和体征"
+                }) {
+                confirmHaptic(); vm.setLeaveBehind(it)
+            }
         }
         AssistantSettings(vm, ready.assistant)
         PetNameCard(vm, ready.assistant.petName)

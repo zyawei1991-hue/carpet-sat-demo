@@ -8,6 +8,8 @@ import com.carpet.satdemo.core.devices.DeviceBus
 import com.carpet.satdemo.core.devices.DeviceKind
 import com.carpet.satdemo.core.devices.DeviceLink
 import com.carpet.satdemo.core.devices.Transport
+import com.carpet.satdemo.core.guard.LeaveBehindWatch
+import com.carpet.satdemo.core.protocol.GeodeticPosition
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.link.CellStatus
@@ -396,6 +398,111 @@ class DemoRuntime(
     fun setFence(active: Boolean, name: String?, centerLat: Double? = null, centerLon: Double? = null,
                  radiusM: Double = 0.0) = engine.setFence(active, name, centerLat, centerLon, radiusM)
 
+    /**
+     * 断联提醒（遗留车内告警的第一版）。判据和话术都在 [LeaveBehindWatch]，这里只管三件事：
+     * 停车圈那个圆、每拍喂一次、报出来之后分发给人看的那几路。
+     *
+     * **为什么自己记一个圆，不复用 [DemoEngine.setFence] 那一格**：那一格被「电子围栏：西湖景区」
+     * 占着，两个功能抢一个圆心，开关就会互相打脸 —— 打开断联提醒把景区围栏顶掉，
+     * 是那种演示当天才会被发现、且一定被发现不了的错。复用真正复用的是同一套大圆距离公式
+     * （[GeodeticPosition.distanceMetersTo]）和同一族 1Hz 边沿判定。
+     */
+    val leaveBehind = LeaveBehindWatch()
+
+    /** 布防那一刻的停车圈。null = 没布防 */
+    private var lbCenter: GeodeticPosition? = null
+    private var lbRadiusM = 0.0
+
+    /**
+     * 断联提醒的每一句话都过这里，**App 用它落通知栏**。core 不碰 android.app.Notification：
+     * 这个类还要在桌面彩排台上跑，那边没有通知栏，只有 stdout。
+     */
+    var onLeaveBehind: (LeaveBehindWatch.Note) -> Unit = {}
+
+    /**
+     * 开断联提醒。
+     *
+     * @return null = 已开；非空 = 开不起来的原因，调用方**必须原样念给用户**，
+     *   不许吞掉后把开关画成开着的样子
+     */
+    fun armLeaveBehind(radiusM: Double = LEAVE_BEHIND_RADIUS_M, holdMs: Long = leaveBehind.holdMs): String? {
+        val f = engine.currentFix
+            ?: return "手机此刻没有定位，画不出停车圈；断联提醒先不开"
+        val why = leaveBehind.arm(devices.current(), clockMs(), holdMs)
+        if (why != null) return why
+        lbCenter = GeodeticPosition.of(f.lat, f.lon)
+        lbRadiusM = radiusM
+        log(
+            "断联提醒已开：盯 ${leaveBehind.tracked.joinToString("/") { it.title }}，" +
+                "离开 ${radiusM.toInt()} 米圈外且断链 ${holdMs / 1000} 秒就报警",
+        )
+        return null
+    }
+
+    fun disarmLeaveBehind() {
+        if (leaveBehind.phase == LeaveBehindWatch.Phase.Idle && lbCenter == null) return
+        leaveBehind.disarm()
+        lbCenter = null
+        lbRadiusM = 0.0
+        log("断联提醒已关")
+    }
+
+    val leaveBehindArmed: Boolean get() = leaveBehind.phase != LeaveBehindWatch.Phase.Idle
+
+    /**
+     * 每拍喂一次。没有定位时喂 `outsideM = null` —— 宁可不报，也不猜一句「车里有人」。
+     * 挂在这里（而不是 tickOnce 里）的理由和 [noteScreenEvents] 一样：手动重算那一拍也要判。
+     */
+    private fun noteLeaveBehind(now: Long) {
+        val c = lbCenter ?: return
+        val f = engine.currentFix ?: return
+        val over = GeodeticPosition.of(f.lat, f.lon).distanceMetersTo(c) - lbRadiusM
+        val away = if (over > 0) over else null
+        leaveBehind.tick(devices.current(), away, now).forEach { note ->
+            when (note) {
+                is LeaveBehindWatch.Note.Lost ->
+                    log("${note.device.title} 断联，${note.willFireInMs / 1000} 秒内没接上且人已离开就报警")
+                is LeaveBehindWatch.Note.InPlace ->
+                    log("${note.device.title} 已断联 ${leaveBehind.holdMs / 1000} 秒，但你还在停车圈里，不算遗留")
+                is LeaveBehindWatch.Note.Fire -> {
+                    log("断联报警：${note.device.title} 在你离开 ${note.awayM} 米时仍未接上")
+                    fireAlarm(note)
+                }
+                is LeaveBehindWatch.Note.Back ->
+                    log(if (note.wasAlarmed) "${note.device.title} 重新连上，那条断联报警解除"
+                        else "${note.device.title} 重新连上，没报警")
+            }
+            onLeaveBehind(note)
+        }
+    }
+
+    /**
+     * 报警往外送。三路，各自的条件不一样：
+     * 通知栏和日志无条件（这是给**人**看的，不看链路脸色）；卫星那一路只送一条机器码 ——
+     * 最坏一档一片只有 24 字节，中文正文会把它撑成好几片，而"谁报警了"这件事平台侧靠 owner_id
+     * 和坐标就认得出来，人话留在手机上念。
+     *
+     * **故意不推给圆屏**：报这件事的时候屏正是那台断联的设备，写一条弹不出来的横幅
+     * 只会让人以为"通知发出去了"。协议也就不用为它加新 kind（11-24 那条"别为它新增消息格式"同规）。
+     */
+    private fun fireAlarm(note: LeaveBehindWatch.Note.Fire) {
+        scope.launch { sendLeaveBehindAlarm(note) }
+    }
+
+    /**
+     * 报警那一条报文。单独做成 public suspend 是给单测留的口子 ——
+     * [tickOnce] 那一拍不会等协程（和 [pressSos] 同一个形状），想验帧的形状只能自己 await。
+     */
+    suspend fun sendLeaveBehindAlarm(note: LeaveBehindWatch.Note.Fire): DemoEngine.PresetSend {
+        val out = engine.sendAlarm(alarmCode(note.device.id), nowSec = clockMs() / 1000)
+        log("断联报警上星 ${out.statusLine()}")
+        return out
+    }
+
+    /** 卫星正文那 24 字节里放什么：一台设备一个稳定短码，不带中文也不带可变长度 */
+    private fun alarmCode(id: String): String =
+        "LB:" + id.filter { it.isLetterOrDigit() }.takeLast(14).uppercase()
+
     /** 默认关。演示现场才放开，见 protocol/screen-link.md 的接入控制一节 */
     fun setAcceptScreens(accept: Boolean) {
         server.accepting = accept
@@ -616,6 +723,7 @@ class DemoRuntime(
      */
     private fun publishState(snap: StatePayload, now: Long) {
         noteScreenEvents(snap)
+        noteLeaveBehind(now)
         // 画哪张卡由这边定（屏只照着画），答句那张脸也在这里并进 ui.emotion
         val shown = noteScreenCard(snap, now)
         // 断线时展示端保留最后一帧，所以这条同时也是它的"还活着"信号
@@ -1089,6 +1197,13 @@ class DemoRuntime(
     companion object {
         /** 占位。真实值等时空道宇分配车主 ID 段位，见 docs/DECISIONS.md D3 的外部依赖 */
         const val DEFAULT_OWNER_ID = 12_061L
+
+        /**
+         * 停车圈半径。取 80 米是两头凑出来的：比手机/车那侧无线的实际覆盖（屏连的是热点或车载路由，
+         * 三十米上下）大一截，所以"链路已经断了而人还在圈内"这一格永远存在，
+         * [LeaveBehindWatch] 靠它把屏自己重启这类误报吃掉；再大就圈到隔壁车位、判不出是不是"留下了"。
+         */
+        const val LEAVE_BEHIND_RADIUS_M = 80.0
 
         /** 演示用的一场升级分几段、每段多久。真机上这个数由厂商的 updateSOC 进度决定 */
         private const val UPGRADE_STEP_MS = 400L

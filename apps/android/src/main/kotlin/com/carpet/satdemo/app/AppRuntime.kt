@@ -24,6 +24,7 @@ import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisSource
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
+import com.carpet.satdemo.core.guard.LeaveBehindWatch
 import com.carpet.satdemo.core.link.CellStatus
 import com.carpet.satdemo.core.modem.RawLine
 import com.carpet.satdemo.core.modem.SimulatedModem
@@ -451,6 +452,26 @@ class AppRuntime(private val host: Application) {
         // 状态流每拍都发，不做去重会把同一张反复糊上去
         scope.launch {
             runtime.status.collect { onScreenPageReported(it.screenPage) }
+        }
+        // 断联提醒的每一拍判定都会从 core 回调过来，通知和界面文案都收在这儿。
+        // **这条必须回主线程**：回调可能来自 1Hz 协程，也可能来自 WebSocket 的读线程
+        //（屏在那边下发命令），而 notify() 之外还要写 StateFlow 给 Compose 读
+        runtime.onLeaveBehind = { note ->
+            scope.launch {
+                when (note) {
+                    is LeaveBehindWatch.Note.Fire -> LeaveBehindNotifier.fire(
+                        host,
+                        "断联提醒：${note.device.title} 没跟着你走",
+                        "你已离开停车点 ${note.awayM} 米，那台设备 ${note.heldMs / 1000} 秒前就断了。" +
+                            "车里若留了孩子或宠物，请回去确认",
+                    )
+                    // 重新连上就把那条报警撤掉：留在通知栏里的一句过期结论，比不提醒更误导人
+                    is LeaveBehindWatch.Note.Back -> if (note.wasAlarmed) LeaveBehindNotifier.clear(host)
+                    // Lost / InPlace 只在工程日志里留痕，不值得为它响一次
+                    else -> Unit
+                }
+                refreshLeaveBehind()
+            }
         }
         // Azure Speech F0（D13 正路）：region/key 从 BuildConfig 灌进 :core 的合成器。
         // 没配就是空串，AzureSpeech.configured 不过，NetVoice 自动跳过这条
@@ -1059,6 +1080,10 @@ class AppRuntime(private val host: Application) {
             runtime.start()
             retryGuard()
         } else {
+            // 断联提醒的判定就挂在 1Hz 那一圈上：圈停了、开关还画着勾，
+            // 等于让用户带着一个已经瞎掉的保险丝回家
+            if (runtime.leaveBehindArmed) say("守护已停，断联提醒一起关掉了 —— 它靠守护那一圈判定")
+            runtime.disarmLeaveBehind()
             DemoGuardService.stop(host)
             runtime.stop()
         }
@@ -1080,6 +1105,46 @@ class AppRuntime(private val host: Application) {
     fun setSentinel(on: Boolean) = runtime.armSentinel(on)
 
     fun setFence(on: Boolean, name: String?) = runtime.setFence(on, name)
+
+    /**
+     * 「我的 → 守护开关」那一行读这个：布防状态 + 最近一句判定的话。
+     * 界面不许自己攒一份状态，否则切 Tab 之后开关和日志就各说各的。
+     */
+    private val _leaveBehind = MutableStateFlow("")
+    val leaveBehindLine: StateFlow<String> = _leaveBehind
+
+    /**
+     * 断联提醒开关。
+     *
+     * **开之前先把守护拉起来**：判定挂在 1Hz 那一圈上，守护没开着就没有那一圈。
+     * 允许用户开一个永远不会响的开关，比不开更危险 —— 他会以为有人在看着。
+     * 开不起来时 [say] 出原因，开关那一格由 [leaveBehindArmed] 决定，画出来就是真的。
+     */
+    fun setLeaveBehind(on: Boolean) {
+        if (!on) {
+            runtime.disarmLeaveBehind()
+            _leaveBehind.value = ""
+            say("断联提醒已关")
+            return
+        }
+        if (!runtime.status.value.running) setGuard(true)
+        val why = runtime.armLeaveBehind()
+        if (why != null) {
+            say(why)
+            return
+        }
+        refreshLeaveBehind()
+        say(
+            if (guardPinned) "断联提醒已开，盯住车上那台设备"
+            else "断联提醒已开，但守护没能常驻：定位权限批下来之前，锁屏后可能停判",
+        )
+    }
+
+    fun leaveBehindArmed(): Boolean = runtime.leaveBehindArmed
+
+    private fun refreshLeaveBehind() {
+        _leaveBehind.value = runtime.leaveBehind.statusLine(System.currentTimeMillis())
+    }
 
     fun runUpgrade() {
         runtime.firmwareUpgrade(onProgress = { pct -> runtime.log("模组升级中 $pct%") })
