@@ -966,9 +966,6 @@ class ScreenVoice(
                 // §A（11-18）：屏侧实测"播放中 level 0.00"，硬证据指向推过去的 PCM 内容全零。
                 // 这一行把"解码出了零"和"传输/屏侧出了零"当场分开：peak=0 就是解码这条的问题，
                 // 重测时照这一行查；peak>0 才轮到怀疑链路
-                log(
-                    "屏幕语音：解码 PCM ${pcm.size} B，peak=${peakOf(pcm)}（mp3 ${mp3.size} B，源 ${_source.value ?: "-"}）"
-                )
                 val amp = AudioChunks.peakAmp(pcm)
                 log(
                     "屏幕语音：解码 PCM ${pcm.size} B，peak=${peakOf(pcm)}（mp3 ${mp3.size} B，源 ${_source.value ?: "-"}）"
