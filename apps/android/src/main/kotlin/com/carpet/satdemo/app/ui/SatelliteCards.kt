@@ -320,26 +320,40 @@ private fun ArmSegments(done: Int) {
 @Composable
 fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
     val arm by app.arm.collectAsState()
+    val flags by app.flags.collectAsState()
+    val activated = flags.sosActivated
+    var hint by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
+    LaunchedEffect(hint) {
+        if (hint) {
+            kotlinx.coroutines.delay(2600)
+            hint = false
+        }
+    }
     val haptics = LocalHapticFeedback.current
     // 三段各震一下：手指数得出"还剩几段"，比在震动的车里盯着数字看可靠。
     // LaunchedEffect 认的是段号，一秒一跳的那种抖动一次都没有
     LaunchedEffect(arm.segment) {
-        if (arm.segment > 0) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        if (activated && arm.segment > 0) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
     }
     // 外面这一圈只在按住时存在：平时导航栏里就是一颗红钮，不预先占位、不常驻发光
+    // 未开通时整颗置灰（owner 11-25 拍板）：点了不走倒计时、不发消息，钮上亮一下「待开通」
     Box(modifier = modifier.size(68.dp), contentAlignment = Alignment.Center) {
         if (arm.active) SosArmRing(arm.fraction)
         Box(
             modifier = Modifier
                 .size(56.dp)
                 .shadow(10.dp, CircleShape)
-                .background(Ink.Alert, CircleShape)
-                .pointerInput(Unit) {
+                .background(if (activated) Ink.Alert else Ink.Card, CircleShape)
+                .pointerInput(activated) {
                     detectTapGestures(
                         onPress = {
-                            app.pressDownSos()
-                            tryAwaitRelease()
-                            app.releaseSos()
+                            if (activated) {
+                                app.pressDownSos()
+                                tryAwaitRelease()
+                                app.releaseSos()
+                            } else {
+                                hint = true
+                            }
                         },
                     )
                 },
@@ -347,9 +361,14 @@ fun SosDial(app: AppRuntime, modifier: Modifier = Modifier) {
         ) {
             Text(
                 // 按下去之后钮上就是剩下的秒数：教"松手能取消"这件事，不必另外写一行字
-                if (arm.active) "${arm.leftMs / 1000 + 1}" else "SOS",
+                when {
+                    !activated && hint -> "待开通"
+                    !activated -> "SOS"
+                    arm.active -> "${arm.leftMs / 1000 + 1}"
+                    else -> "SOS"
+                },
                 style = Type.Body.copy(fontWeight = FontWeight.Bold),
-                color = Color.White,
+                color = if (activated) Color.White else Ink.TextMid,
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Clip,

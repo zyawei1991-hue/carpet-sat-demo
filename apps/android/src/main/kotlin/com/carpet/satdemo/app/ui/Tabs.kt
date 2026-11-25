@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.app.BuildConfig
 import com.carpet.satdemo.core.ai.PermissionTier
 import com.carpet.satdemo.core.protocol.ScreenPage
 import com.carpet.satdemo.core.runtime.DemoRuntime
@@ -208,11 +209,53 @@ fun MeTab(
         RenderCard("usage", scope)
         RenderCard("subscription", scope)
         RenderCard("privacy", scope)
+        // 设置-关于：owner 11-25 要的版本号核对页，T5 从这里称，不再麻烦人翻工程模式
+        var showAbout by rememberSaveable { mutableStateOf(false) }
+        Button(
+            onClick = { showAbout = !showAbout },
+            colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (showAbout) "收起关于页" else "关于（版本信息）") }
+        if (showAbout) AboutBlock()
         Button(
             onClick = onEngineer,
             colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
             modifier = Modifier.fillMaxWidth(),
         ) { Text("开发者模式") }
+    }
+}
+
+/** T5 的正式核对处：版本名 / versionCode / 装机时间 / 最近更新，读装机包自身 */
+@Composable
+private fun AboutBlock() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val times = remember(ctx) {
+        runCatching {
+            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            pi.firstInstallTime to pi.lastUpdateTime
+        }
+    }
+    val fmt: (Long) -> String = { t ->
+        if (t <= 0L) "取不到" else android.text.format.DateFormat.format("yyyy-MM-dd HH:mm", t).toString()
+    }
+    val (firstInstall, lastUpdate) = times.getOrDefault(0L to 0L)
+    InkCard(icon = MIcons.settings) {
+        CardTitle("关于（版本信息）")
+        listOf(
+            "版本名" to BuildConfig.VERSION_NAME,
+            "versionCode" to BuildConfig.VERSION_CODE.toString(),
+            "装机时间" to fmt(firstInstall),
+            "最近更新" to fmt(lastUpdate),
+        ).forEach { (k, v) ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = Grid.x4),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(k, style = Type.Body, color = Ink.TextMid)
+                Text(v, style = Type.Mono.copy(color = Ink.TextHigh))
+            }
+        }
     }
 }
 

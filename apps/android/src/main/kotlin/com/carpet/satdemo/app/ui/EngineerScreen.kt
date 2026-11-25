@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import com.carpet.satdemo.app.AppRuntime
+import com.carpet.satdemo.app.BuildConfig
 import com.carpet.satdemo.core.protocol.DialogSource
 
 /**
@@ -50,6 +51,18 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
             colors = ButtonDefaults.buttonColors(containerColor = Ink.Track, contentColor = Ink.TextMid),
             modifier = Modifier.fillMaxWidth(),
         ) { Text("返回产品界面") }
+
+        // T5 装机版本核对：工程页顶就是版本号，不用翻构建日志（owner 11-25：原来这里没版本号）
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val installTime = remember(ctx) {
+            runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).firstInstallTime }.getOrDefault(0L)
+        }
+        Text(
+            "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · 装机 " +
+                android.text.format.DateFormat.format("yyyy-MM-dd HH:mm", installTime),
+            style = Type.Caption,
+            color = Ink.TextHigh,
+        )
 
         // 手机、桌面彩排台、这一页，三处读同一个渲染函数，彩排时看到的才等于装机看到的
         Text(
@@ -86,6 +99,11 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
         }
         if (bleState == "linked") {
             EngRow("走 BLE 真模组（替换模拟模组）", flags.bleModem) { app.setFlag(flags.copy(bleModem = it)) }
+        }
+
+        // 演示口径：产品页那颗 SOS 钮默认置灰（未开通），彩排要用时在这里打开
+        EngRow("SOS 已开通（产品页钮才响应长按）", flags.sosActivated) {
+            app.setFlag(flags.copy(sosActivated = it))
         }
 
         Button(

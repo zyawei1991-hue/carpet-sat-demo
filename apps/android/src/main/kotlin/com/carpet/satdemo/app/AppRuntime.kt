@@ -141,9 +141,16 @@ class AppRuntime(private val host: Application) {
         val passthrough: Boolean = false,
         /** GT1005 BLE 已连接后，把卫星模组从模拟切到真模组（VendorSdkModem on BleBytePipe） */
         val bleModem: Boolean = false,
+        /** SOS 服务是否已开通。默认未开通：产品页那颗钮置灰、点了不发消息（owner 11-25 评论拍板） */
+        val sosActivated: Boolean = false,
     )
 
-    private val _flags = MutableStateFlow(Flags(acceptScreens = prefs.getBoolean(KEY_ACCEPT_SCREENS, false)))
+    private val _flags = MutableStateFlow(
+        Flags(
+            acceptScreens = prefs.getBoolean(KEY_ACCEPT_SCREENS, false),
+            sosActivated = prefs.getBoolean(KEY_SOS_ACTIVATED, false),
+        ),
+    )
     val flags: StateFlow<Flags> = _flags
 
     init {
@@ -323,6 +330,10 @@ class AppRuntime(private val host: Application) {
         }
         if (prev.demoMode != next.demoMode) runtime.setDemoMode(next.demoMode)
         if (prev.bleModem != next.bleModem) switchBleModem(next.bleModem)
+        if (prev.sosActivated != next.sosActivated) {
+            prefs.edit().putBoolean(KEY_SOS_ACTIVATED, next.sosActivated).apply()
+            runtime.log(if (next.sosActivated) "SOS 已开通：产品页钮恢复可用" else "SOS 未开通：产品页钮置灰，点了不发消息")
+        }
     }
 
     /** BLE 已连上且开关打开 → 换成真模组；关掉 → 回模拟模组 */
@@ -1277,6 +1288,7 @@ class AppRuntime(private val host: Application) {
         private const val ALWAYS_VISIBLE = Long.MAX_VALUE / 4
         private const val KEY_VENDOR_EPH = "vendor_eph"
         private const val KEY_ACCEPT_SCREENS = "accept_screens"
+        private const val KEY_SOS_ACTIVATED = "sos_activated"
         private const val KEY_AI_URL = "ai_url"
         private const val KEY_AI_KEY = "ai_key"
         private const val KEY_AI_MODEL = "ai_model"
