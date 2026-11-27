@@ -20,6 +20,9 @@
  *                                         每轮回 3 秒非零 PCM，验会话窗口起播与被动等空档
  *   node fake-phone.mjs --v4-ready --chat-window --chat-gap 3000
  *                                         同 turn_id 两段 1.5 秒 PCM，中间空 3 秒，验续播不丢账
+ *   node fake-phone.mjs --chat-turns 3     握手后自动发三个独立 turn，每轮 3 秒非零 PCM
+ *   node fake-phone.mjs --chat-turns 3 --chat-turn-gap 2000
+ *                                         三轮之间静默 2 秒；可再叠 --chat-gap 验每轮分段
  *
  * 【2026-11-13：屏那道闸**只看 ack.protocols 里有没有 4**，整帧的 `v` 它不看了。】
  * 原来这里写"屏认整帧 v、光 protocols 里那个 4 不算许可"，那句是错的：真机称到 ack 外层
@@ -70,6 +73,14 @@ const READY = process.argv.includes('--v4-ready');
 const MIC_CLOSE = process.argv.includes('--mic-close');
 const CHAT_WINDOW = process.argv.includes('--chat-window');
 const CHAT_GAP_MS = Number(argList('chat-gap')[0] || 0);
+const CHAT_TURNS = Number(argList('chat-turns')[0] || 0);
+const CHAT_TURN_GAP_MS = Number(argList('chat-turn-gap')[0] || 2000);
+if (!Number.isInteger(CHAT_TURNS) || CHAT_TURNS < 0 || CHAT_TURNS > 20 ||
+    !Number.isFinite(CHAT_GAP_MS) || CHAT_GAP_MS < 0 ||
+    !Number.isFinite(CHAT_TURN_GAP_MS) || CHAT_TURN_GAP_MS < 0) {
+  console.error('--chat-turns 必须是 0..20 的整数；--chat-gap/--chat-turn-gap 必须是非负数');
+  process.exit(1);
+}
 /* 外层 v 只让假手机更像真 App；屏的上行闸不读它，只看 ack.protocols。 */
 const ENV_V = READY ? 4 : 3;
 /* 收到 mic_chunk 拼段还是关链：没准备好就等于关链，和真 App 一致。 */
@@ -221,6 +232,7 @@ function makeMicAssembler() {
 /* ---------------- 一条连接 ---------------- */
 
 let seq = 0;
+let connectionSerial = 0;
 const sessions = new Set();
 
 const server = net.createServer(sock => {
@@ -231,6 +243,16 @@ const server = net.createServer(sock => {
 
   const send = obj => { if (ws && !ws.destroyed) ws.write(encodeText(JSON.stringify(obj))); };
   const mic = makeMicAssembler();
+  const connectionId = ++connectionSerial;
+  const timers = new Set();
+  const later = (fn, ms) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (ws && !ws.destroyed) fn();
+    }, ms);
+    timers.add(timer);
+    return timer;
+  };
 
   function sendChatAudio(turn) {
     const rate = 16000;
@@ -259,13 +281,33 @@ const server = net.createServer(sock => {
     if (CHAT_GAP_MS > 0) {
       const split = pcm.length / 2;
       sendSentence(pcm.subarray(0, split), 0, 0, '句1');
-      setTimeout(() => {
-        if (!ws || ws.destroyed) return;
-        sendSentence(pcm.subarray(split), split / block, split, '句2');
-      }, CHAT_GAP_MS);
+      later(() => sendSentence(pcm.subarray(split), Math.ceil(split / block), split, '句2'), CHAT_GAP_MS);
     } else {
       sendSentence(pcm, 0, 0, '整轮');
     }
+    return pcm.length / (rate * 2) * 1000 + (CHAT_GAP_MS > 0 ? CHAT_GAP_MS : 0);
+  }
+
+  function startChatTurns() {
+    if (!CHAT_TURNS) return;
+    const prefix = `auto-${Date.now().toString(36)}-${connectionId}`;
+    const durationMs = 3000 + (CHAT_GAP_MS > 0 ? CHAT_GAP_MS : 0);
+    let atMs = 500;
+    for (let i = 0; i < CHAT_TURNS; i++) {
+      const turn = `${prefix}-${i + 1}`;
+      later(() => {
+        send({
+          v: ENV_V, t: 'dialog', seq: ++seq, ts: Math.floor(Date.now() / 1000),
+          dialog: { turn_id: turn, dir: 'down', text: `假手机自动第 ${i + 1} 轮`,
+                    source: 'local_rule', origin: 'phone' },
+        });
+        log(`自动对话 ${i + 1}/${CHAT_TURNS} 开始 · turn=${turn}`);
+        sendChatAudio(turn);
+      }, atMs);
+      atMs += durationMs + CHAT_TURN_GAP_MS;
+    }
+    later(() => log(`自动 ${CHAT_TURNS} 轮发完 · 轮间静默 ${CHAT_TURN_GAP_MS} ms`), atMs);
+    log(`自动场景已排：${CHAT_TURNS} 个独立 turn · 每轮 ${durationMs} ms · 轮间 ${CHAT_TURN_GAP_MS} ms`);
   }
 
   sock.on('data', chunk => {
@@ -327,10 +369,9 @@ const server = net.createServer(sock => {
       const s = { id, protocols: m.hello?.protocols ?? [1], state: baseState(), dialogUp: 0 };
       sessions.add({ sock: ws, send, s });
       log(`hello 通过：${id} · 固件 ${m.hello?.fw ?? '?'} · 申报契约 ${s.protocols.join('/')}`);
-      /* ack.protocols 这一格 + 整帧的 `v` 一起才是屏侧那道自动闸的读数：
-       * 装机那版是 `v=3` 但 protocols 里已经有 4（申报发早了、解码还没写）——
-       * 屏现在**两个都点头才开上行**，所以默认这一档 armed 该是 0；
-       * 要演"补完了"就 --v4-ready（整帧抬到 v=4）。--no-v4 是更早那版，protocols 只给 [3]。 */
+      /* 上行闸只看 ack.protocols 是否含 ≥4，envelope v 只作诊断不参与。
+       * 默认档报 [3,4] 但收到 mic_chunk 仍关链，演“申报有了、处理没落地”的熔断；
+       * --v4-ready 报 [4] 并真拼段。--no-v4 只报 [3]，屏应保持 armed=0。 */
       const ack = { for_seq: m.seq };
       if (!NO_V4) ack.protocols = READY ? [4] : [3, 4];
       else ack.protocols = [3];
@@ -338,6 +379,7 @@ const server = net.createServer(sock => {
                 : (READY ? `ack：--v4-ready，外层 v=${ENV_V}、protocols [4]；mic_chunk 落 WAV 到 ${MIC_OUT}`
                          : `ack：外层 v=${ENV_V}、protocols [3,4]；申报 v4 但收到 mic_chunk 就 close`));
       send({ v: ENV_V, t: 'ack', seq: ++seq, ack });
+      startChatTurns();
       return;
     }
     if (m.t === 'command') {
@@ -400,6 +442,8 @@ const server = net.createServer(sock => {
   }
 
   function cleanup() {
+    for (const timer of timers) clearTimeout(timer);
+    timers.clear();
     for (const e of sessions) if (e.sock === sock) sessions.delete(e);
     try { sock.destroy(); } catch (e) { /* 已经断了 */ }
   }

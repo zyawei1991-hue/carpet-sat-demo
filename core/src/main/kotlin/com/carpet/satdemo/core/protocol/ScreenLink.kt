@@ -146,10 +146,9 @@ enum class CommandType {
      * `turn_id` 由屏在按下的那一刻生成（`m-` 前缀），手机**不许另起一个** —— 拼段、去重、
      * 答句配对全靠它。上限 8 秒 = 100 帧 = 256 KB PCM，超出整段拒收。
      *
-     * 加这一枚的同时 `CONTRACT_VERSION` 必须同版抬到 4：屏那道闸现在认的是
-     * **帧外层的 `v` ≥ 4 且 ack.protocols ∋ 4 两个都点头**，只报 4 而解不了的版本
-     * 实测 `armed=0` 一条上行都不发 —— 申报和实现分家比不申报更危险
-     * （`protocol/screen-link.md` §上行音频通道）。
+     * 屏的上行闸只认 App 在 ack 里申报的 `protocols` 含 ≥4；不读 envelope `v`，
+     * 因为默认值字段可能因 `encodeDefaults=false` 不上线。手机按屏的
+     * `hello.protocols` 决定 dialog/audio_chunk 下行能力（D17），两条协商方向不要混。
      */
     /**
      * v3 上的**第三条下行**（2026-11-16 加，同样不升档）：相册照片分块推给屏，

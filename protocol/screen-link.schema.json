@@ -210,7 +210,7 @@
           "type": "string",
           "description": "非空表示拒绝。目前只有 proto_mismatch：契约版本对不上，展示端显示黄屏而不是崩"
         },
-        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "App 支持的契约版本表，hello 的回执里带上。v4 上行（mic_chunk，屏把 PCM 推给手机转写）走「App 先发版」：屏看到这份表里有 4、并且收到的帧外层 v ≥ 4，两个都点头才打开上行（carpet_link.c 的 on_ack(ack, v)）；只报 4 而帧还是 v3 的，屏打一行 W 且不开 —— 申报和实现分家比不申报更危险。没有这个键 = 不许上行，这是安全默认" }
+        "protocols": { "type": "array", "items": { "type": "integer" }, "description": "App 支持的契约版本表，hello 的回执里带上。v4 上行（mic_chunk，屏把 PCM 推给手机转写）走「App 先发版」：屏只在这份表里出现 ≥4 时打开上行（carpet_link.c 的 on_ack）；envelope v 不参与许可判断，因为 App 的默认值字段可能因 encodeDefaults=false 不上线。没有这个键 = 不许上行，这是安全默认。手机下发 dialog/audio_chunk 的能力协商看屏的 hello.protocols，二者不要混为一谈" }
       }
     },
 

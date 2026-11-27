@@ -191,16 +191,15 @@
 - **屏侧的三道闸**（实现在 `esp32/components/muse/carpet/carpet_mic.c`，为什么是三道写在 `carpet_mic.h` 顶上）：
   NVS 那一格开关（`carpet/mic_mode`，出厂 = `off`）+ 这一轮会话里对面的**许可** + 一条**熔断**
   （发过上行之后 5 秒内链路就断 ⇒ 本会话判定"这台手机不收上行"，不再试）。
-  第二道在 2026-11-11 夜里被改硬过一次，**记下来免得以后又有人简化回去**：原来只判
-  `ack.protocols ∋ 4`，称到装机那版 App **报了 4 但解不了 4**（`DemoRuntime.kt:513` 那行先落地，
-  `CommandType` 里没 `mic_chunk`），于是那道闸恰好把最危险的一版放行。现在是
-  **这一帧 envelope 的 `v` ≥ 4 且 `protocols ∋ 4` 两个都点头**才许可，只报 4 而 `v` 还是 3 的
-  当场打一行 W 说明为什么不开（判断在 `carpet_link.c` 的 `on_ack(ack, v)`，
-  `components/screen_link/` 只负责把这两个数一起交出来）。
-  ⇒ **对着现在装机的那版 App 什么都不发生的**：默认 `off`，`>micup auto` 也还要看对面那一轮的许可；
-  真误发了，最多断一次线，第二次按下就不试了。开 `force` 是人在下命令 ⇒ 当场把熔断那一格一起抹掉。
-  **两道都真称过**（假手机三档人，原文在 `firmware/screen/HANDOFF.md` §17.2）：
-  `v=3` + `[3,4]` ⇒ `@mic … armed=0 phone_v4=0`，`--v4-ready`（`v=4`）⇒ `armed=1 phone_v4=1`。
+  第二道在 2026-11-11 夜里曾被改成“envelope 的 `v` ≥ 4 且 `ack.protocols ∋ 4` 两个都点头”，
+  **2026-11-13 已作废**：App 的 `ScreenMessage.v` 是默认值且 `encodeDefaults=false`，线上根本没有这个键，
+  屏读到的 `v=1` 只是兜底值。现在上行许可**只认 `ack.protocols` 里出现 ≥4**；`v` 仍回读，
+  但不参与判断。D17 的固件档位口径则是另一件事：手机按屏在 `hello.protocols` 申报的能力决定
+  要不要发 `dialog`（v2）、`audio_chunk`（v3）；`mic_chunk` 的上行许可仍来自 App 的 `ack.protocols`。
+  当前补丁源码申报 `hello.protocols=[1,3,4]`，**owner 手上那块屏尚未回读，不能据此代填装机版本**。
+  真机旧证据是 `ack：protocols=[4,4]（envelope v=1，契约规定它不上线，不作判据）⇒ 上行开`、
+  `@mic … armed=1 phone_v4=1`。熔断兜底照旧：万一又遇到“报了 4 却解不了”的手机，只断一次，
+  本会话不再试。`force` 仍是在人下命令时同时抹掉熔断。
 
 
 ### 第一条要求不是音频，是「让屏先知道对面是几版」
@@ -213,42 +212,18 @@ v3 那句「收到不认识的 `cmd` 只是丢这一帧」**只在屏那边成�
 **所以对着现在装在手机上的 v3 App 发一条 `mic_chunk`，表现是链路当场被手机关掉、一句话不说**，
 和「App 无法连接圆屏」那两次现场故障同一个观感。
 
-- **2026-11-11 复核（远端 tip `26bbfc4`，逐行看过原码）**：这条风险**从"将来"变成"现在"**。
-  App 已经在 `core/.../runtime/DemoRuntime.kt:513` 的 `ackNow()` 里申报
-  `protocols = listOf(ScreenCodec.CONTRACT_VERSION, 4)`，可 `core/.../protocol/ScreenLink.kt:112`
-  的 `CommandType` **仍然没有 `mic_chunk` 这一项**；入站关线那两行也从文档里原来的 :97-102 挪到了
-  `core/.../screen/ScreenLinkServer.kt:128-131`（`runCatching { ScreenMessage.decode(...) }` 的
-  失败分支 `conn.close(CLOSE_POLICY, "bad contract")`，`CLOSE_POLICY = 1000`，:247），
-  而且彩排台复用同一个服务端（`simulator/.../DemoDriver.kt:169`），**同一风险**。
-  ⇒ **`ack.protocols` 里那个 4 现在不能当门用**：申报和实现分家了。
-  ⇒ 屏侧的规矩：**在手机上实测到这一轮真的收到 `dialog{dir:"up"}` 回写之前，不许对真 App 发
-  `mic_chunk`**；上行实现先只接开发口（`>micup`），默认关。
-  ⇒ 给 App 的两条路（挑一条，别都放着）：**补上 `CommandType.mic_chunk` + 拼装 + 转写**，
-  或者**先把 ack 里的 4 撤掉**。要求写在 `docs/APP-CHANGES-2026-11-11.md` 第 5 节。
-
-屏又**没法自己算出对面是几版**：协商号是服务端算的，`ack` 帧里没有版本字段可以回读，
-固件只能取自己申报的那一档（`components/screen_link/screen_link.c:59-63`，
-`s_negotiated = SCREEN_LINK_CONTRACT_MAX`）。这条不对称是 v1 时就写进注释的已知代价，
-上行音频正好踩在它上面。
-
-所以 v4 的第一条是**加性地把协商号回读**：
-
-- `AckPayload` 多一个可选整数字段 `protocols`（`ScreenLink.kt:433`），hello 的回执里带上服务端
-  实际支持的档位。老固件用 cJSON 读 ack，多出来的键直接看不见，不掉线。
-- 固件收到后**只用它给"上行"这一路把闸**：申报号缺失或低于 4 时，屏不许发任何 `cmd`。
-  **不要拿它去覆盖现有的 `s_negotiated`** —— 那个变量现在管的是 `screen_link_dialog_ready()` 这类
-  "屏能不能说话/能不能收"的判断，而收这一路对着老 App 本来就是安全的、已经跑着的；把它清零换来的
-  是一台好使的屏突然连答句都不画了。风险是不对称的：**下行错了屏只是丢帧，上行错了手机关链**，
-  所以这道新闸只管上行，别的都不动。
-- **没有这个键就当"不许上行"**。这里"缺了 = 不发"是安全默认，
-  和 `SatState.module_ok` 那条"缺了必须当不知道"的反面教训不冲突 —— 那条是显示字段，省略会被读成假值；
-  这一条控的是**发不发**，误判方向是沉默而不是炸链。
-- **发布顺序是硬的，不能倒**：先让 App 会申报、并且认识 `mic_chunk`，装机之后才允许固件发这一帧。
-  反过来的话，一块新固件能把一台没更新的手机当场踢下线，那比"屏不能说话"重得多。
-  **2026-11-11 这一条被倒过一次，就是上面那道闸改硬的原因**：App 只发了"申报"那半个
-  （`protocols` 里加了 4），解码还没写，装机的手机就处在"看着许可、其实会关线"的状态。
-  留给 App 侧的硬约束从此变成两句：**补完 `mic_chunk` 的解码**，并且在那同一版里把
-  `ScreenCodec.CONTRACT_VERSION` 从 3 抬到 4 —— 屏认的是后一个数。
+- **2026-11-11 的历史风险（现已解除）**：当时 App 的 `ackNow()` 先申报了 4，但 `CommandType`
+  还没有 `mic_chunk`，屏会把“能收”误当“会解”，上行一到手机关线。此后 App 已补齐枚举、拼段和转写，
+  1.26.0 真机回读是 `ack.protocols=[4,4] ⇒ 上行开`。保留这段是为了说明“申报必须与实现同版”，
+  不是当前仍缺 `mic_chunk`。
+- **两条协商方向必须分开**：手机按屏的 `hello.protocols` 决定是否发 `dialog`（v2）和
+  `audio_chunk`（v3）；屏按 App 的 `ack.protocols` 是否含 ≥4 决定是否发 `mic_chunk`。
+  envelope `v` 两边都不当能力钥匙。
+- `AckPayload.protocols` 是加性字段，老固件多读到一个键不会掉线。屏只把它喂给上行闸：
+  缺失或低于 4 就不发；**不要覆盖 `s_negotiated`**，否则一台能收答句的屏会突然连文字都丢。
+  风险是不对称的：下行错了屏只是丢帧，上行错了手机关链。
+- **发布顺序仍是硬的**：App 必须同版完成申报与 `mic_chunk` 解码。屏侧还有本地 NVS 开关和
+  熔断兜底；即使再次遇到“报了 4 却解不了”的手机，也只断一次，本会话不再试。
 
 ### 屏侧落地（2026-11-11 晚）：申报那一半也给了固件，加三个开发口和一台会拼段的假手机
 
@@ -512,9 +487,9 @@ owner 原话：「tts 就用 edge 晓伊的声音」「声音延迟就用压缩�
   - **对面 → 屏（v3 下行放音）这条一直到现在还是没压过**：真机称的是 `>audtest` 本地喂帧
     （`frames=238 drops=0 gaps=0`），那一趟的字节没经过这根 ws。现场那一趟看屏侧 `@audio … drops=`。
 - `mic_chunk` 的失败模式：v4 的申报回读落地前，它是**会关链的**，不是会丢帧的
-  （关链本身已经在假手机 `--mic-close` 上称到：`@mic rejected=1` + 屏侧熔断，见 §帧预算那一节）；
-  **真 App 那一头还没称过** —— 它今天收到 `mic_chunk` 会不会关线是推出来的（`CommandType` 没这个枚举），
-  屏侧现在的闸也已经不让它对上装了机的这一版发（要 `ack` 外层 `v>=4` **且** `protocols∋4`）。
+  （关链本身已经在假手机 `--mic-close` 上称到：`@mic rejected=1` + 屏侧熔断，见 §帧预算那一节）。
+  屏侧当前上行闸只认 `ack.protocols` 里出现 ≥4，**不再要求 envelope `v`**；手机按屏的
+  `hello.protocols` 决定下行能力。真 App 的整趟音频上行与 owner 装机固件回读仍须现场核对。
 - 云转写在展台上的可用性：**蜂窝已答（走）**；**端点也已称（2026-11-10，owner 给了 `https://hanbao.party/v1`）** ——
   结论是**这家没有语音**：`GET /v1/models` 回 200 只有三档对话模型（`deepseek-v4-pro` /
   `deepseek-v4.1-flash` / `glm-5.3-flash`），`POST /v1/audio/transcriptions`、`/v1/audio/speech`、

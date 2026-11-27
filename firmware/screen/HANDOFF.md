@@ -833,16 +833,20 @@ screen_link_send_command("page_report", a);   /* args 所有权被组件吃掉�
 > 正文还是 28/22。三档都要一份字库，`tools/muse_font_subset.py` 会自己扫源码，改文案就重跑。
 > `PAGE_NAMES` 现在真的被 `SchemaDriftTest` 比着了 —— 以前那张表不存在，那条断言是静不比的。
 
-### 2. `event` 那层的全屏抢占（这是唯一让服务端动屏的一档）
+### 2. `event` 那层的全屏抢占（2026-11-27 已实装，待真链路验收）
 
-`SOS 确认 / 平台回执 / 越界` 三类要能盖住屏当前所在的任何一页。手机端那几条 `EventKind`
-（`sos_acked` / `sos_failed` / `fence_exit` …）**早就在发了**，缺的是屏侧 `on_event` 没有接线 ——
-所以现在这一层**不存在**，文档和对外话术里都别按"已实现"讲。
+屏侧 `on_event()` 现已把 `sos_triggered / sos_acked / sos_failed / sos_cancelled / fence_exit` 提到全局紧急快照；
+`state.sos.level` 从非 `acked` 迁到 `acked` 时另发「平台已确认求救」，迁回 `normal` 时收回平台提示。
+`sos_acked` 只表示卫星响应/MCQ COMPLETE，文案固定为「卫星已确认求救」，不能暗示平台接报或救援已派出。
 
-做的时候守两条：
-
-- 抢占只给这三类。别的（过境窗口、守望动静、答句）都走 `ui.card`，别在屏上加第四种自己盖自己的东西。
-- 抢占层**不吞 ack**。契约规定 `event` 必须回 `ack`（带 `for_event_id`），否则服务端 3s 重发、再 3s 放弃并记一条「展示端没收到」。
+- 遮罩挂 `lv_layer_top()`，盖住 Muse 设置页和车宠各页；显示时冻结四方向导航，「知道了」仍可点击。
+  关闭带 sequence 检查，旧点击不会关掉新事件。熄屏时遮罩隐藏，紧急事件仍走既有 `CMD_WAKE` 叫醒。
+- 普通 dialog、卫星可见、守望动静、链路切换和下行消息不全局抢占。组件原有 ACK/TTL/event_id 去重不变，
+  不新增 frame `t`；`event` 仍必须回带 `for_event_id` 的 ack。
+- COM8 串口台架已称到五类事件、平台状态迁移、重复 acked 不递增序号、非紧急事件不抢占，
+  以及紧急时四方向冻结/关闭后恢复。脸页、设置页、钟面三条路径各截 466×466 真实像素，
+  均为黑底 59.9% + 2,604 个琥珀色像素的完整遮罩；串口截图目标已从活动屏修到 `lv_layer_top()`。
+  **真 WebSocket 的 ACK/TTL/去重与真 App 仍未称到**。
 
 ### 3. `dialog.action`：只认下行、只切页、别的什么都不做
 
@@ -2580,19 +2584,15 @@ D:/dev/esp/idf-tools/python_env/idf6.0_py3.11_env/Scripts/python.exe hold_talk.p
   看到这一句同时证明三件事：链路那一刻**是通的**（`carpet_mic_link_up()` 为真才走这一格）、
   `carpet_mic_armed()` **为假**（真的话 `voice_task` 会先把这次按键接走，根本到不了这里）、
   装机那版没配对 Muse（`MUSE_HATCH_NOT_SET`）。⇒ §17.5 末尾那条"只有代码证据"到此关闭。
-- 闸要**两个数都点头**：ack **整帧**的 `v >= 4` **且** `ack.protocols ∋ 4`（§17.1b）。
-  而 App 那半边的代码不在这棵树里：远端 tip 没变、本地 `ScreenLink.kt:27` 还是 `CONTRACT_VERSION = 3`、
-  `CommandType` 里没有 `mic_chunk` ⇒ **只能靠屏的回读判**，不能靠读代码判。
-- 旧 `on_ack()` 把 `ESP_LOGI` 写在"都点头"的分支里，另两种失败情形（没报 `protocols` / 报了 4 但整份还是 v3）
-  **一行都不打** ⇒ 现场恰好落在这两种之一时，串口里查不出为什么。已改成**无条件**打一行：
-  `ack：整份契约 v=<n>、protocols=[…] ⇒ 上行开/不开`，另加两句 W 分别说明那两种情形。
-- **称到了**（COM8，本轮我自己占的口）：`Project build complete`（WEXIT=0）、
-  esptool `Hash of data verified.`、开机 `I (1051) carpet_mic: 上行地基就绪：2 只 256000 字节段缓冲（PSRAM）…`、
-  `I (2024) link.app: saved network beats the built-in creds in NVS, reconnecting (first: Mate 60)`。
-- **没称到**：那一行 ack 本身 —— 要等 owner 把热点和 App 再开一次。读到之后按这三种判：
-  `v=3 protocols=[3,4]` ⇒ App 没抬 `CONTRACT_VERSION`（清单 §0 第 2 件，钥匙）；
-  `v=4 protocols=[3]` 或 `没报` ⇒ 抬了版本但漏了申报；
-  `v=4 protocols=[4]` 却仍 `armed=0` ⇒ 才回来查屏侧（本地 `mic_mode` / 熔断）。
+- **2026-11-13 已纠正**：上行许可只认 `ack.protocols` 里出现 ≥4，不再要求 envelope `v≥4`。
+  App 的 `v` 是默认值且 `encodeDefaults=false`，线上可能根本没有这个键；它只作诊断回读。
+  D17 的固件档位是另一个方向：手机看屏的 `hello.protocols` 决定是否发 `dialog`/`audio_chunk`。
+- App 后来已补齐 `CommandType.mic_chunk`、拼段和转写；不能再用“本地代码里没有这个枚举”判断装机能力。
+  `on_ack()` 现在无条件打印 `v` 与 `protocols`，缺失或低于 4 时说明为什么不开上行。
+- **历史称量保留**：COM8 构建、app-flash 哈希与上行地基启动日志已通过；1.26.0 真机回读到
+  `ack.protocols=[4,4]（envelope v=1）⇒ 上行开`。owner 当前那台的 ack 与 `hello.protocols` 仍未回读。
+- 现在只有两种许可失败：`protocols` 没报或低于 4 ⇒ 不开；报了 ≥4 却仍 `armed=0` ⇒ 查本地 `mic_mode`/熔断。
+  `v` 是多少不参与这两条判断。
 
 ### 18.3 owner 拍了「直接做语音唤醒词」
 

@@ -30,10 +30,10 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   （那条提交就是官方 zip 的快照，**里面一个我们的字都没有**）。
 - **没有 remote，也永远不要加。** 这棵树混着第三方 BSP 预编译 blob 和客户材料；
   要往任何地方同步只走 `muse-carpet.patch` 这一条口（见下一节）。
-- 我们的全部改动 = 45 个文件、10594 行新增 / 153 行删，三份是二进制素材：283,244 字节的字库、
-  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，17,821 行 / 984,919 字节，
+- 我们的全部改动 = 45 个文件、10837 行新增 / 154 行删，三份是二进制素材：283,244 字节的字库、
+  445,568 字节的星轨钟面底图和 16,125 字节的相册台架测试 JPEG（`muse-carpet.patch`，18,111 行 / 997,394 字节，
   `git diff --binary` 打的，三份二进制在里面都是 base85 段。）
-  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-25（会话窗口竞态复查修复）在本机实读的。
+  这两个数字每次重打 patch 都要跟着改，别信上一版留下的 —— 这一组是 2026-11-27（SOS 抢占、顶层截图与关闭窗口构建修复）在本机实读的。
   下面逐文件表的首列数字这一轮也按 `git diff --numstat` 全表重读了一遍（往轮只改总数没改表，有过漂移）。
   **小墨烘焙头像这一轮（11-25）**：owner 11-23 拍板「按建议做」—— AI 出 idle/listening/speaking，
   happy 用 idle 身子 + speaking 脸，error 用 idle + 本地愁眉小嘴；统一压进现有 `C_*` 语义调色板，
@@ -44,6 +44,15 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   speaking 两张帧比到口型与铃铛位置变化。**连续眨眼没单独截到，保留未测**；源图/烘焙脚本/量化预览/真机证据在
   `firmware/screen/muse/avatar/` 与 `firmware/screen/tools/bake_xiaomo.py`。该轮补丁空仓 `git apply: OK (44 sections)`；
   当前含 11-25 会话窗口修复的补丁为 45 sections，`byte-compare: 45/45 identical`。
+  **SOS 全局抢占 + D17 + 假手机三轮（11-27）**：`sos_triggered/sos_acked/sos_failed/sos_cancelled/fence_exit`
+  与 `state.sos.level=acked` 平台回执进入 top-layer 紧急遮罩；`sos_acked` 文案改为「卫星已确认求救」。
+  普通 dialog、卫星可见、守望动静、链路切换和下行消息不抢占；显示时冻结四方向，「知道了」可关。
+  COM8 串口状态/文案/手势台架通过；顶层截图路径已从活动屏改到 `lv_layer_top()`，脸页、设置页、钟面
+  三条路径各截 466×466 真实像素，均为黑底 59.9% + 2,604 个琥珀色像素的完整遮罩。
+  `CHAT_WINDOW=y` 与 `=n` 两档全量构建均通过（app 均 `0x3e1000`、余 3%），y 档已按明确偏移全片刷并校验；
+  `:core:test` 无缓存实跑 400/400。假手机本地 WS 三个独立 turn 各 38 帧/96,000 B、peak=8192，
+  同轮分段也通过，但真屏/真 App 未接。最终补丁 45 sections、逐字节 45/45，SHA-256
+  `896ff7d2ca26a2389951c5c6300c326b00b900aaef9a5d6179dafcd3aca74f0d`。
   **会话窗口 + 相册自动跳这一轮（11-22）**：owner 拍板 `docs/DECISIONS.md` D16/D16.5 落地两件屏侧活。
   ①**收图自动跳相册页**（`carpet_page.c` `photo_refresh()`：`pv.gen` 变化 = 新收齐一张 → `nav_to(PG_PHOTO)`，
   熄屏不跳；旧入口照 11-14 规矩不动 —— owner 原话「我目前都没见过相册页面从哪里进去」）。
@@ -392,6 +401,8 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
     `muse_voice.c` 里 `talk_to_phone()` 和"按下 BOOT 先看 `carpet_mic_armed()`"那道插队，
     `screen_link` 的 hello 多报 `SCREEN_LINK_MIC_UP=4`（**`v` 仍是 3**），
     以及 owner 报的那句英文「SET UP MUSE FIRST」改口。
+    11-13 后续纠正：当晚一度把上行许可改成 `v>=4 && protocols∋4`，随后真机证明 App 的 envelope `v`
+    因默认值不编码而不存在，已改回只看 `ack.protocols∋4`；本节保留当晚过程，但以纠正后的实现为准。
     夜里那两处在 `components/screen_link/` 和 `carpet_link.c`（**前者不进 patch**，走 §3 那条 `cp -r`，
     两份树这一轮已经比过 SAME）：`ws_cfg.buffer_size` 从 4096 提到 4608 跨过
     `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` 那条界、把 rx/tx 两份缓冲挪进 PSRAM，还回 8 KB 内部 RAM；
@@ -1350,9 +1361,10 @@ App 侧配套要改的四条（发帧、partial WakeLock、退出别停服务、
      **验证是硬的**：`git archive cdc169d` 解一份干净基线树 → `git apply --check -p1` 通过 →
      真 apply 之后 `carpet_audio.c` 和板子上刚刷进去那份逐字节一致（只差 apply 时 autocrlf 给的 CRLF，
      整份补丁 27 节都这样，与本节无关）。重装固件的人现在拿得到这个修复了。
-   - **喇叭只有一只这条规矩照旧立着**：我们的 `audio_chunk` 和 Muse 自己的云 TTS 抢同一个
-     ES8311+NS4150B 输出，手机侧对 `foreignCloud` 那几轮只记日志、不会来闭 Muse 的嘴
-     （`core/.../ai/DialogBridge.kt:121-125`）。**v4 落地时屏侧要定"我们的音频进来时 Muse 那条链路要不要静音"**。
+   - **喇叭只有一只这条规矩照旧立着**：当前交付配置是 `CONFIG_MUSE_REALTIME_VOICE=n`，
+     armed 的 carpet 轮次在 `muse_voice.c` 直接绕过 Muse 云端，由 App 的 `audio_chunk` 独占屏输出。
+     App 侧 `ScreenVoice.kt` 现在按 `ScreenOnly / PhoneOnly / Nothing` 路由，不再是旧文档说的无条件双放；
+     真机仍须按「同一句只听得到一个声音」验收。
      上一轮这里写的"这棵树的手机 App 里没有任何放音代码、装机那份 APK 另有来源"**整段作废**，
      依据扫的是没 fetch 的本地树；手机侧语音在远端 `ff78279`（1.20.0）里，
      定性见 `docs/APP-SCREEN-CONNECT.md` §12.3。
