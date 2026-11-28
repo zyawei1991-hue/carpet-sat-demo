@@ -27,8 +27,8 @@ android {
         // 星历 SDK 要 26（基础通信 SDK 只要 24），装到 24/25 上是 native 库起不来，不是少个功能
         minSdk = 26
         targetSdk = 34
-        versionCode = 129140
-        versionName = "1.29.14"
+        versionCode = 129150
+        versionName = "1.29.15"
 
         // 星历 aar 只带 arm64-v8a 的 libdecodeutil.so。真机都是 arm64，
         // 但别在这里加 abiFilters 之外的假设：换了 SoC 就得回来改
@@ -114,6 +114,8 @@ android {
 
     packaging {
         resources.excludes += setOf("META-INF/*.kotlin_module", "META-INF/DEPENDENCIES")
+        // 压缩原生库换取更小的下载包；minSdk 26 安装时会自动解压。
+        jniLibs.useLegacyPackaging = true
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.carpet.satdemo.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.border
@@ -97,13 +99,12 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
 }
 
 /**
- * 场景的可用动作。这些动作全都还要靠车机总线或账号侧接口才能真做，
- * 所以现在按下去只如实说没接 —— 一个看着能按、按了什么都没发生的按钮，
- * 比没有这个按钮更糟。
+ * 场景的可用动作。远程熄火走合作方数字钥匙；另外两项还没有真实车机接口，继续如实说没接。
+ * 已发送、车辆已回复、执行成功是三种不同状态，按钮文案不把它们混在一起。
  *
  * **用 Material 的 OutlinedButton，不用自己拼的方块**：自拼的 clickable 方块没有按压态、
  * 没有焦点态、没有涟漪，用户按下去只有字变了颜色，那正是"质感差"的来处。描边（而非实底）
- * 把它标成次要动作：三颗都还没接的东西不该长得像本页的主行动。
+ * 把它标成次要动作：常用操作不该长得像本页的主行动。
  *
  * **不横向滚**：三个词在任何一档视口都装得下，而横向滚动会让人以为后面还有第四个。
  * 最小高度 48dp —— Material 的触摸目标下限，点得着比它长得瘦重要。
@@ -113,15 +114,23 @@ fun CardStream(keys: List<String>, scope: CardScope, modifier: Modifier = Modifi
  */
 @Composable
 fun SceneActions(actions: List<String>, app: AppRuntime) {
+    var digitalKeyReady by remember { mutableStateOf(app.digitalKeyConfigured()) }
+    val pickDigitalKey = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) app.importDigitalKey(uri) { digitalKeyReady = it }
+    }
     InkCard(icon = MIcons.action) {
-        CardTitle("常用操作", trailing = "还没连上车")
+        CardTitle("常用操作", trailing = if (digitalKeyReady) "熄火已接合作方" else "熄火待配置")
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Grid.x8),
             ) {
             actions.forEach { a ->
                 OutlinedButton(
-                    onClick = { app.say("「$a」还没连上车，现在做不了") },
+                    onClick = {
+                        if (a == "远程熄火") {
+                            if (digitalKeyReady) app.remoteEngineStop() else pickDigitalKey.launch("*/*")
+                        } else app.say("「$a」还没连上车，现在做不了")
+                    },
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(Round.Chip),
                     border = BorderStroke(1.dp, Ink.Outline),

@@ -3118,3 +3118,64 @@ carpet 模式 tileview 永不自滚（`s_swipe_enabled=false`），四方向归�
 - 场景环 carousel 重画 / 换装动画
 - 每场景功能层标签（讲故事/成长记录/管额度/静音 还没有对应指令 ⇒ 还没接上）
 - 氛围默认页设置
+
+## 19. 11-28：owner 最新 P0 复测的三处屏侧根修
+
+owner 在最新 App + 圆屏实测后点名：「按屏上按键好像还是不能快速回连」「好像新版的固件还是没有实现」
+「还是不能连续对话」。本轮只修这三处已确认的屏侧缺口，不把装机 APK 或 #76 静音当既定真凶。
+
+- **实体键快速回连**：`muse_input.c` 在轮询到实体键后统一 `press_reconnect()`，同时
+  `muse_wifi_power(FULL)` / `muse_wifi_apply()` / `carpet_link_retry()`。`muse_glue.c` 的显式
+  `KEEP_WIFI` 重置两条退避与 `next_try`，`force_look` 绕过近期无热点缓存。`screen_link.c` 新增
+  `BIT_RETRY`，三条失败等待都能被 `screen_link_retry_now()` 立即打断；手动请求后下一失败从 1 秒档起。
+  `>retry` 回读 `kicked/retries/linked/wifi`，`>carpet` 多印累计 `retries=`。已经连着时不拆健康 WS，
+  也不强杀正在进行的连接尝试。Screen-Link 两份源码仍不进 Muse patch，按 §3 从仓库组件整目录复制。
+- **收图自动跳页**：`photo_refresh()` 从页分支里移到 `carpet_page_tick()` 的所有页早退之前；
+  脸页、设置页、详情页现在都能看到新 `gen`，紧急遮罩仍优先，熄屏仍不跳。`>phototest` 不再手工
+  `carpet_page_goto("photo")`，喂图后必须等真实 UI tick 自己跳，避免台架把生产缺陷盖住。
+- **Avatar / 触摸起头连续对话**：`muse_voice.c` 的 Avatar/触摸分支补上 `if (s_turn_sent) window_open()`，
+  与唤醒词起头一致；`talk_to_phone()` 入口先清 `s_turn_sent`，没真发出去就不开窗。#76 非零 PCM 未修，
+  答句若 12 秒不起播仍会按设计收窗，不能把这条降级当连续对话验收通过。
+
+当前已完成的证据：补丁 45 节 / 10,903+ / 159- / 1,001,062 B，SHA-256
+`a44b20d851cb685fc39f3f8b47feb7a47b12f7e40fb0a96479fbff6e1259e9ef`，空仓 apply 与工作树逐字节 45/45；
+Screen-Link 源头与 Muse 树两份 `.c/.h` SHA-256 相同；聚焦守卫 17/17。最终串行无缓存回归结果见本节末尾。
+
+#### 11-28 新固件构建、刷机与台架回读
+
+- `CHAT_WINDOW=y` 干净构建 `Project build complete`，应用 4,067,328 B，14:43，SHA-256
+  `038dafb5980a3d2aa33a1cc8d0b57a00202e42b420054b0d9543be6689699589`。COM8 按明确偏移全片刷入
+  bootloader 22,608 B / 分区表 3,072 B / ota 8,192 B / model 291,068 B / app 4,067,328 B；五段均
+  `Hash of data verified`，RTS 硬复位。日志分别在
+  `D:/dev/tmp/build-muse-s3-175-carpet-urgent-20261128-144107-build-ps.log` 与
+  `D:/dev/tmp/build-muse-s3-175-carpet-urgent-20261128-144711-flash-ps.log`。
+- `CHAT_WINDOW=n` 独立干净构建同样 `Project build complete`，应用 4,067,328 B，14:40，SHA-256
+  `e875207eddb2f155f83fa23bcf9c8cad85d7b8a09f2c5ab6f9eab3cc8ad5a19d`，日志
+  `D:/dev/tmp/build-muse-s3-175-carpet-urgent-nowin-fresh-20261128-143838-build-ps.log`。两档 app 均
+  `0x3e1000`、4M 槽余 `0x1f000`（3%）。关闭档曾报 `captured` 未使用，最终条件编译保留开启档 VAD 读取，
+  关闭档显式 `(void)idle_capture()`；不是绕过警告或关掉副作用。
+- 生产收图路径（最终固件复跑）：`>phototest bench-1` 喂 8 块 / 16,125 B 全收，UI 自己打
+  `@photo 收齐 album=bench-1 16125 字节（环里第 1 张）`、`@photo auto page=photo awake=1 gen=1`；
+  466×466 `photo-auto.png` 实看为 PHOTO TEST 日落图，带断链提示。台架脚本没有代翻页。
+  原始串口与截图在 `D:/dev/tmp/carpet-p0-20261128-final/`。真 App 推图仍欠。
+- 连续窗口台架（最终固件复跑）：`@window open life=60s reply_wait=12s` → `@window reply live` →
+  `@window reply gap wait` → `@window close reason=屏幕熄了，窗口先收`；`>audtest` 38 块 / 96,000 B
+  放完，播放中 level 0.95。Avatar 注入那次同刻 `wifi=0 linked=0 phone_v4=0 mic armed=0`，只到导航，
+  没进入 `talk_to_phone()`，所以不能拿它判 Avatar 开窗成败；真 App 连续两轮仍欠。
+- 重拨台架：`@retry kicked=0 retries=0 linked=0 wifi=0`。根因是 Wi-Fi 未起来，`carpet_gate` 尚未创建
+  Screen-Link 事件组；`screen_link_retry_now()` 如实返回 false。要证明 `BIT_RETRY` 生效，必须等 Wi-Fi 已连、
+  Screen-Link 已进入拨号失败退避后再按；真手指与真实耗时也仍欠。临时改过的 URL 已恢复出厂
+  `ws://192.168.43.1:8443`，未动板子保存的 Wi-Fi。
+
+#### 11-28 最终串行回归与 App 出包
+
+同一最终源码上串行执行 `:core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --no-build-cache --no-daemon -Pkotlin.incremental=false`：
+`BUILD SUCCESSFUL`、56/56 actionable tasks 实际执行。日志 `D:/dev/tmp/carpet-final-regression-20261128-final3.log`。
+按 XML 内部 timestamp 统计：core 50 套 / **422/422**（08:46:27–08:46:33），App 15 套 / **84/84**
+（08:47:03–08:49:18），失败/错误/跳过全 0；SchemaDrift 17/17、数字钥匙 core 18/18、App 8/8。
+App 最终 APK 为 1.29.15 / 129150、**19,237,142 B**，比同为空云配置字段的 1.29.14 基线少 559,296 B；
+SHA-256 `7d8632c7c941e7b076d6d117f4320fe47e9c218902ad602e5504ff912588de21`。APK v2 签名与 4 字节
+zipalign 均通过，manifest 实读 `usesCleartextTraffic=false`、`extractNativeLibs=true`。兼容任务实际执行，
+静态扫到 459 个 `java/javax` 类，android.jar 缺的 2 个 instrument 类按已知不加载跳过；不冒充真机加载验收。
+压缩原生库省 APK，但安装会解压 834,760 B；手机安装/升级占用与加载未称。本机无 `local.properties`，
+AI/Azure/ASR 配置字段为空，因此该 APK 不是 owner 装机云配置完整包。数字钥匙没有对真车发送指令。

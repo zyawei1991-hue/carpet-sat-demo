@@ -7,3 +7,5 @@
 *.jpg binary
 *.aar binary
 *.ttf binary
+# A unified diff's blank context lines legitimately contain one leading space.
+firmware/screen/muse/muse-carpet.patch whitespace=-blank-at-eol

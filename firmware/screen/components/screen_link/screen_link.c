@@ -38,6 +38,7 @@ static const uint32_t BACKOFF_S[] = {1, 2, 5, 10, 30};
 #define BIT_UP BIT0
 #define BIT_DOWN BIT1
 #define BIT_STOP BIT2
+#define BIT_RETRY BIT3
 
 /* event_id 去重环形缓冲。契约说留 32 个，够小 */
 #define DEDUP_RING 32
@@ -73,6 +74,8 @@ static volatile uint32_t s_wd_fires = 0;
  * 而"第几条失败才算网已经死了"这句话要连着阶梯一起说才成立。
  */
 static volatile uint32_t s_dial_fails = 0;
+static volatile uint32_t s_retry_count = 0;
+static portMUX_TYPE s_retry_mux = portMUX_INITIALIZER_UNLOCKED;
 /** 最后一条拨号失败的原因，一行；写在线程回调里，读在 keeper/UI 任务，所以配一把自旋锁。 */
 static char s_last_err[120];
 static portMUX_TYPE s_err_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -433,11 +436,9 @@ static void handle_frame(char *raw)
         }
     } else if (strcmp(t, "ack") == 0) {
         const cJSON *a = cJSON_GetObjectItemCaseSensitive(root, "ack");
-        /* 把这一帧的契约档一起交出去（缺 `v` 按 1 算，老帧就是这么发的）。
-         * 为什么组件要替调用方读这一个数：对面 `protocols` 里报的 4 **单独不能当许可** ——
-         * 2026-11-11 读 App 那棵树称到装机那版已经先报了 4 而 CommandType 还解不了 mic_chunk，
-         * 发上去就是关线；真许可只有"整份契约走到 v4"那一档，而那个数就在 envelope 上。
-         * 判断本身不在组件里做（组件不认识上行），这里只负责两个数一起递过去。 */
+        /* `v` 只作回读诊断：App 的默认值字段可能因 encodeDefaults=false 不上线，
+         * 缺键按 1 算是已知兜底，不是能力信号。上行许可只看 ack.protocols 是否含 ≥4；
+         * 手机下发 dialog/audio_chunk 则看屏在 hello.protocols 里的申报（D17）。 */
         if (cJSON_IsObject(a) && s_cb.on_ack != NULL) s_cb.on_ack(a, (int)num_or(root, "v", 1));
     } else {
         contract_error(raw, "不认识的帧类型");
@@ -596,11 +597,14 @@ static void ws_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
 
 /* ---------------- 链路任务 ---------------- */
 
-static void sleep_backoff(uint32_t seconds)
+static bool sleep_backoff(uint32_t seconds)
 {
     for (uint32_t i = 0; i < seconds * 10 && !s_stopping; i++) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        EventBits_t bits = xEventGroupWaitBits(s_eg, BIT_STOP | BIT_RETRY, pdTRUE, pdFALSE,
+                                               pdMS_TO_TICKS(100));
+        if (bits & (BIT_STOP | BIT_RETRY)) return (bits & BIT_RETRY) != 0;
     }
+    return false;
 }
 
 /* 组件那个 ws 任务的栈要给多大。2026-11-10 真机：4096 字那一档在建任务那一步反复要不到
@@ -733,8 +737,8 @@ static void link_task(void *arg)
             ESP_LOGE(TAG, "start 没起来（第 %lu 次连续失败，ws 栈 %d 字）：%s；换掉整个 ws 句柄重来",
                      (unsigned long)s_dial_fails, WS_STACKS[s_ws_stack_i], mem);
             if (s_dial_fails == 1) ws_probe();   /* 只称第一下，后面每轮都印同一组数没意义 */
-            sleep_backoff(BACKOFF_S[step]);
-            if (step < BACKOFF_STEPS - 1) step++;
+            if (sleep_backoff(BACKOFF_S[step])) step = 0;
+            else if (step < BACKOFF_STEPS - 1) step++;
             /* 只有链路任务自己在这一刻持有 s_ws：s_up 是 false，发帧那条(第 139 行)
              * 有 `s_up && s_ws != NULL` 兜着，screen_link_stop() 也在 s_ws==NULL 时直接返回。 */
             esp_websocket_client_destroy(s_ws);
@@ -746,8 +750,8 @@ static void link_task(void *arg)
             }
             if (client_open(WS_STACKS[s_ws_stack_i]) != ESP_OK) {
                 ESP_LOGE(TAG, "换句柄也没换成，%d 秒后再试一轮", (int)BACKOFF_S[step]);
-                sleep_backoff(BACKOFF_S[step]);
-                if (step < BACKOFF_STEPS - 1) step++;
+                if (sleep_backoff(BACKOFF_S[step])) step = 0;
+                else if (step < BACKOFF_STEPS - 1) step++;
             }
             continue;
         }
@@ -764,6 +768,7 @@ static void link_task(void *arg)
             s_state_ts_ms = 0;
             taskEXIT_CRITICAL(&s_ts_mux);
             step = 0;
+            xEventGroupClearBits(s_eg, BIT_RETRY);
             send_hello();
             if (s_cb.on_connected != NULL) s_cb.on_connected(s_negotiated);
 
@@ -826,8 +831,8 @@ static void link_task(void *arg)
         if (!(bits & BIT_UP)) {
             s_dial_fails++;
         }
-        sleep_backoff(BACKOFF_S[step]);
-        if (step < BACKOFF_STEPS - 1) step++;
+        if (sleep_backoff(BACKOFF_S[step])) step = 0;
+        else if (step < BACKOFF_STEPS - 1) step++;
     }
 
     s_task = NULL;
@@ -951,6 +956,25 @@ uint32_t screen_link_watchdog_fires(void)
 uint32_t screen_link_dial_fails(void)
 {
     return s_dial_fails;
+}
+
+bool screen_link_retry_now(void)
+{
+    if (!s_eg || s_up || s_stopping) return false;
+    taskENTER_CRITICAL(&s_retry_mux);
+    s_retry_count++;
+    taskEXIT_CRITICAL(&s_retry_mux);
+    xEventGroupSetBits(s_eg, BIT_RETRY);
+    ESP_LOGI(TAG, "手动重拨：结束退避等待");
+    return true;
+}
+
+uint32_t screen_link_retry_count(void)
+{
+    taskENTER_CRITICAL(&s_retry_mux);
+    uint32_t n = s_retry_count;
+    taskEXIT_CRITICAL(&s_retry_mux);
+    return n;
 }
 
 void screen_link_last_error(char *out, size_t cap)

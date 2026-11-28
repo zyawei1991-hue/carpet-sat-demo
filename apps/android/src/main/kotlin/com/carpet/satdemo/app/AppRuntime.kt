@@ -2,6 +2,7 @@ package com.carpet.satdemo.app
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import com.carpet.satdemo.core.ai.AiEndpoint
 import com.carpet.satdemo.core.ai.AiGateway
 import com.carpet.satdemo.core.ai.AzureSpeech
@@ -37,6 +38,13 @@ import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.runtime.DemoRuntime
+import com.carpet.satdemo.core.vehicle.XinyeCredentials
+import com.carpet.satdemo.core.vehicle.XinyeDigitalKeyClient
+import com.carpet.satdemo.core.vehicle.XinyeFailureKind
+import com.carpet.satdemo.core.vehicle.XinyeInstruction
+import com.carpet.satdemo.core.vehicle.XinyeLookupIdSource
+import com.carpet.satdemo.core.vehicle.XinyeReceipt
+import com.carpet.satdemo.core.vehicle.XinyeSendResult
 import com.carpet.satdemo.app.ui.Availability
 import com.carpet.satdemo.app.ui.Capability
 import com.carpet.satdemo.app.ui.PrivacyTier
@@ -53,9 +61,44 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.carpet.satdemo.core.link.SosCopy
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.io.PrintWriter
 import java.io.StringWriter
+
+internal fun engineStopOutcome(response: String?): String {
+    val text = response.orEmpty().trim()
+    val lower = text.lowercase()
+    val normalized = lower.replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    val failed = lower.contains("fail") || lower.contains("error") ||
+        lower.contains("unsuccess") || lower.contains("not success") ||
+        lower.contains("no success") || text.contains("失败") || text.contains("拒绝") ||
+        text.contains("未成功") || text.contains("没有成功") || text.contains("未能") ||
+        text.contains("无法") || text.contains("不成功")
+    if (failed) return "失败"
+    val succeeded = normalized in setOf(
+        "engine stop success",
+        "engine stop successful",
+        "engine stop succeeded",
+        "stop engine success",
+        "stop engine succeeded",
+        "engine stopped",
+        "engine has been stopped",
+        "engine has been successfully stopped",
+        "successfully stopped",
+        "shutdown success",
+        "cut off the fuel supply success",
+        "远程熄火成功",
+        "熄火成功",
+        "已熄火",
+        "发动机已停止",
+        "引擎已关闭",
+    )
+    return if (succeeded) "成功" else "结果未识别"
+}
 
 /**
  * **连接层持有者，不属于任何页面。**
@@ -68,7 +111,16 @@ import java.io.StringWriter
  * 常驻通知念的就是台账上那两件事 —— 链路和额度。只挂到 Activity 之上是不够的，
  * 锁屏久了系统会把进程冻住，那时候 1Hz 那一圈会停、圆屏那头会变灰。
  */
-class AppRuntime(private val host: Application) {
+class AppRuntime(
+    private val host: Application,
+    private val digitalKeyClientFactory: ((XinyeCredentials) -> XinyeDigitalKeyClient)? = null,
+) {
+
+    private fun defaultDigitalKeyClient(credentials: XinyeCredentials): XinyeDigitalKeyClient =
+        XinyeDigitalKeyClient(
+            credentials,
+            beforeSend = { PermissionTier.allows(_aiGranted.value, PermissionTier.Irreversible) },
+        )
 
     /**
      * 演示默认跑假卫星模块：GT1005 到货前手机就能整套演。
@@ -445,6 +497,247 @@ class AppRuntime(private val host: Application) {
 
     fun snackShown() {
         _snack.value = null
+    }
+
+    private data class DigitalKeyFileStamp(val modifiedMs: Long, val length: Long)
+    private data class PendingEngineStop(
+        val client: XinyeDigitalKeyClient,
+        val sent: XinyeSendResult.Accepted,
+    )
+    private data class EngineStopAttempt(
+        val startedAtMs: Long,
+        val historyId: String?,
+        val lookupId: String?,
+        val lookupSourceName: String?,
+    )
+
+    private val digitalKeyFile = File(host.noBackupFilesDir, "digital-key-partner.properties")
+    private var digitalKeyFileStamp: DigitalKeyFileStamp? = null
+    private var digitalKeyClient: XinyeDigitalKeyClient? = null
+    private var digitalKeyJob: Job? = null
+    @Volatile private var pendingEngineStop: PendingEngineStop? = null
+
+    private fun loadDigitalKeyClient(): XinyeDigitalKeyClient? {
+        if (!digitalKeyFile.isFile) {
+            digitalKeyClient = null
+            digitalKeyFileStamp = null
+            return null
+        }
+        val stamp = DigitalKeyFileStamp(digitalKeyFile.lastModified(), digitalKeyFile.length())
+        digitalKeyClient?.let { if (digitalKeyFileStamp == stamp) return it }
+        val credentials = try {
+            XinyeCredentials.fromProperties(digitalKeyFile.readText())
+        } catch (_: Exception) {
+            return null
+        }
+        return (digitalKeyClientFactory?.invoke(credentials) ?: defaultDigitalKeyClient(credentials)).also {
+            digitalKeyClient = it
+            digitalKeyFileStamp = stamp
+        }
+    }
+
+    fun digitalKeyConfigured(): Boolean = loadDigitalKeyClient() != null
+
+    fun importDigitalKey(uri: Uri, onResult: (Boolean) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            val text = try {
+                host.contentResolver.openInputStream(uri)?.use { input ->
+                    val output = ByteArrayOutputStream()
+                    val buffer = ByteArray(8 * 1024)
+                    var total = 0
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        if (total > DIGITAL_KEY_MAX_BYTES) throw IOException("配置文件过大")
+                        output.write(buffer, 0, read)
+                    }
+                    String(output.toByteArray(), Charsets.UTF_8)
+                }
+            } catch (_: Exception) {
+                null
+            }
+            val ok = text != null && importDigitalKeyText(text)
+            withContext(Dispatchers.Main) {
+                say(
+                    if (ok) "数字钥匙配置已导入；再点一次「远程熄火」才会发送"
+                    else "配置导入失败：文件需不超过 64 KB，并含 appid、key、车牌号或设备号",
+                )
+                onResult(ok)
+            }
+        }
+    }
+
+    internal fun importDigitalKeyText(text: String): Boolean {
+        return try {
+            if (text.toByteArray(Charsets.UTF_8).size > DIGITAL_KEY_MAX_BYTES) return false
+            XinyeCredentials.fromProperties(text)
+            digitalKeyFile.writeText(text, Charsets.UTF_8)
+            digitalKeyClient = null
+            digitalKeyFileStamp = null
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readEngineStopAttempt(): EngineStopAttempt? {
+        val startedAtMs = prefs.getLong(KEY_ENGINE_STOP_ATTEMPT_AT, 0L)
+        if (startedAtMs <= 0L) return null
+        return EngineStopAttempt(
+            startedAtMs = startedAtMs,
+            historyId = prefs.getString(KEY_ENGINE_STOP_HISTORY_ID, null),
+            lookupId = prefs.getString(KEY_ENGINE_STOP_LOOKUP_ID, null),
+            lookupSourceName = prefs.getString(KEY_ENGINE_STOP_LOOKUP_SOURCE, null),
+        )
+    }
+
+    private fun rememberEngineStopAttempt(sent: XinyeSendResult.Accepted?): Boolean =
+        prefs.edit()
+            .putLong(KEY_ENGINE_STOP_ATTEMPT_AT, System.currentTimeMillis())
+            .putString(KEY_ENGINE_STOP_HISTORY_ID, sent?.historyId)
+            .putString(KEY_ENGINE_STOP_LOOKUP_ID, sent?.lookupId)
+            .putString(KEY_ENGINE_STOP_LOOKUP_SOURCE, sent?.lookupIdSource?.name)
+            .commit()
+
+    private fun clearEngineStopAttempt() {
+        prefs.edit()
+            .remove(KEY_ENGINE_STOP_ATTEMPT_AT)
+            .remove(KEY_ENGINE_STOP_HISTORY_ID)
+            .remove(KEY_ENGINE_STOP_LOOKUP_ID)
+            .remove(KEY_ENGINE_STOP_LOOKUP_SOURCE)
+            .commit()
+    }
+
+    fun remoteEngineStop() {
+        if (!PermissionTier.allows(_aiGranted.value, PermissionTier.Irreversible)) {
+            say("远程熄火属于不可逆动作：请先在「我的」里放开不可逆权限")
+            return
+        }
+        if (digitalKeyJob?.isActive == true) {
+            say("远程熄火还在等合作方回复，先别重复发")
+            return
+        }
+        pendingEngineStop?.let { pending ->
+            pollEngineStop(pending.client, pending.sent)
+            return
+        }
+        val client = loadDigitalKeyClient()
+        if (client == null) {
+            say("数字钥匙未配置：点「远程熄火」选择合作方配置文件")
+            return
+        }
+        val attempt = readEngineStopAttempt()
+        if (attempt != null) {
+            val lookupId = attempt.lookupId
+            if (lookupId.isNullOrBlank()) {
+                say("上次熄火指令结果未确认，可能已执行；当前不重发，请先核对车辆")
+                return
+            }
+            val source = XinyeLookupIdSource.entries.firstOrNull { it.name == attempt.lookupSourceName }
+            pollEngineStop(
+                client,
+                XinyeSendResult.Accepted(
+                    historyId = attempt.historyId,
+                    lookupId = lookupId,
+                    lookupIdSource = source,
+                    replied = false,
+                    reply = null,
+                ),
+            )
+            return
+        }
+        say("正在发送远程熄火指令；只有车辆回执才会确认执行")
+        if (!rememberEngineStopAttempt(null)) {
+            say("无法保存熄火尝试记录，本次不发送；请检查手机存储后重试")
+            return
+        }
+        digitalKeyJob = scope.launch(Dispatchers.IO) {
+            val line = when (val sent = client.send(XinyeInstruction.ENGINE_STOP)) {
+                is XinyeSendResult.Rejected -> {
+                    val uncertain = sent.failure.kind in setOf(
+                        XinyeFailureKind.Network,
+                        XinyeFailureKind.Http,
+                        XinyeFailureKind.Protocol,
+                    )
+                    when {
+                        sent.failure.kind == XinyeFailureKind.Cancelled -> {
+                            clearEngineStopAttempt()
+                            "远程熄火已取消：${sent.failure.message}"
+                        }
+                        uncertain -> "远程熄火结果未确认：指令可能已执行；本次不重发，请先核对车辆"
+                        else -> {
+                            clearEngineStopAttempt()
+                            "远程熄火未获发送确认：${sent.failure.message}"
+                        }
+                    }
+                }
+                is XinyeSendResult.Accepted -> {
+                    pendingEngineStop = PendingEngineStop(client, sent)
+                    rememberEngineStopAttempt(sent)
+                    val receipt = awaitEngineStopReceipt(client, sent)
+                    if (receipt is XinyeReceipt.Responded &&
+                        engineStopOutcome(receipt.response) != "结果未识别"
+                    ) {
+                        pendingEngineStop = null
+                        clearEngineStopAttempt()
+                    }
+                    engineStopReceiptLine(sent, receipt)
+                }
+            }
+            withContext(Dispatchers.Main) { say(line) }
+        }
+    }
+
+    private fun pollEngineStop(client: XinyeDigitalKeyClient, sent: XinyeSendResult.Accepted) {
+        say("正在查询上次远程熄火回执，不会重复发送")
+        pendingEngineStop = PendingEngineStop(client, sent)
+        digitalKeyJob = scope.launch(Dispatchers.IO) {
+            val receipt = awaitEngineStopReceipt(client, sent)
+            if (receipt is XinyeReceipt.Responded &&
+                engineStopOutcome(receipt.response) != "结果未识别"
+            ) {
+                pendingEngineStop = null
+                clearEngineStopAttempt()
+            }
+            val line = engineStopReceiptLine(sent, receipt)
+            withContext(Dispatchers.Main) { say(line) }
+        }
+    }
+
+    private suspend fun awaitEngineStopReceipt(
+        client: XinyeDigitalKeyClient,
+        sent: XinyeSendResult.Accepted,
+    ): XinyeReceipt? {
+        val lookupId = sent.lookupId ?: return null
+        repeat(8) {
+            delay(750)
+            val receipt = client.receipt(lookupId)
+            if (receipt !is XinyeReceipt.Pending) return receipt
+        }
+        return null
+    }
+
+    private fun engineStopReceiptLine(sent: XinyeSendResult.Accepted, receipt: XinyeReceipt?): String {
+        val id = sent.historyId ?: sent.lookupId ?: "未知"
+        return when (receipt) {
+            is XinyeReceipt.Responded -> {
+                val response = receipt.response?.trim().orEmpty()
+                val outcome = engineStopOutcome(response)
+                val guard = if (outcome == "结果未识别") "；当前不重发，再点只查回执" else ""
+                "车辆已回复远程熄火指令，结果=$outcome（编号 $id）：${response.take(160)}$guard"
+            }
+            is XinyeReceipt.Rejected ->
+                "熄火指令已发送，但回执查询失败：${receipt.failure.message}；不能确认已熄火"
+            null, XinyeReceipt.Pending ->
+                if (sent.lookupIdSource == XinyeLookupIdSource.HistoryId) {
+                    "远程熄火指令已发送（historyId=$id）；合作方未给 uuid，车辆执行状态未确认；再点只查回执，不重发"
+                } else if (sent.replied) {
+                    "合作方已回复指令请求（编号 $id）；车辆执行状态未确认；再点只查回执，不重发"
+                } else {
+                    "远程熄火指令已发送（编号 $id）；车辆暂未回复，不能确认已熄火；再点只查回执，不重发"
+                }
+        }
     }
 
     /** 设备台账（§8 R1 第一件事）。切 Tab、切场景都不会让它空一格 */
@@ -971,9 +1264,23 @@ class AppRuntime(private val host: Application) {
     }
 
     fun setAiGranted(tier: PermissionTier) {
+        val before = _aiGranted.value
         ai.setGranted(tier)
         _aiGranted.value = ai.granted
         prefs.edit().putString(KEY_AI_TIER, tier.name).apply()
+        if (!PermissionTier.allows(before, PermissionTier.Irreversible) &&
+            PermissionTier.allows(tier, PermissionTier.Irreversible)
+        ) {
+            if (digitalKeyJob?.isActive == true) {
+                say("远程熄火还在确认中；等本次有明确结果后，重新降档再开不可逆权限才能重试")
+            } else {
+                // 关闭再放开不可逆权限，是 owner 核对车辆后明确允许重新尝试。
+                clearEngineStopAttempt()
+                pendingEngineStop = null
+            }
+        } else if (readEngineStopAttempt() != null && !PermissionTier.allows(tier, PermissionTier.Irreversible)) {
+            say("远程熄火还有未确认记录；核对车辆后重新开启不可逆权限，才允许重试")
+        }
     }
 
     /**
@@ -1263,6 +1570,7 @@ class AppRuntime(private val host: Application) {
     }
 
     fun release() {
+        digitalKeyJob?.cancel()
         location?.stop()
         monitor?.stop()
         ephSource?.release()
@@ -1297,6 +1605,11 @@ class AppRuntime(private val host: Application) {
         private const val KEY_AI_SEED = "ai_seed"
         private const val AI_SEED = "1.20"
         private const val KEY_AI_TIER = "ai_tier"
+        private const val KEY_ENGINE_STOP_ATTEMPT_AT = "engine_stop_attempt_at"
+        private const val KEY_ENGINE_STOP_HISTORY_ID = "engine_stop_history_id"
+        private const val KEY_ENGINE_STOP_LOOKUP_ID = "engine_stop_lookup_id"
+        private const val KEY_ENGINE_STOP_LOOKUP_SOURCE = "engine_stop_lookup_source"
+        private const val DIGITAL_KEY_MAX_BYTES = 64 * 1024
         private const val KEY_VOICE_ENGINE = "voice_engine"
         private const val KEY_VOICE_TONE = "voice_tone"
         private const val KEY_VOICE_FACE = "voice_face"

@@ -150,6 +150,12 @@ uint32_t screen_link_watchdog_fires(void);
  */
 uint32_t screen_link_dial_fails(void);
 
+/** 手动结束当前退避等待并立刻再拨；已连着或链路未启动时返回 false。 */
+bool screen_link_retry_now(void);
+
+/** 手动重拨请求的次数，供串口证明按键确实踢到了链路。 */
+uint32_t screen_link_retry_count(void);
+
 /**
  * 最后一条拨号失败的原因，一行 ASCII，形如
  * `ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST errno=119 http=0`；从没失败过 = 空串。

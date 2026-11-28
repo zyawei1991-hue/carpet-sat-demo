@@ -9303,10 +9303,10 @@ index 0000000..8bec4d4
 +#endif
 diff --git a/esp32/components/muse/carpet/carpet_link.c b/esp32/components/muse/carpet/carpet_link.c
 new file mode 100644
-index 0000000..5992a0a
+index 0000000..5e9d0e3
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.c
-@@ -0,0 +1,1655 @@
+@@ -0,0 +1,1666 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -10801,6 +10801,16 @@ index 0000000..5992a0a
 +    screen_link_last_error(out, cap);
 +}
 +
++bool carpet_link_retry(void)
++{
++    return screen_link_retry_now();
++}
++
++uint32_t carpet_link_retry_count(void)
++{
++    return screen_link_retry_count();
++}
++
 +/* 开发口：文字和声音一起来。turn_id 两边都用 "audtest" —— 这条的目的就是让
 + * 首屏那句去查"这一轮有没有声音、放到哪了"，id 不一样就查不到，翻页会退回按秒估，
 + * 那正好把要看的两件事都藏起来。先记一轮再交句，同 `>say` 那两条一样的写法。 */
@@ -10907,9 +10917,10 @@ index 0000000..5992a0a
 +
 +    /* gap 换算成页面第一行那句中文的规则写在 carpet_page.c 的 tick 里：
 +     * 没网=等网络、没连=未接入、gap 无穷=等首帧、>10s=掉线重连、>3s=卡N秒、否则=已接入。 */
-+    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu fails=%lu\n",
++    printf("@carpet wifi=%d linked=%d contract=v%d gap_s=%lu has_state=%d wd=%lu fails=%lu retries=%lu\n",
 +           v.wifi_up, v.linked, v.negotiated, (unsigned long)v.gap_s, s.has_state,
-+           (unsigned long)screen_link_watchdog_fires(), (unsigned long)screen_link_dial_fails());
++           (unsigned long)screen_link_watchdog_fires(), (unsigned long)screen_link_dial_fails(),
++           (unsigned long)screen_link_retry_count());
 +    printf("@carpet sat=%s\n", s.sat[0] ? s.sat : "-");
 +    printf("@carpet dialog=%s\n", s.dialog[0] ? s.dialog : "-");
 +    /* 首屏那条带上的整句：live=还有话挂着，mode=脸现在哪个状态
@@ -10964,10 +10975,10 @@ index 0000000..5992a0a
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_link.h b/esp32/components/muse/carpet/carpet_link.h
 new file mode 100644
-index 0000000..f80377c
+index 0000000..334176f
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_link.h
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,221 @@
 +/*
 + * 车联（Screen-Link）在 Muse 里的启动闸门与状态存放。
 + *
@@ -11118,6 +11129,10 @@ index 0000000..f80377c
 + */
 +uint32_t carpet_link_dial_fails(void);
 +void carpet_link_last_error(char *out, size_t cap);
++
++/* 任何按键都可调用：只唤醒断线后的退避等待，不拆一条健康连接。 */
++bool carpet_link_retry(void);
++uint32_t carpet_link_retry_count(void);
 +
 +/*
 + * 开发口：把一句话直接塞进首屏那条带，当它是答句（脸进 speaking、按 2.5 秒一页翻）。
@@ -11853,10 +11868,10 @@ index 0000000..8b38771
 +void carpet_mic_bench(int seconds);
 diff --git a/esp32/components/muse/carpet/carpet_page.c b/esp32/components/muse/carpet/carpet_page.c
 new file mode 100644
-index 0000000..4d6a26a
+index 0000000..12a7208
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_page.c
-@@ -0,0 +1,1841 @@
+@@ -0,0 +1,1848 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -13419,7 +13434,7 @@ index 0000000..4d6a26a
 +
 +/* 每拍看一眼环账：新收齐 → 立刻切到最新那张；多张 → 8 秒轮播。
 + * 0↔非0 翻转才重排隐现（apply），其余时候只动图像源，不碰别的页。 */
-+static void photo_refresh(void)
++static void photo_refresh(bool allow_rotation)
 +{
 +    carpet_photo_view_t pv;
 +    carpet_photo_view(&pv);
@@ -13440,8 +13455,12 @@ index 0000000..4d6a26a
 +        /* 11-22 owner 拍板（D16.3.1）：收齐一张就自动跳相册页。旧入口
 +         * （脸→右滑氛围→再右滑轮换）留着没拆 —— owner 自己都没找到过它，
 +         * 拆了更没有地方进。熄屏不跳：那会儿没人看屏，跳了白跳。 */
-+        if (!muse_state_asleep()) nav_to(PG_PHOTO);
-+    } else if (pv.count > 1 && now - s_photo_last_ms >= PHOTO_TEMPO_MS) {
++        if (!muse_state_asleep()) {
++            nav_to(PG_PHOTO);
++            printf("@photo auto page=photo awake=1 gen=%lu\n", (unsigned long)pv.gen);
++            fflush(stdout);
++        }
++    } else if (allow_rotation && pv.count > 1 && now - s_photo_last_ms >= PHOTO_TEMPO_MS) {
 +        s_photo_idx = (s_photo_idx + 1) % pv.count;
 +        s_photo_last_ms = now;
 +        photo_show(s_photo_idx);
@@ -13635,6 +13654,9 @@ index 0000000..4d6a26a
 +    carpet_link_view_t v;
 +    carpet_link_view(&v);
 +
++    /* 新照片必须在任何早退之前看到，否则脸页/设置页/详情页永远进不了自动跳转。 */
++    photo_refresh(false);
++
 +    if (s_tile < 2) return;   /* 脸和设置那格由 Muse 自己画，这一页一个字都不改 */
 +
 +    if (s_detail) {
@@ -13676,7 +13698,7 @@ index 0000000..4d6a26a
 +    } else if (s_pg == PG_CLOCK) {
 +        clock_refresh(&s, live);   /* 钟面：读墙钟 + 搬 sat 倒计时，n_rows=0 下面那圈不跑 */
 +    } else if (s_pg == PG_PHOTO) {
-+        photo_refresh();           /* 相册：环账有新就切最新，多张 8 秒一轮 */
++        photo_refresh(true);            /* 相册：环账有新就切最新，多张 8 秒一轮 */
 +    }
 +    /* 剩下那页（图片播放）的副行是写死的一句话，帧里没有对应的东西，不碰。 */
 +
@@ -13782,10 +13804,10 @@ index 0000000..bc87369
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 diff --git a/esp32/components/muse/carpet/carpet_photo.c b/esp32/components/muse/carpet/carpet_photo.c
 new file mode 100644
-index 0000000..227a8f6
+index 0000000..66c9aa5
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_photo.c
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,367 @@
 +/*
 + * 契约的相册通道（见 carpet_photo.h 头上那段账）。形状照抄 carpet_audio：
 + * 链路任务收帧 → 校验 → base64 解码 → 拼装 → 收齐进环；LVGL 任务只借字节。
@@ -14104,7 +14126,7 @@ index 0000000..227a8f6
 +/*
 + * `>phototest`：把固件里嵌的那张测试 JPEG 按线上形状喂进同一条 on_chunk ——
 + * b64 → cJSON args → 校验 → 解码 → 拼装 → 进环，一步不绕（>audtest 同一个道理）。
-+ * 每按一次换一张 album_id，按两次称轮播。喂完翻到相册页，截图就能称解码+渲染。
++ * 每按一次换一张 album_id，按两次称轮播。喂完不代点页面，由 UI 每拍收新图后自动跳。
 + * 照片不是实时流，不按 80ms 节拍补发，只管喂；每 64 块让一次任务，别饿着链路。
 + */
 +void carpet_photo_bench(void)
@@ -14147,17 +14169,16 @@ index 0000000..227a8f6
 +        if ((seq & 63) == 63) vTaskDelay(pdMS_TO_TICKS(1));
 +    }
 +    heap_caps_free(b64);
-+    printf("@phototest %s 喂了 %u 块 / %u 字节，%s。翻到相册页，>carpet 读环账\n",
++    printf("@phototest %s 喂了 %u 块 / %u 字节，%s。等 UI 自动跳相册，>carpet 读环账\n",
 +           album, seq, (unsigned)total, ok ? "全收" : "**中途被拒 —— 看上面那行 drops**");
 +    fflush(stdout);
-+    if (ok) carpet_page_goto("photo");
 +}
 +
 +#endif /* CONFIG_MUSE_CARPET_CARDS */
 \ No newline at end of file
 diff --git a/esp32/components/muse/carpet/carpet_photo.h b/esp32/components/muse/carpet/carpet_photo.h
 new file mode 100644
-index 0000000..0507a5a
+index 0000000..f0472c9
 --- /dev/null
 +++ b/esp32/components/muse/carpet/carpet_photo.h
 @@ -0,0 +1,63 @@
@@ -14220,9 +14241,9 @@ index 0000000..0507a5a
 +bool carpet_photo_jpeg_size(const uint8_t *buf, size_t n, uint16_t *w, uint16_t *h);
 +
 +/* 开发口 `>phototest`：把固件里嵌的那张测试 JPEG 按线上形状（2048 一块、b64、
-+ * seq/total 齐全）喂进同一条 on_chunk，再翻到相册页 —— 和 >audtest 同一个道理：
-+ * 不联网、不接手机，这块板在哪都能称接收+解码+渲染整条。每按一次换一张 album_id，
-+ * 按两次就能称轮播。只在串口任务里调。 */
++ * seq/total 齐全）喂进同一条 on_chunk；UI 收到新图后应自动跳相册 —— 和 >audtest
++ * 同一个道理：不联网、不接手机，这块板在哪都能称接收+自动跳转+解码+渲染整条。
++ * 每按一次换一张 album_id，按两次就能称轮播。只在串口任务里调。 */
 +void carpet_photo_bench(void);
 \ No newline at end of file
 diff --git a/esp32/components/muse/carpet/carpet_photo_test.jpg b/esp32/components/muse/carpet/carpet_photo_test.jpg
@@ -14872,7 +14893,7 @@ index d27f69e..6345222 100644
      muse_state_init();
  #if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
 diff --git a/esp32/components/muse/muse_input.c b/esp32/components/muse/muse_input.c
-index 7c579bb..8d1c7fd 100644
+index 7c579bb..9caf8e0 100644
 --- a/esp32/components/muse/muse_input.c
 +++ b/esp32/components/muse/muse_input.c
 @@ -48,6 +48,28 @@
@@ -15019,7 +15040,40 @@ index 7c579bb..8d1c7fd 100644
          s_power_swallow = true;   /* no sleep on release after shutdown/failure */
          if (s_talk_down) talk_button(MUSE_BTN_TALK_RELEASE);
          power_off();
-@@ -721,12 +784,23 @@ static void input_task(void *arg)
+@@ -648,6 +711,22 @@ static void dedicated_buttons(unsigned ev)
+     }
+ }
+ 
++#if CONFIG_MUSE_CARPET_CARDS
++static void press_reconnect(unsigned ev)
++{
++    unsigned presses = MUSE_BTN_TALK_PRESS | MUSE_BTN_AUX_PRESS | MUSE_BTN_POWER_PRESS |
++                       MUSE_BTN_SPEAKER_PRESS | MUSE_BTN_UP | MUSE_BTN_DOWN | MUSE_BTN_LEFT |
++                       MUSE_BTN_RIGHT | MUSE_BTN_ENTER | MUSE_BTN_ESCAPE;
++#if CONFIG_MUSE_BOARD_SENSECAP_WATCHER
++    presses |= MUSE_BTN_REVIEW_PREV | MUSE_BTN_REVIEW_NEXT;
++#endif
++    if (!(ev & presses)) return;
++    muse_wifi_power(MUSE_WIFI_FULL);
++    muse_wifi_apply();
++    carpet_link_retry();
++}
++#endif
++
+ static void input_task(void *arg)
+ {
+     (void)arg;
+@@ -658,6 +737,9 @@ static void input_task(void *arg)
+ 
+     for (;;) {
+         unsigned ev = muse_board->poll_buttons() | atomic_exchange(&s_touch_talk_events, 0);
++#if CONFIG_MUSE_CARPET_CARDS
++        press_reconnect(ev);
++#endif
+ #if CONFIG_MUSE_VIDEO
+         /* Any press leaves the video view (its release then does nothing). */
+         const unsigned presses = MUSE_BTN_TALK_PRESS | MUSE_BTN_AUX_PRESS | MUSE_BTN_POWER_PRESS |
+@@ -721,12 +803,23 @@ static void input_task(void *arg)
              if (muse_board->read_power && muse_board->read_power(&p) == ESP_OK) {
                  muse_state_set_power(&p);
                  muse_battery_note_power(&p, muse_state_on_battery());
@@ -15043,7 +15097,7 @@ index 7c579bb..8d1c7fd 100644
          /* Paused, anything but a button (a pairing prompt, an image) is
           * noticed within REST_WAIT_MS. Napping, nothing comes over the
           * network; USB power arriving is noticed within NAP_WAIT_MS. */
-@@ -839,6 +913,34 @@ static void set_face(const char *name)
+@@ -839,6 +932,34 @@ static void set_face(const char *name)
      fflush(stdout);
  }
  
@@ -15078,7 +15132,7 @@ index 7c579bb..8d1c7fd 100644
  /*
   * Console-only commands; false for setup commands. Their buffers are taken
   * per command: without PSRAM, static ones would hold internal RAM for good.
-@@ -892,6 +994,439 @@ static bool console_command(char *line, bool whole)
+@@ -892,6 +1013,448 @@ static bool console_command(char *line, bool whole)
          }
          return true;
      }
@@ -15087,6 +15141,15 @@ index 7c579bb..8d1c7fd 100644
 +     * Not under LV_USE_SNAPSHOT, because the plain build has no pixel capture. */
 +    if (!strcmp(line, "carpet")) {
 +        carpet_link_dump();
++        return true;
++    }
++    if (!strcmp(line, "retry")) {
++        carpet_link_view_t view;
++        carpet_link_view(&view);
++        bool kicked = carpet_link_retry();
++        printf("@retry kicked=%d retries=%lu linked=%d wifi=%d\n", (int)kicked,
++               (unsigned long)carpet_link_retry_count(), (int)view.linked, (int)view.wifi_up);
++        fflush(stdout);
 +        return true;
 +    }
 +    /* 翻页。走的是手机上 dialog.action 那同一条路（carpet_page_goto → 下一个 tick
@@ -15151,8 +15214,8 @@ index 7c579bb..8d1c7fd 100644
 +        return true;
 +    }
 +    /* 相册通道的台架口：把固件里嵌的测试 JPEG 按线上形状（2048 一块、b64、seq/total）
-+     * 喂进同一条 photo_chunk 路，喂完翻到相册页。每按一次换一张 album_id，
-+     * 按两次称轮播；>carpet 读环账。不联网、不接手机，和 >audtest 同一个道理。 */
++     * 喂进同一条 photo_chunk 路；不代点页面，专测 UI 自己发现新图并跳相册。
++     * 每按一次换一张 album_id，按两次称轮播；>carpet 读环账。 */
 +    if (!strcmp(line, "phototest")) {
 +        carpet_photo_bench();
 +        return true;
@@ -15518,7 +15581,7 @@ index 7c579bb..8d1c7fd 100644
      bool reset = !strcmp(line, "power.reset");
      if (reset || !strcmp(line, "power")) {
          if (reset) {
-@@ -926,6 +1461,12 @@ static bool console_command(char *line, bool whole)
+@@ -926,6 +1489,12 @@ static bool console_command(char *line, bool whole)
          muse_ui_bench_page(!strcmp(line, "ui=settings"));
          return true;
      }
@@ -15531,7 +15594,7 @@ index 7c579bb..8d1c7fd 100644
      if (!strncmp(line, "ui.settings=", 12)) {
          if (muse_settings_ui_bench_open(line + 12)) {
              muse_ui_bench_page(true);
-@@ -1028,3 +1569,8 @@ void muse_input_request_power_off(void)
+@@ -1028,3 +1597,8 @@ void muse_input_request_power_off(void)
  {
      s_power_off_requested = true;
  }
@@ -17059,7 +17122,7 @@ index a671bbc..a56b3dc 100644
  void muse_ui_bench_demo(bool enabled);
  #endif
 diff --git a/esp32/components/muse/muse_voice.c b/esp32/components/muse/muse_voice.c
-index 000104e..abe1475 100644
+index 000104e..2ec4bcb 100644
 --- a/esp32/components/muse/muse_voice.c
 +++ b/esp32/components/muse/muse_voice.c
 @@ -38,6 +38,11 @@
@@ -17432,12 +17495,16 @@ index 000104e..abe1475 100644
                  /* Wait for waking, USB power or a bench request without
                   * polling (the timeout is only a backstop, or a look for
                   * Wi-Fi to send saved notes), so the CPU can stay asleep. */
-@@ -1216,7 +1516,125 @@ static void voice_task(void *arg)
+@@ -1216,7 +1516,132 @@ static void voice_task(void *arg)
                  pre_reset();
              }
              /* The 20 ms read paces this loop. */
 -            idle_capture();
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
 +            bool captured = idle_capture();
++#else
++            (void)idle_capture();
++#endif
 +#if CONFIG_MUSE_CARPET_CARDS
 +            /* 唤醒词命中 = 替人按了一下那个键。**闸一道都不放宽**：能不能真发上去
 +             * 仍由 carpet_mic_armed() 判（本地 mic_mode + 对面申报过 v4 + 没被熔断）。
@@ -17474,6 +17541,9 @@ index 000104e..abe1475 100644
 +                    carpet_wake_inhibit(true);
 +                    talk_to_phone(false, true, false);
 +                    carpet_wake_inhibit(false);
++#if CONFIG_MUSE_CARPET_CHAT_WINDOW
++                    if (s_turn_sent) window_open();
++#endif
 +                } else if (carpet_mic_link_up()) {
 +                    go_idle("对着屏说话还没开");
 +                } else {
@@ -17559,7 +17629,7 @@ index 000104e..abe1475 100644
              if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {
                  continue;
              }
-@@ -1255,6 +1673,19 @@ static void voice_task(void *arg)
+@@ -1255,6 +1680,19 @@ static void voice_task(void *arg)
          }
  #endif
          muse_input_clear_call_pending(s_press_mark);
@@ -17579,7 +17649,7 @@ index 000104e..abe1475 100644
          if (!can_record()) {
              pending_down = false;
              continue;
-@@ -1301,7 +1732,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
+@@ -1301,7 +1739,11 @@ esp_err_t muse_voice_start(QueueHandle_t queue)
          muse_state_set_caption("AUDIO INIT FAILED");
          return ESP_FAIL;
      }
@@ -17592,7 +17662,7 @@ index 000104e..abe1475 100644
      if (xTaskCreatePinnedToCoreWithCaps(voice_task, "muse_voice", 6144, NULL, 6, NULL, MUSE_AUDIO_CORE,
                                          MUSE_BIG_CAPS) != pdPASS) {
          /* Without the task nothing would ever rest the codecs, which
-@@ -1343,6 +1778,17 @@ void muse_voice_request_mp3test(void)
+@@ -1343,6 +1785,17 @@ void muse_voice_request_mp3test(void)
      muse_state_nudge();
  }
  
@@ -17924,7 +17994,7 @@ index 1030652..25ddc42 100644
              }
              if (config_is_provisioned()) {
 diff --git a/esp32/main/muse_glue.c b/esp32/main/muse_glue.c
-index 0c74b08..23fbaa8 100644
+index 0c74b08..0d8c0ea 100644
 --- a/esp32/main/muse_glue.c
 +++ b/esp32/main/muse_glue.c
 @@ -40,6 +40,10 @@
@@ -17976,7 +18046,7 @@ index 0c74b08..23fbaa8 100644
  
  _Static_assert(MUSE_WIFI_SAVED_MAX >= WIFI_KNOWN_MAX, "room for every saved network");
  
-@@ -490,14 +510,31 @@ static bool none_nearby_lately(void) {
+@@ -490,14 +510,32 @@ static bool none_nearby_lately(void) {
  // leaves Wi-Fi alone instead of dropping a network it has no copy of.
  #define WIFI_OVERRIDE (CONFIG_HOMEHUB_WIFI_SSID[0] != '\0')
  
@@ -18006,10 +18076,11 @@ index 0c74b08..23fbaa8 100644
      int64_t backoff = RETRY_MIN_US;
 -    int64_t away_backoff = AWAY_MIN_US;
 +    int64_t away_backoff = away_start_us();
++    bool force_look = false;
      uint32_t pending = KEEP_BLE;
      bool napped = false;
      bool setup_done = config_setup_complete();
-@@ -515,7 +552,7 @@ static void keeper_task(void *arg) {
+@@ -515,7 +553,7 @@ static void keeper_task(void *arg) {
              reload_creds(&joined_gen);
              next_try = 0;
              backoff = RETRY_MIN_US;
@@ -18018,16 +18089,28 @@ index 0c74b08..23fbaa8 100644
          }
          if (pending & KEEP_RELOAD) {
              // Link saves a network it has already joined (provisioning), so
-@@ -541,7 +578,7 @@ static void keeper_task(void *arg) {
-             // nothing would only look again.
-             if (!s_away || !none_nearby_lately()) {
-                 next_try = 0;
+@@ -537,12 +575,15 @@ static void keeper_task(void *arg) {
+         }
+         if (pending & KEEP_WIFI) {
+             backoff = RETRY_MIN_US;
+-            // Muse starting up, or the screen waking, just after a look found
+-            // nothing would only look again.
+-            if (!s_away || !none_nearby_lately()) {
+-                next_try = 0;
 -                away_backoff = AWAY_MIN_US;
-+                away_backoff = away_start_us();
++            next_try = 0;
++            away_backoff = away_start_us();
++            force_look = true;
++#if CONFIG_MUSE_CARPET_CARDS
++            if (wifi_mgr_is_connected() && carpet_link_dial_fails() >= DIAL_STALL_FAILS) {
++                ESP_LOGW(TAG, "manual reconnect: link route stalled; rejoining wifi");
++                wifi_mgr_disconnect();
              }
++#endif
          }
  
-@@ -562,16 +599,41 @@ static void keeper_task(void *arg) {
+         bool have = s_ssid[0] != '\0' || WIFI_OVERRIDE;
+@@ -562,23 +603,48 @@ static void keeper_task(void *arg) {
                  ESP_LOGI(TAG, "screen off a while; left wifi");
                  napped = true;
              }
@@ -18072,7 +18155,23 @@ index 0c74b08..23fbaa8 100644
              // NVS has Muse's changes (s_editing is clear), so Link joins from
              // the same list the settings show.
              uint32_t gen = s_creds_gen;
-@@ -598,7 +660,7 @@ static void keeper_task(void *arg) {
+             bool first = s_chosen;
+             s_chosen = false;
+             app_wifi_join_t r;
+-            if (!first && none_nearby_lately()) {
++            if (!first && !force_look && none_nearby_lately()) {
+                 r = APP_WIFI_NOT_NEARBY;   // Link's join at boot just looked
+             } else {
+                 s_joining = true;
+@@ -590,6 +656,7 @@ static void keeper_task(void *arg) {
+                 r = app_wifi_join_saved(CONNECT_TIMEOUT_MS, first);
+                 s_joining = false;
+             }
++            force_look = false;
+             int64_t now = esp_timer_get_time();
+             if (r == APP_WIFI_JOINED) {
+                 set_fail("");
+@@ -598,7 +665,7 @@ static void keeper_task(void *arg) {
                  // Joining a network moves it first.
                  reload_creds(&joined_gen);
                  backoff = RETRY_MIN_US;
@@ -18081,7 +18180,7 @@ index 0c74b08..23fbaa8 100644
              } else if (r == APP_WIFI_NOT_NEARBY) {
                  // Quietly: nothing here touches the screen. Waking it or a
                  // talk press looks again at once (muse_wifi_apply), unless
-@@ -663,6 +725,11 @@ void muse_glue_start(void) {
+@@ -663,6 +730,11 @@ void muse_glue_start(void) {
          || xTaskCreate(keeper_task, "muse_keep", 6144, NULL, 4, &s_keeper) != pdPASS) {
          ESP_LOGE(TAG, "failed to start Muse tasks");
      }

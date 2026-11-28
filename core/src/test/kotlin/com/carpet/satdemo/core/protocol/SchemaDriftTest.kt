@@ -338,6 +338,90 @@ class SchemaDriftTest {
         assertTrue("battery_mv" in hello, "固件的 send_hello 里没带 battery_mv：手机会一直显示「外接供电」")
     }
 
+    @Test
+    fun `任何按键都要同时踢 Wi-Fi 和链路退避，手动重拨必须可打断三处等待`() {
+        val patch = musePatchText()
+        val press = patch.substringAfter("static void press_reconnect")
+            .substringBefore("static void input_task")
+        for (call in listOf("muse_wifi_power(MUSE_WIFI_FULL)", "muse_wifi_apply()", "carpet_link_retry()")) {
+            assertTrue(call in press, "按键重连少了 $call，醒屏时不会立即再拨")
+        }
+        val pollAt = patch.indexOf("muse_board->poll_buttons()")
+        val pressAt = patch.indexOf("press_reconnect(ev);")
+        assertTrue(pollAt >= 0 && pressAt > pollAt, "轮询到按键后没有调用 press_reconnect")
+        for (kick in listOf("backoff = RETRY_MIN_US;", "next_try = 0;", "force_look = true;")) {
+            assertTrue(kick in patch, "手动 Wi-Fi 重连没重置看守任务：$kick")
+        }
+        assertTrue("!first && !force_look && none_nearby_lately()" in patch,
+            "手动重拨仍会被“附近没有热点”的缓存挡掉")
+
+        val link = componentSource()
+        val backoff = link.substringAfter("static bool sleep_backoff")
+            .substringBefore("/* 组件那个 ws 任务的栈")
+        assertTrue("xEventGroupWaitBits(s_eg, BIT_STOP | BIT_RETRY" in backoff,
+            "退避还在睡死，按键只能等当前阶梯走完")
+        assertTrue("vTaskDelay" !in backoff, "退避里仍有不可打断的 vTaskDelay")
+        assertEquals(3, Regex("if \\(sleep_backoff\\(BACKOFF_S\\[step\\]\\)\\) step = 0;\\s*else if \\(step < BACKOFF_STEPS - 1\\) step\\+\\+;")
+            .findAll(link).count(), "三处拨号失败等待都必须可打断，且手动重拨后从 1 秒重新起算")
+
+        val retry = link.substringAfter("bool screen_link_retry_now")
+            .substringBefore("uint32_t screen_link_retry_count")
+        for (guard in listOf("!s_eg", "s_up", "s_stopping", "s_retry_count++", "BIT_RETRY")) {
+            assertTrue(guard in retry, "手动重拨口缺少 $guard")
+        }
+        assertTrue("screen_link_retry_now()" in patch && "screen_link_retry_count()" in patch,
+            "Muse 侧没有把重拨口和计数转出来")
+        assertTrue("retries=%lu" in patch && "!strcmp(line, \"retry\")" in patch,
+            "串口不能回读按键是否真的踢到了链路")
+    }
+
+    @Test
+    fun `新照片必须绕过页面早退自动跳转，台架不许代翻页`() {
+        val raw = musePatchText()
+        val page = raw.substringAfter("diff --git a/esp32/components/muse/carpet/carpet_page.c")
+        val refreshAt = page.indexOf("photo_refresh(false);")
+        val earlyReturnAt = page.indexOf("if (s_tile < 2) return;")
+        assertTrue(refreshAt >= 0 && earlyReturnAt > refreshAt,
+            "照片轮询又落到了脸页/设置页早退之后，新图到了也不会自动跳")
+        val photoBlock = page.substringAfter("static void photo_refresh")
+            .substringBefore("static void detail_refresh")
+        assertTrue("if (!muse_state_asleep())" in photoBlock && "nav_to(PG_PHOTO)" in photoBlock,
+            "醒屏收到新图必须自动进相册，熄屏不能抢着亮")
+        assertTrue("@photo auto page=photo" in photoBlock, "自动跳转没有串口证据")
+
+        val photo = raw.substringAfter("diff --git a/esp32/components/muse/carpet/carpet_photo.c")
+        assertTrue("carpet_page_goto(\"photo\")" !in photo,
+            ">phototest 又替 UI 翻页了，会把生产路径没跳的 bug 遮住")
+        assertTrue("等 UI 自动跳相册" in photo, "台架契约没有要求观察 UI 自动跳")
+    }
+
+    @Test
+    fun `关闭连续窗口时 idle_capture 的副作用不能被优化标记拦住`() {
+        val patch = musePatch()
+        val voice = patch.substringAfter("diff --git a/esp32/components/muse/muse_voice.c")
+        assertTrue("(void)idle_capture();" in voice,
+            "关闭 CHAT_WINDOW 后 captured 只被窗口分支读，必须显式丢弃返回值")
+    }
+
+    @Test
+    fun `Avatar 起头必须和唤醒词一样在句子真发出去后开连续对话窗口`() {
+        val patch = musePatch()
+        val wake = patch.substringAfter("if (carpet_wake_take())")
+            .substringBefore("} else if (carpet_mic_link_up())")
+        val touch = patch.substringAfter("if (carpet_mic_talk_take())")
+            .substringBefore("} else if (carpet_mic_link_up())")
+        for ((name, block) in listOf("唤醒词" to wake, "Avatar/触摸" to touch)) {
+            assertTrue("talk_to_phone(false, true, false);" in block, "$name 起头没走免按键采集路")
+            assertTrue(Regex("if \\(s_turn_sent\\) window_open\\(\\);").containsMatchIn(block),
+                "$name 起头没有在真发出去后才开窗口")
+        }
+        val talk = patch.substringAfter("static void talk_to_phone").substringBefore("static bool hatch_reply")
+        assertTrue("s_turn_sent = false;" in talk, "新一轮必须先清掉上一轮的成功标记")
+        val sentAt = talk.indexOf("carpet_mic_end(true);")
+        val markedAt = talk.indexOf("s_turn_sent = true;")
+        assertTrue(sentAt >= 0 && markedAt > sentAt, "成功标记必须在本轮录音排队之后才立")
+    }
+
     private fun checkBlock(
         root: JsonObject,
         name: String,
@@ -395,14 +479,16 @@ class SchemaDriftTest {
     private fun firmwareSource(): String? = cSourceOrNull("app", "main", "app_main.c")
 
     /** 仓库里唯一一份 Muse 侧 C 源码：那份 patch 的正文字面量。加号前缀剥掉再比 */
-    private fun musePatch(): String {
+    private fun musePatch(): String = musePatchText().lines().asSequence()
+        .filter { it.startsWith("+") && !it.startsWith("+++") }
+        .map { it.substring(1) }
+        .joinToString("\n")
+
+    private fun musePatchText(): String {
         val tail = listOf("firmware", "screen", "muse", "muse-carpet.patch").joinToString("/")
         val file = listOf(Paths.get("..", tail), Paths.get(tail)).firstOrNull { it.toFile().exists() }
             ?: error("找不到 $tail —— Muse 那一路的分支表没人比了")
-        return file.toFile().readLines().asSequence()
-            .filter { it.startsWith("+") && !it.startsWith("+++") }
-            .map { it.substring(1) }
-            .joinToString("\n")
+        return file.toFile().readText()
     }
 
     /** 组件那份也读回来比：`screen_link_send_command` 里有一道合法值闸，它和 schema 分叉比表分叉更糟 ——
