@@ -38,11 +38,13 @@ import com.carpet.satdemo.core.protocol.DialogSource
 import com.carpet.satdemo.core.protocol.MsgType
 import com.carpet.satdemo.core.protocol.ScreenMessage
 import com.carpet.satdemo.core.runtime.DemoRuntime
+import com.carpet.satdemo.core.vehicle.XinyeApiFailure
 import com.carpet.satdemo.core.vehicle.XinyeCredentials
 import com.carpet.satdemo.core.vehicle.XinyeDigitalKeyClient
 import com.carpet.satdemo.core.vehicle.XinyeFailureKind
 import com.carpet.satdemo.core.vehicle.XinyeInstruction
 import com.carpet.satdemo.core.vehicle.XinyeLookupIdSource
+import com.carpet.satdemo.core.vehicle.XinyeReadResult
 import com.carpet.satdemo.core.vehicle.XinyeReceipt
 import com.carpet.satdemo.core.vehicle.XinyeSendResult
 import com.carpet.satdemo.app.ui.Availability
@@ -517,6 +519,15 @@ class AppRuntime(
     private var digitalKeyJob: Job? = null
     @Volatile private var pendingEngineStop: PendingEngineStop? = null
 
+    private fun readDigitalKeyCredentials(): XinyeCredentials? {
+        if (!digitalKeyFile.isFile) return null
+        return try {
+            XinyeCredentials.fromProperties(digitalKeyFile.readText())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun loadDigitalKeyClient(): XinyeDigitalKeyClient? {
         if (!digitalKeyFile.isFile) {
             digitalKeyClient = null
@@ -525,9 +536,10 @@ class AppRuntime(
         }
         val stamp = DigitalKeyFileStamp(digitalKeyFile.lastModified(), digitalKeyFile.length())
         digitalKeyClient?.let { if (digitalKeyFileStamp == stamp) return it }
-        val credentials = try {
-            XinyeCredentials.fromProperties(digitalKeyFile.readText())
-        } catch (_: Exception) {
+        val credentials = readDigitalKeyCredentials()
+        if (credentials == null) {
+            digitalKeyClient = null
+            digitalKeyFileStamp = null
             return null
         }
         return (digitalKeyClientFactory?.invoke(credentials) ?: defaultDigitalKeyClient(credentials)).also {
@@ -558,12 +570,22 @@ class AppRuntime(
                 null
             }
             val ok = text != null && importDigitalKeyText(text)
+            if (!ok) {
+                withContext(Dispatchers.Main) {
+                    say("配置导入失败：文件需不超过 64 KB，并含 appid、key、车牌号或设备号")
+                    onResult(false)
+                }
+                return@launch
+            }
+            val credentials = readDigitalKeyCredentials()
+            val client = loadDigitalKeyClient()
             withContext(Dispatchers.Main) {
-                say(
-                    if (ok) "数字钥匙配置已导入；再点一次「远程熄火」才会发送"
-                    else "配置导入失败：文件需不超过 64 KB，并含 appid、key、车牌号或设备号",
-                )
-                onResult(ok)
+                say("数字钥匙配置已导入，正在自检；不会发送车辆指令")
+                onResult(true)
+            }
+            if (credentials != null && client != null) {
+                val line = probeDigitalKey(credentials, client)
+                withContext(Dispatchers.Main) { say("$line；再点一次「远程熄火」才会发送") }
             }
         }
     }
@@ -690,6 +712,10 @@ class AppRuntime(
     }
 
     private fun pollEngineStop(client: XinyeDigitalKeyClient, sent: XinyeSendResult.Accepted) {
+        if (sent.lookupId.isNullOrBlank() || sent.lookupIdSource != XinyeLookupIdSource.Uuid) {
+            say(engineStopReceiptLine(sent, null))
+            return
+        }
         say("正在查询上次远程熄火回执，不会重复发送")
         pendingEngineStop = PendingEngineStop(client, sent)
         digitalKeyJob = scope.launch(Dispatchers.IO) {
@@ -730,8 +756,13 @@ class AppRuntime(
             is XinyeReceipt.Rejected ->
                 "熄火指令已发送，但回执查询失败：${receipt.failure.message}；不能确认已熄火"
             null, XinyeReceipt.Pending ->
-                if (sent.lookupIdSource == XinyeLookupIdSource.HistoryId) {
-                    "远程熄火指令已发送（historyId=$id）；合作方未给 uuid，车辆执行状态未确认；再点只查回执，不重发"
+                if (sent.lookupId.isNullOrBlank() || sent.lookupIdSource != XinyeLookupIdSource.Uuid) {
+                    val reason = if (sent.lookupIdSource == XinyeLookupIdSource.HistoryId) {
+                        "合作方未给 uuid，无法按合同查回执"
+                    } else {
+                        "回执 uuid 缺失或来源未确认"
+                    }
+                    "远程熄火指令已发送（编号 $id）；$reason，车辆执行状态未确认；本次不重发，请先核对车辆"
                 } else if (sent.replied) {
                     "合作方已回复指令请求（编号 $id）；车辆执行状态未确认；再点只查回执，不重发"
                 } else {
@@ -1096,6 +1127,113 @@ class AppRuntime(
     }
 
     /**
+     * 数字钥匙（风控在线）只读自检状态，不进圆屏下行协议。
+     * 区间里程不是总表、油量缺少油箱容量标定，所以不把云端数字换算进车况卡。
+     */
+    data class DigitalKeyState(
+        val probing: Boolean = false,
+        val lastOkMs: Long? = null,
+        val accOn: Boolean? = null,
+        val speedKmh: Int? = null,
+        val chargePercent: Int? = null,
+        val oilVolumeMl: Int? = null,
+        val extVoltageDv: Int? = null,
+        val parkLng: Double? = null,
+        val parkLat: Double? = null,
+        val parkAddress: String? = null,
+        val issue: String? = null,
+    )
+
+    private val _dk = MutableStateFlow(DigitalKeyState())
+    val digitalKey: StateFlow<DigitalKeyState> = _dk
+
+    private fun dkIssueCn(failure: XinyeApiFailure): String = when (failure.kind) {
+        XinyeFailureKind.Network -> "出网失败：${failure.message}"
+        XinyeFailureKind.Http -> "合作方 HTTP ${failure.httpStatus ?: "异常"}"
+        XinyeFailureKind.Auth -> "鉴权失败：${failure.message}"
+        XinyeFailureKind.Rejected, XinyeFailureKind.Receipt ->
+            "对方返回码 ${failure.partnerCode ?: "未知"}：${failure.message}"
+        XinyeFailureKind.Protocol -> "回包形状不符：${failure.message}"
+        XinyeFailureKind.RateLimited -> "合作方限流：${failure.message}"
+        XinyeFailureKind.Cancelled -> "已取消：${failure.message}"
+    }
+
+    private fun probeDigitalKey(
+        credentials: XinyeCredentials,
+        client: XinyeDigitalKeyClient,
+    ): String {
+        _dk.value = DigitalKeyState(probing = true)
+        val auth = client.authenticate()
+        if (auth is XinyeReadResult.Failure) {
+            val issue = "鉴权：" + dkIssueCn(auth.failure)
+            _dk.value = _dk.value.copy(probing = false, issue = issue)
+            return "数字钥匙自检没通：$issue"
+        }
+        val imei = credentials.imei?.takeIf { it.isNotBlank() }
+        if (imei == null) {
+            val issue = "配置未含 imei，车况/定位未查询"
+            _dk.value = _dk.value.copy(probing = false, issue = issue)
+            return "数字钥匙鉴权通过；$issue"
+        }
+        val status = client.deviceStatus(imei)
+        val location = client.deviceLocation(imei)
+        var issue: String? = null
+        if (status is XinyeReadResult.Ok) {
+            _dk.value = _dk.value.copy(
+                accOn = status.value.accOn,
+                speedKmh = status.value.speedKmh,
+                chargePercent = status.value.chargePercent,
+                oilVolumeMl = status.value.oilVolumeMl,
+                extVoltageDv = status.value.extVoltageDv,
+            )
+        } else if (status is XinyeReadResult.Failure) {
+            issue = "状态：" + dkIssueCn(status.failure)
+        }
+        if (location is XinyeReadResult.Ok) {
+            _dk.value = _dk.value.copy(
+                parkLng = location.value.lngWgs84,
+                parkLat = location.value.latWgs84,
+                parkAddress = location.value.address,
+            )
+        } else if (location is XinyeReadResult.Failure && issue == null) {
+            issue = "定位：" + dkIssueCn(location.failure)
+        }
+        val current = _dk.value
+        _dk.value = current.copy(
+            probing = false,
+            lastOkMs = if (issue == null) System.currentTimeMillis() else current.lastOkMs,
+            issue = issue,
+        )
+        val line = if (issue == null) {
+            "数字钥匙自检通过：ACC=" + (current.accOn?.let { if (it) "点火" else "熄火" } ?: "无") +
+                "，电量=" + (current.chargePercent?.let { "$it%" } ?: "无") +
+                "，位置=" + (current.parkAddress?.take(30) ?: "无地址")
+        } else {
+            "数字钥匙自检未完成：$issue"
+        }
+        runtime.log(line)
+        return line
+    }
+
+    fun probeDigitalKey() {
+        if (_dk.value.probing) return
+        val credentials = readDigitalKeyCredentials()
+        if (credentials == null) {
+            say("数字钥匙未配置：点「远程熄火」选择合作方配置文件")
+            return
+        }
+        val client = loadDigitalKeyClient()
+        if (client == null) {
+            say("数字钥匙配置无法读取，请重新导入")
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            val line = probeDigitalKey(credentials, client)
+            withContext(Dispatchers.Main) { say(line) }
+        }
+    }
+
+    /**
      * 端点缺哪一项，**就说缺哪一项**。
      *
      * 旧的那句"地址 / 密钥 / 模型名少填了一项"在三项全空和三缺一时长得一模一样 ——
@@ -1272,7 +1410,7 @@ class AppRuntime(
             PermissionTier.allows(tier, PermissionTier.Irreversible)
         ) {
             if (digitalKeyJob?.isActive == true) {
-                say("远程熄火还在确认中；等本次有明确结果后，重新降档再开不可逆权限才能重试")
+                say("远程熄火还在确认中；先核对车辆，等本次流程结束再重试")
             } else {
                 // 关闭再放开不可逆权限，是 owner 核对车辆后明确允许重新尝试。
                 clearEngineStopAttempt()

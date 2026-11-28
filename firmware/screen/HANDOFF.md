@@ -3167,15 +3167,33 @@ Screen-Link 源头与 Muse 树两份 `.c/.h` SHA-256 相同；聚焦守卫 17/17
   Screen-Link 已进入拨号失败退避后再按；真手指与真实耗时也仍欠。临时改过的 URL 已恢复出厂
   `ws://192.168.43.1:8443`，未动板子保存的 Wi-Fi。
 
-#### 11-28 最终串行回归与 App 出包
+#### 11-28 合并前串行回归与 App 出包
 
 同一最终源码上串行执行 `:core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --no-build-cache --no-daemon -Pkotlin.incremental=false`：
 `BUILD SUCCESSFUL`、56/56 actionable tasks 实际执行。日志 `D:/dev/tmp/carpet-final-regression-20261128-final3.log`。
 按 XML 内部 timestamp 统计：core 50 套 / **422/422**（08:46:27–08:46:33），App 15 套 / **84/84**
 （08:47:03–08:49:18），失败/错误/跳过全 0；SchemaDrift 17/17、数字钥匙 core 18/18、App 8/8。
-App 最终 APK 为 1.29.15 / 129150、**19,237,142 B**，比同为空云配置字段的 1.29.14 基线少 559,296 B；
+合并前 App APK 为 1.29.15 / 129150、**19,237,142 B**，比同为空云配置字段的 1.29.14 基线少 559,296 B；
 SHA-256 `7d8632c7c941e7b076d6d117f4320fe47e9c218902ad602e5504ff912588de21`。APK v2 签名与 4 字节
 zipalign 均通过，manifest 实读 `usesCleartextTraffic=false`、`extractNativeLibs=true`。兼容任务实际执行，
 静态扫到 459 个 `java/javax` 类，android.jar 缺的 2 个 instrument 类按已知不加载跳过；不冒充真机加载验收。
 压缩原生库省 APK，但安装会解压 834,760 B；手机安装/升级占用与加载未称。本机无 `local.properties`，
 AI/Azure/ASR 配置字段为空，因此该 APK 不是 owner 装机云配置完整包。数字钥匙没有对真车发送指令。
+App 合并远端数字钥匙实现后升至 1.29.16，最终回归与产物另见 `docs/DIGITAL-KEY-EVAL-2026-11-25.md`。
+
+#### 11-28 合并后最终无缓存回归与 1.29.16 出包
+
+单次 Gradle 调用执行 `:core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --no-build-cache --no-daemon --console=plain -Pkotlin.incremental=false -Dorg.gradle.jvmargs=-Xmx2g`：
+`BUILD SUCCESSFUL in 8m 13s`、56/56 actionable tasks 实际执行。日志
+`D:/dev/tmp/carpet-final-regression-20261128-12916.log`。按 XML 内部 timestamp：core 50 套 /
+**427/427**（09:24:06–09:24:32），App 15 套 / **87/87**（09:25:46–09:28:24），合计 514/514，
+失败/错误/跳过全 0；数字钥匙 core 23/23、App 11/11。
+
+最终 APK 为 1.29.16 / 129160、**19,247,234 B**，SHA-256
+`24479547b89a4cb55c7eb13335a26d737e5312b3f7ccfe2aefa4cfaab52fc207`；比 1.29.14 基线少
+549,204 B，比合并前 1.29.15 多 10,092 B。`aapt` 实读版本与 min/target SDK；manifest 实读
+`usesCleartextTraffic=false`、`networkSecurityConfig` 存在、`extractNativeLibs=true`。APK v2 签名与
+4 字节 zipalign 通过；两个兼容守卫实际执行，静态扫到 459 个 `java/javax` 类，android.jar 缺的
+2 个 instrument 类按已知不加载跳过。压缩原生库安装时解压 834,760 B；手机安装/升级占用与原生库
+加载仍未称。两张数字钥匙 Compose 截图已重新生成并实看，只证明本地按钮状态。本机无
+`local.properties`，AI/Azure/ASR 字段为空，不是 owner 装机云配置完整包；未对真车发送指令。

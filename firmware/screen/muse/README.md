@@ -76,10 +76,17 @@ CST9217 触摸、ES8311+NS4150B、16MB flash + 8MB octal PSRAM）。
   `idle_capture()` 返回值只在窗口分支读取，现按 `CHAT_WINDOW` 条件编译：开启档保留 `captured` 供空档 VAD 用，
   关闭档显式 `(void)idle_capture()`，避免副作用被优化标记且不引入未使用变量。Screen-Link 改动仍走 §3 的
   `cp -r` 源头同步，不进 `muse-carpet.patch`。
-  **最终串行回归（11-28）**：`:core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --no-build-cache --no-daemon -Pkotlin.incremental=false`
+  **合并前最终串行回归（11-28）**：`:core:test :app:testDebugUnitTest :app:assembleDebug --rerun-tasks --no-build-cache --no-daemon -Pkotlin.incremental=false`
   实跑 56/56 个任务并 `BUILD SUCCESSFUL`；按 XML 内部时间戳，core 50 套 / **422/422**，App 15 套 / **84/84**，
   失败、错误、跳过均 0。日志 `D:/dev/tmp/carpet-final-regression-20261128-final3.log`；core XML 08:46:27–08:46:33，
-  App XML 08:47:03–08:49:18。这里补的是最终全仓结果，不替换上文各历史轮次当时的数字。
+  App XML 08:47:03–08:49:18。这里补的是合并前最终全仓结果，不替换上文各历史轮次当时的数字。
+  **合并后最终无缓存回归（11-28，App 1.29.16）**：同一组任务加 `--console=plain -Dorg.gradle.jvmargs=-Xmx2g`
+  再跑一轮，`BUILD SUCCESSFUL in 8m 13s`、56/56 任务实际执行；core 50 套 / **427/427**
+  （XML 09:24:06–09:24:32），App 15 套 / **87/87**（09:25:46–09:28:24），失败/错误/跳过均 0，
+  数字钥匙 core 23/23、App 11/11。日志 `D:/dev/tmp/carpet-final-regression-20261128-12916.log`；
+  最终 APK 19,247,234 B、SHA-256 `24479547b89a4cb55c7eb13335a26d737e5312b3f7ccfe2aefa4cfaab52fc207`，
+  比 1.29.14 基线少 549,204 B，比合并前 1.29.15 多 10,092 B。签名、对齐、manifest 与真机限制见
+  `docs/DIGITAL-KEY-EVAL-2026-11-25.md` §7。
   **会话窗口 + 相册自动跳这一轮（11-22）**：owner 拍板 `docs/DECISIONS.md` D16/D16.5 落地两件屏侧活。
   ①**收图自动跳相册页**（`carpet_page.c` `photo_refresh()`：`pv.gen` 变化 = 新收齐一张 → `nav_to(PG_PHOTO)`，
   熄屏不跳；旧入口照 11-14 规矩不动 —— owner 原话「我目前都没见过相册页面从哪里进去」）。

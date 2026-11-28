@@ -52,11 +52,6 @@ data class XinyeCredentials(
 }
 
 enum class XinyeInstruction(val wire: String) {
-    UNLOCK_DOOR("UNLOCK DOOR"),
-    LOCK_DOOR("LOCK DOOR"),
-    UNLOCK_TRUNK("UNLOCK TRUNK"),
-    LOCK_TRUNK("LOCK TRUNK"),
-    ENGINE_START("ENGINE START"),
     ENGINE_STOP("ENGINE STOP"),
 }
 
@@ -88,6 +83,26 @@ sealed interface XinyeSendResult {
 
     data class Rejected(val failure: XinyeApiFailure) : XinyeSendResult
 }
+
+sealed interface XinyeReadResult<out T> {
+    data class Ok<T>(val value: T) : XinyeReadResult<T>
+    data class Failure(val failure: XinyeApiFailure) : XinyeReadResult<Nothing>
+}
+
+data class XinyeDeviceStatus(
+    val imei: String,
+    val accOn: Boolean?,
+    val speedKmh: Int?,
+    val chargePercent: Int?,
+    val oilVolumeMl: Int?,
+    val extVoltageDv: Int?,
+)
+
+data class XinyeLocationInfo(
+    val lngWgs84: Double?,
+    val latWgs84: Double?,
+    val address: String?,
+)
 
 class XinyeDigitalKeyClient(
     private val credentials: XinyeCredentials,
@@ -122,6 +137,87 @@ class XinyeDigitalKeyClient(
         } catch (error: ApiException) {
             XinyeReceipt.Rejected(error.failure)
         }
+    }
+
+    fun authenticate(): XinyeReadResult<Unit> = synchronized(lock) {
+        try {
+            accessToken()
+            XinyeReadResult.Ok(Unit)
+        } catch (error: ApiException) {
+            XinyeReadResult.Failure(error.failure)
+        }
+    }
+
+    fun deviceStatus(imei: String): XinyeReadResult<XinyeDeviceStatus> = synchronized(lock) {
+        if (imei.isBlank()) {
+            return@synchronized XinyeReadResult.Failure(
+                XinyeApiFailure(XinyeFailureKind.Protocol, "查询车况需要设备号"),
+            )
+        }
+        try {
+            val root = getDevice("device/status", imei)
+            val code = root.int("code")
+                ?: throw ApiException(XinyeApiFailure(XinyeFailureKind.Protocol, "车况回包缺少 code"))
+            if (code != 0) throw partnerError(XinyeFailureKind.Rejected, root)
+            val item = (root["data"] as? JsonArray)?.singleOrNull() as? JsonObject
+                ?: throw ApiException(XinyeApiFailure(XinyeFailureKind.Protocol, "车况回包不是单元素 data 数组"))
+            if (item.string("imei") != imei) {
+                throw ApiException(XinyeApiFailure(XinyeFailureKind.Protocol, "车况回包设备号与查询不一致或缺失"))
+            }
+            XinyeReadResult.Ok(
+                XinyeDeviceStatus(
+                    imei = imei,
+                    accOn = item.boolean("accStatus"),
+                    speedKmh = item.int("speed"),
+                    chargePercent = item.int("chargePercentage"),
+                    oilVolumeMl = item.int("oilVolume"),
+                    extVoltageDv = item.int("extVoltage"),
+                ),
+            )
+        } catch (error: ApiException) {
+            XinyeReadResult.Failure(error.failure)
+        }
+    }
+
+    fun deviceLocation(imei: String): XinyeReadResult<XinyeLocationInfo> = synchronized(lock) {
+        if (imei.isBlank()) {
+            return@synchronized XinyeReadResult.Failure(
+                XinyeApiFailure(XinyeFailureKind.Protocol, "查询位置需要设备号"),
+            )
+        }
+        try {
+            val root = getDevice("api/device/location", imei)
+            val code = root.int("code")
+                ?: throw ApiException(XinyeApiFailure(XinyeFailureKind.Protocol, "位置回包缺少 code"))
+            if (code != 0) throw partnerError(XinyeFailureKind.Rejected, root)
+            val item = root["data"] as? JsonObject ?: root
+            val location = XinyeLocationInfo(
+                lngWgs84 = item.double("lng") ?: item.double("longitude"),
+                latWgs84 = item.double("lat") ?: item.double("latitude"),
+                address = item.string("address"),
+            )
+            if (location.lngWgs84 == null && location.latWgs84 == null && location.address.isNullOrBlank()) {
+                throw ApiException(XinyeApiFailure(XinyeFailureKind.Protocol, "位置回包没有经纬度或地址"))
+            }
+            XinyeReadResult.Ok(location)
+        } catch (error: ApiException) {
+            XinyeReadResult.Failure(error.failure)
+        }
+    }
+
+    private fun getDevice(path: String, imei: String): JsonObject {
+        val accessToken = accessToken()
+        nextFunctionMs = awaitSlot(nextFunctionMs, FUNCTION_GAP_MS)
+        val request = Request.Builder()
+            .url(
+                serviceUrl.resolve(path)!!.newBuilder()
+                    .addQueryParameter("accessToken", accessToken)
+                    .addQueryParameter("imei", imei)
+                    .build(),
+            )
+            .get()
+            .build()
+        return executeJson(request)
     }
 
     private fun sendLocked(instruction: XinyeInstruction): XinyeSendResult {
@@ -293,6 +389,12 @@ class XinyeDigitalKeyClient(
 
     private fun JsonObject.long(name: String): Long? =
         (this[name] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content?.toLongOrNull()
+
+    private fun JsonObject.double(name: String): Double? =
+        (this[name] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content?.toDoubleOrNull()
+
+    private fun JsonObject.boolean(name: String): Boolean? =
+        (this[name] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content?.toBooleanStrictOrNull()
 
     private fun JsonObject.string(name: String): String? =
         (this[name] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content

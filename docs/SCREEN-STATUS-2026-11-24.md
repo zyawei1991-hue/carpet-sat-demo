@@ -17,8 +17,10 @@
   4,067,328 B 应用，4M app 槽均余 3%；y 档已按 bootloader/分区表/ota/app/model 的明确偏移全片刷入，
   五段均 `Hash of data verified` 并 RTS 硬复位。
 - **本轮 P0 修复**（11-28）：实体键强制回连、全页收图自动跳、Avatar/触摸起头开窗的源码与 17 条聚焦守卫已完成；
-  最终串行无缓存回归为 core **422/422** + App **84/84**，共 506 条、0 失败/错误/跳过（App 数字钥匙 8/8、core 数字钥匙 18/18），
-  日志 `D:/dev/tmp/carpet-final-regression-20261128-final3.log`，XML 内部时间戳均为本轮新鲜结果。
+  合并前无缓存回归为 core **422/422** + App **84/84**，共 506 条、0 失败/错误/跳过（App 数字钥匙 8/8、core 数字钥匙 18/18），
+  日志 `D:/dev/tmp/carpet-final-regression-20261128-final3.log`，XML 内部时间戳均为该轮新鲜结果。合并后 App 1.29.16
+  最终无缓存回归为 core **427/427** + App **87/87**，共 514 条、0 失败/错误/跳过（数字钥匙 core 23/23、App 11/11），
+  日志 `D:/dev/tmp/carpet-final-regression-20261128-12916.log`；包体与限制另见 `docs/DIGITAL-KEY-EVAL-2026-11-25.md` §7。
   `CHAT_WINDOW=y` 档已干净重编并全片刷入 COM8：应用 4,067,328 B（14:43，SHA-256
   `038dafb5980a3d2aa33a1cc8d0b57a00202e42b420054b0d9543be6689699589`），五段均哈希校验并硬复位。
   `CHAT_WINDOW=n` 独立干净构建也通过：应用 4,067,328 B（14:40，SHA-256

@@ -93,6 +93,8 @@ class DigitalKeyActionTest {
                 assertTrue(app.snack.value.orEmpty().contains("不可逆权限"))
             }
             compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
             compose.runOnIdle { app.remoteEngineStop() }
             compose.runOnIdle {
                 assertTrue(app.snack.value.orEmpty().contains("数字钥匙未配置"))
@@ -174,6 +176,8 @@ class DigitalKeyActionTest {
         try {
             compose.setContent { CarpetTheme { Text("ready") } }
             compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
             compose.runOnIdle { app.remoteEngineStop() }
             awaitSnack(app, "远程熄火结果未确认")
             compose.runOnIdle { app.remoteEngineStop() }
@@ -238,6 +242,8 @@ class DigitalKeyActionTest {
         try {
             compose.setContent { CarpetTheme { Text("ready") } }
             compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
             compose.runOnIdle { app.remoteEngineStop() }
             awaitSnack(
                 app,
@@ -284,6 +290,8 @@ class DigitalKeyActionTest {
         var app = fakeApp()
         try {
             compose.setContent { CarpetTheme { Text("ready") } }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
             compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
             compose.runOnIdle { app.remoteEngineStop() }
             compose.waitUntil(5_000) { sendEntered.count == 0L }
@@ -338,11 +346,123 @@ class DigitalKeyActionTest {
         try {
             compose.setContent { CarpetTheme { Text("ready") } }
             compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
             compose.runOnIdle { app.remoteEngineStop() }
             awaitSnack(app, "远程熄火已取消", "本次未发送")
             assertEquals(0, sends.get())
             compose.runOnIdle { app.remoteEngineStop() }
             compose.runOnIdle { assertTrue(app.snack.value.orEmpty().contains("不可逆权限")) }
+        } finally {
+            app.release()
+        }
+    }
+
+    @Test
+    fun configImportSelfCheckIsReadOnlyAndNeverSendsAnInstruction() {
+        configFile.writeText(validConfig + "\nimei=863082071686561\n")
+        val paths = mutableListOf<String>()
+        val app = AppRuntime(ApplicationProvider.getApplicationContext()) { credentials ->
+            assertEquals("863082071686561", credentials.imei)
+            XinyeDigitalKeyClient(credentials, transport = { request ->
+                paths += request.url.encodedPath
+                when (request.url.encodedPath) {
+                    "/api/auth" -> response(
+                        request,
+                        """{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""",
+                    )
+                    "/api/device/status" -> response(
+                        request,
+                        """{"code":0,"data":[{"imei":"863082071686561","accStatus":true,"chargePercentage":88}]}""",
+                    )
+                    "/api/api/device/location" -> response(
+                        request,
+                        """{"code":0,"lng":120.15,"lat":30.25,"address":"测试车位"}""",
+                    )
+                    else -> error("自检不得请求 ${request.method} ${request.url}")
+                }
+            })
+        }
+        try {
+            compose.setContent { CarpetTheme { Text("ready") } }
+            compose.runOnIdle { app.importDigitalKeyText(validConfig + "\nimei=863082071686561\n") }
+            app.probeDigitalKey()
+            awaitSnack(app, "自检通过")
+            assertEquals(listOf("/api/auth", "/api/device/status", "/api/api/device/location"), paths)
+        } finally {
+            app.release()
+        }
+    }
+
+    @Test
+    fun historyIdOnlyAttemptDoesNotPretendToQueryReceipt() {
+        configFile.writeText(validConfig)
+        val paths = mutableListOf<String>()
+        val app = AppRuntime(ApplicationProvider.getApplicationContext()) { credentials ->
+            XinyeDigitalKeyClient(credentials, transport = { request ->
+                paths += request.url.encodedPath
+                when (request.url.encodedPath) {
+                    "/api/auth" -> response(
+                        request,
+                        """{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""",
+                    )
+                    "/api/xinye/instruction/send" -> response(
+                        request,
+                        """{"code":0,"details":[{"code":0,"historyId":"264","status":0}]}""",
+                    )
+                    else -> error("unexpected request")
+                }
+            })
+        }
+        try {
+            compose.setContent { CarpetTheme { Text("ready") } }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.ReadLocal) }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle { app.remoteEngineStop() }
+            awaitSnack(app, "无法按合同查回执", "本次不重发")
+            compose.runOnIdle { app.remoteEngineStop() }
+            compose.runOnIdle {
+                assertTrue(
+                    app.snack.value.orEmpty().contains("无法按合同查回执") ||
+                        app.snack.value.orEmpty().contains("本次不重发"),
+                )
+            }
+            assertEquals(listOf("/api/auth", "/api/xinye/instruction/send"), paths)
+        } finally {
+            app.release()
+        }
+    }
+
+    @Test
+    fun persistedAttemptWithoutUuidSourceNeverQueriesReceipt() {
+        configFile.writeText(validConfig)
+        val paths = mutableListOf<String>()
+        val app = AppRuntime(ApplicationProvider.getApplicationContext()) { credentials ->
+            XinyeDigitalKeyClient(credentials, transport = { request ->
+                paths += request.url.encodedPath
+                error("回执编号来源不明时不得出网")
+            })
+        }
+        try {
+            compose.setContent { CarpetTheme { Text("ready") } }
+            compose.runOnIdle { app.setAiGranted(PermissionTier.Irreversible) }
+            compose.runOnIdle {
+                ApplicationProvider.getApplicationContext<Application>()
+                    .getSharedPreferences("demo", 0)
+                    .edit()
+                    .putLong("engine_stop_attempt_at", System.currentTimeMillis())
+                    .putString("engine_stop_history_id", "264")
+                    .putString("engine_stop_lookup_id", "264")
+                    .remove("engine_stop_lookup_source")
+                    .commit()
+                app.remoteEngineStop()
+            }
+            compose.runOnIdle {
+                assertTrue(app.snack.value.orEmpty().contains("来源未确认"))
+                assertTrue(app.snack.value.orEmpty().contains("本次不重发"))
+            }
+            assertTrue(paths.isEmpty())
         } finally {
             app.release()
         }

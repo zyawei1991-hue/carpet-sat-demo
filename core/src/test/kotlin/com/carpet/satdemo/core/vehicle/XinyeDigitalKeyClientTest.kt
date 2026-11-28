@@ -44,6 +44,80 @@ class XinyeDigitalKeyClientTest {
     }
 
     @Test
+    fun `车况按文档解析 data 数组且保留缺失条件字段`() {
+        val partner = FakePartner(credentials)
+        partner.enqueue("""{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""")
+        partner.enqueue(
+            """{"code":0,"data":[{"imei":"863082071686561","accStatus":false,"speed":0,"chargePercentage":88,"extVoltage":750}]}""",
+        )
+
+        val status = assertIs<XinyeReadResult.Ok<XinyeDeviceStatus>>(
+            partner.client.deviceStatus("863082071686561"),
+        ).value
+
+        assertEquals("863082071686561", status.imei)
+        assertEquals(false, status.accOn)
+        assertEquals(0, status.speedKmh)
+        assertEquals(88, status.chargePercent)
+        assertEquals(750, status.extVoltageDv)
+        assertEquals(null, status.oilVolumeMl)
+        val request = partner.requests.last()
+        assertEquals("/api/device/status", request.url.encodedPath)
+        assertEquals("token-1", request.url.queryParameter("accessToken"))
+        assertEquals("863082071686561", request.url.queryParameter("imei"))
+    }
+
+    @Test
+    fun `车况回包设备号不一致时拒绝显示别车状态`() {
+        val partner = FakePartner(credentials)
+        partner.enqueue("""{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""")
+        partner.enqueue("""{"code":0,"data":[{"imei":"other-device","accStatus":true}]}""")
+
+        val result = assertIs<XinyeReadResult.Failure>(partner.client.deviceStatus("863082071686561"))
+
+        assertEquals(XinyeFailureKind.Protocol, result.failure.kind)
+    }
+
+    @Test
+    fun `车况回包 data 对象不冒充文档数组`() {
+        val partner = FakePartner(credentials)
+        partner.enqueue("""{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""")
+        partner.enqueue("""{"code":0,"data":{"imei":"863082071686561","accStatus":true}}""")
+
+        val result = assertIs<XinyeReadResult.Failure>(partner.client.deviceStatus("863082071686561"))
+
+        assertEquals(XinyeFailureKind.Protocol, result.failure.kind)
+    }
+
+    @Test
+    fun `实时位置按文档路径读取且不猜缺失坐标`() {
+        val partner = FakePartner(credentials)
+        partner.enqueue("""{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""")
+        partner.enqueue("""{"code":0,"lng":"121.422861","lat":"31.382911","address":"测试地址"}""")
+
+        val location = assertIs<XinyeReadResult.Ok<XinyeLocationInfo>>(
+            partner.client.deviceLocation("863082071686561"),
+        ).value
+
+        assertEquals(121.422861, location.lngWgs84)
+        assertEquals(31.382911, location.latWgs84)
+        assertEquals("测试地址", location.address)
+        val request = partner.requests.last()
+        assertEquals("/api/api/device/location", request.url.encodedPath)
+        assertEquals("863082071686561", request.url.queryParameter("imei"))
+    }
+
+    @Test
+    fun `空设备号在鉴权前拒绝且不出网`() {
+        val partner = FakePartner(credentials)
+
+        val result = assertIs<XinyeReadResult.Failure>(partner.client.deviceStatus(""))
+
+        assertEquals(XinyeFailureKind.Protocol, result.failure.kind)
+        assertTrue(partner.requests.isEmpty())
+    }
+
+    @Test
     fun `认证签名与正式 ENGINE STOP 枚举按原文发出`() {
         val partner = FakePartner(credentials)
         partner.enqueue("""{"code":0,"expiresIn":7200000,"accessToken":"token-1"}""")
