@@ -18,7 +18,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -124,6 +126,76 @@ fun EngineerScreen(app: AppRuntime, onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text("演一次固件升级（占住写锁）") }
 
+        // 数字钥匙（风控在线开放平台）：只走 App↔云端，不碰圆屏下行。
+        // owner 11-28 拍板「直接做，做完去真机实测」—— 键位全用对方文档枚举原文。
+        Text(
+            "数字钥匙（风控在线 · 只走 App↔云端）",
+            style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        )
+        val dk by app.digitalKey.collectAsState()
+        var dkImei by remember { mutableStateOf(app.dkImei) }
+        var dkLicense by remember { mutableStateOf(app.dkLicense) }
+        androidx.compose.material3.OutlinedTextField(
+            value = dkImei,
+            onValueChange = { dkImei = it },
+            placeholder = { Text("设备号 IMEI（寻车/状态/定位要用）", style = Type.Caption) },
+            textStyle = Type.Caption,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        androidx.compose.material3.OutlinedTextField(
+            value = dkLicense,
+            onValueChange = { dkLicense = it },
+            placeholder = { Text("车牌号（发指令可用车牌或 IMEI，二选一）", style = Type.Caption) },
+            textStyle = Type.Caption,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        EngButton("存设备号/车牌") {
+            app.dkImei = dkImei
+            app.dkLicense = dkLicense
+            app.say("数字钥匙：设备号已存本机（不落仓库）")
+        }
+        EngButton(if (dk.probing) "自检出网中…" else "端点自检（鉴权→状态→定位）", Ink.Track) {
+            app.probeDigitalKey()
+        }
+        // 状态一行话：取到啥说啥，空字段（对方不返回）就写「无」，不许填 0 冒充
+        Text(
+            "ACC=${dk.accOn?.let { if (it) "点火" else "熄火" } ?: "无"} · " +
+                "电量=${dk.chargePercent?.toString() ?: "无"}% · " +
+                "油量=${dk.oilVolumeMl?.let { "%.1fL".format(it / 1000.0) } ?: "无(该型号无油感则正常)"} · " +
+                "外压=${dk.extVoltageDv?.let { "%.1fV".format(it / 10.0) } ?: "无"}",
+            style = Type.Caption,
+            color = Ink.TextMid,
+        )
+        Text(
+            "位置：${dk.parkAddress ?: "还没取到"}" +
+                (if (dk.parkLat != null) "（${"%.5f".format(dk.parkLat)},${"%.5f".format(dk.parkLng)} wgs84）" else ""),
+            style = Type.Caption,
+            color = Ink.TextMid,
+        )
+        dk.lastInstrMsg?.let { Text("指令：$it", style = Type.Caption, color = Ink.Wait) }
+        // 非空=上次失败，且是哪一种失败（凭据/出网/对方码/形状）写得明明白白
+        dk.issue?.let { Text("没通：$it", style = Type.Caption, color = Ink.Alert) }
+        dk.lastOkMs?.let {
+            Text("上次取数成功：${android.text.format.DateFormat.format("HH:mm:ss", it)}", style = Type.Caption, color = Ink.Ok)
+        }
+        androidx.compose.foundation.layout.Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        ) {
+            EngButton("解锁", Ink.Track, compact = true) { app.sendKeyCmd("UNLOCK DOOR") }
+            EngButton("闭锁", Ink.Track, compact = true) { app.sendKeyCmd("LOCK DOOR") }
+            EngButton("尾箱", Ink.Track, compact = true) { app.sendKeyCmd("UNLOCK TRUNK") }
+        }
+        androidx.compose.foundation.layout.Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Grid.x8),
+        ) {
+            EngButton("一键启动", Ink.Wait, compact = true) { app.sendKeyCmd("ENGINE START") }
+            EngButton("一键熄火", Ink.Alert, compact = true) { app.sendKeyCmd("ENGINE STOP") }
+        }
+
         Text(
             "对话链路自检",
             style = Type.Body.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
@@ -189,13 +261,18 @@ private fun EngRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit)
     }
 }
 
-/** 一行一颗键。文案长到必须折行，所以按 Button 默认的 letterSpacing 反而读不动 */
+/** 一行一颗键。文案长到必须折行，所以按 Button 默认的 letterSpacing 反而读不动。compact=true 用于一行多键 */
 @Composable
-private fun EngButton(label: String, color: Color, onClick: () -> Unit) {
+private fun EngButton(
+    label: String,
+    color: Color = Ink.Track,
+    compact: Boolean = false,
+    onClick: () -> Unit,
+) {
     Button(
         onClick = onClick,
         colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Ink.TextHigh),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (compact) Modifier else Modifier.fillMaxWidth(),
     ) { Text(label, style = Type.Caption) }
 }
 

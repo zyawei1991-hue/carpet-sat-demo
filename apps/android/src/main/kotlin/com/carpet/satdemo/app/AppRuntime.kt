@@ -22,6 +22,8 @@ import com.carpet.satdemo.core.devices.Device
 import com.carpet.satdemo.core.engine.DemoEngine
 import com.carpet.satdemo.core.ephemeris.EphState
 import com.carpet.satdemo.core.ephemeris.EphemerisSource
+import com.carpet.satdemo.core.vehicle.DigitalKeyClient
+import com.carpet.satdemo.core.vehicle.DigitalKeyClient.Dk
 import com.carpet.satdemo.core.ephemeris.EphemerisTracker
 import com.carpet.satdemo.core.ephemeris.SimulatedEphemerisSource
 import com.carpet.satdemo.core.guard.LeaveBehindWatch
@@ -490,6 +492,10 @@ class AppRuntime(private val host: Application) {
         AzureSpeech.speechKey = BuildConfig.AZURE_SPEECH_KEY
         // 硅基流动 ASR（手机侧语音输入）：同一个纪律，没配 key 麦克风就退回"未接"
         SiliconFlowAsr.apiKey = BuildConfig.SILICONFLOW_ASR_KEY
+        // 数字钥匙合作方（风控在线）：同一纪律。appid/key 打包时从仓库外 local.properties
+        // 烤进 BuildConfig，没配就是空 —— DigitalKeyClient.configured 不过，界面永远说实话
+        com.carpet.satdemo.core.vehicle.DigitalKeyClient.appid = BuildConfig.DIGITALKEY_APPID
+        com.carpet.satdemo.core.vehicle.DigitalKeyClient.key = BuildConfig.DIGITALKEY_KEY
     }
 
     private val aiProvider = OpenAiCompatProvider(_endpoint.value)
@@ -799,6 +805,143 @@ class AppRuntime(private val host: Application) {
                 if (answer != null) "模型自检：通了，回了「${answer.take(24)}」"
                 else "模型自检：没通 —— ${aiProvider.lastError ?: "原因未知"}",
             )
+        }
+    }
+
+    /**
+     * 数字钥匙（风控在线）状态。整块只碰 App↔云端，不进圆屏下行协议。
+     *
+     * `issue` 非空 = 上一次联调没通，且说的就是**哪一种**没通（凭据缺 / 出网 / 对方码 / 形状）——
+     * 这是「失败原因必须可分辨」在这一层的落地。
+     *
+     * 刻意**不**把云端数字换算进车况卡：/device/miles 是区间里程不是总表（需基准累加，评估§1），
+     * 油量 ml 换算成"几箱"要油箱容量这个我们还没有的标定值 —— 没标定就不换算，宁可原样显示。
+     */
+    data class DigitalKeyState(
+        val probing: Boolean = false,
+        val lastOkMs: Long? = null,
+        val accOn: Boolean? = null,
+        val speedKmh: Int? = null,
+        val chargePercent: Int? = null,
+        val oilVolumeMl: Int? = null,        // null = 这台/这刻没这字段（空字段不返回），不是 0
+        val extVoltageDv: Int? = null,
+        val parkLng: Double? = null,
+        val parkLat: Double? = null,
+        val parkAddress: String? = null,
+        val lastInstrMsg: String? = null,
+        val issue: String? = null,           // 非空 = 上次失败的可分辨原因
+    )
+
+    private val _dk = MutableStateFlow(DigitalKeyState())
+    val digitalKey = _dk
+
+    /** 被控车辆的设备号/车牌，工程页填一次落盘；发指令时两者至少传一个 */
+    var dkImei: String
+        get() = prefs.getString(KEY_DK_IMEI, "") ?: ""
+        set(v) { prefs.edit().putString(KEY_DK_IMEI, v.trim()).apply() }
+    var dkLicense: String
+        get() = prefs.getString(KEY_DK_LICENSE, "") ?: ""
+        set(v) { prefs.edit().putString(KEY_DK_LICENSE, v.trim()).apply() }
+
+    /** 对方失败态 → 一句能被分辨的中文。五种态绝不合并（owner 硬要求） */
+    private fun dkIssueCn(e: Dk<*>): String = when (e) {
+        is Dk.Ok -> "不该出现：成功态进了失败口（代码问题，不是链路问题）"
+        is Dk.NoCred -> "没配凭据（缺" + e.fields.joinToString("、") + "）：打包前写进 local.properties 的 digitalkey.*，不进仓库"
+        is Dk.Net -> "出网失败：" + e.detail
+        is Dk.Http -> "网关 HTTP " + e.status
+        is Dk.Api -> "对方返回码 " + e.code + "：" + e.msg
+        is Dk.BadShape -> "没解析出：" + e.what
+    }
+
+    /** 一次全链自检：鉴权 → 状态 → 定位。失败把可分辨原因落屏，成功把原始值（不换算）落屏 */
+    fun probeDigitalKey() {
+        if (_dk.value.probing) return
+        _dk.value = _dk.value.copy(probing = true, issue = null)
+        scope.launch {
+            runtime.log("数字钥匙自检：先过鉴权（认证限 2 次/分，命中 1.5h 缓存则不出网）")
+            val tk = DigitalKeyClient.authProbe()
+            if (tk !is Dk.Ok) {
+                _dk.value = _dk.value.copy(probing = false, issue = dkIssueCn(tk))
+                runtime.log("数字钥匙自检：鉴权就没过 —— " + _dk.value.issue)
+                return@launch
+            }
+            val imei = dkImei
+            if (imei.isBlank()) {
+                _dk.value = _dk.value.copy(probing = false, issue = "鉴权过了，但没填设备号：状态/定位要设备号")
+                runtime.log("数字钥匙自检：鉴权过了，但没填设备号")
+                return@launch
+            }
+            val st = DigitalKeyClient.deviceStatus(imei)
+            val loc = DigitalKeyClient.deviceLocation(imei)
+            var issue: String? = null
+            if (st is Dk.Ok) {
+                _dk.value = _dk.value.copy(
+                    accOn = st.value.accOn, speedKmh = st.value.speedKmh,
+                    chargePercent = st.value.chargePercent,
+                    oilVolumeMl = st.value.oilVolumeMl, extVoltageDv = st.value.extVoltageDv,
+                )
+            } else issue = "状态：" + dkIssueCn(st)
+            if (loc is Dk.Ok) {
+                _dk.value = _dk.value.copy(
+                    parkLng = loc.value.lngWgs84, parkLat = loc.value.latWgs84,
+                    parkAddress = loc.value.address,
+                )
+            } else if (issue == null) issue = "定位：" + dkIssueCn(loc)
+            _dk.value = _dk.value.copy(
+                probing = false,
+                lastOkMs = if (issue == null) System.currentTimeMillis() else _dk.value.lastOkMs,
+                issue = issue,
+            )
+            val s = _dk.value
+            runtime.log(
+                if (issue == null) "数字钥匙自检：通 —— ACC=" + (s.accOn?.let { if (it) "点火" else "熄火" } ?: "无") +
+                    "，电量" + (s.chargePercent?.toString() ?: "无") + "%，油量" +
+                    (s.oilVolumeMl?.let { "%.1fL".format(it / 1000.0) } ?: "该型号无油感") +
+                    "，位置" + (s.parkAddress?.take(18) ?: "无地址")
+                else "数字钥匙自检：没通 —— " + issue,
+            )
+        }
+    }
+
+    /** 数字钥匙指令（12-20 演示可当真交互）。发完隔 3s 查一次回执；查不到也分开报 */
+    fun sendKeyCmd(instruction: String) {
+        if (dkImei.isBlank() && dkLicense.isBlank()) {
+            _dk.value = _dk.value.copy(issue = "发指令前工程页先填设备号或车牌")
+            say("数字钥匙：没填设备号/车牌，指令没发")
+            return
+        }
+        _dk.value = _dk.value.copy(issue = null, lastInstrMsg = "$instruction 发送中…")
+        scope.launch {
+            val r = DigitalKeyClient.sendInstruction(
+                instruction,
+                imei = dkImei.ifBlank { null },
+                licenseNumber = dkLicense.ifBlank { null },
+            )
+            when (r) {
+                is Dk.Ok -> {
+                    val hid = r.value.firstOrNull()?.historyId
+                    runtime.log("数字钥匙：$instruction 已发送，回执号 ${hid ?: "未返回"}")
+                    _dk.value = _dk.value.copy(lastInstrMsg = "$instruction 已发送（回执 ${hid ?: "-"}）")
+                    if (hid != null) {
+                        kotlinx.coroutines.delay(3_000)
+                        when (val q = DigitalKeyClient.instructionResult(hid)) {
+                            is Dk.Ok -> {
+                                val it0 = q.value.firstOrNull()
+                                val line = it0?.let { if (it.executed) "已执行 ${it.response.take(24)}" else "未响应" } ?: "无记录"
+                                runtime.log("数字钥匙回执：$line")
+                                _dk.value = _dk.value.copy(lastInstrMsg = "$instruction · $line")
+                            }
+                            else -> runtime.log("数字钥匙回执查询失败：" + dkIssueCn(q))
+                        }
+                    }
+                }
+                else -> {
+                    val msg = dkIssueCn(r)
+                    _dk.value = _dk.value.copy(issue = msg, lastInstrMsg = null)
+                    runtime.log("数字钥匙：$instruction 没发出去 —— $msg")
+                    say("数字钥匙：指令没发出去（$instruction）")
+                }
+            }
         }
     }
 
@@ -1289,6 +1432,8 @@ class AppRuntime(private val host: Application) {
         private const val KEY_VENDOR_EPH = "vendor_eph"
         private const val KEY_ACCEPT_SCREENS = "accept_screens"
         private const val KEY_SOS_ACTIVATED = "sos_activated"
+        private const val KEY_DK_IMEI = "dk_imei"
+        private const val KEY_DK_LICENSE = "dk_license"
         private const val KEY_AI_URL = "ai_url"
         private const val KEY_AI_KEY = "ai_key"
         private const val KEY_AI_MODEL = "ai_model"

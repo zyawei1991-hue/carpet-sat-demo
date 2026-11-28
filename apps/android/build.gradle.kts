@@ -27,8 +27,8 @@ android {
         // 星历 SDK 要 26（基础通信 SDK 只要 24），装到 24/25 上是 native 库起不来，不是少个功能
         minSdk = 26
         targetSdk = 34
-        versionCode = 129140
-        versionName = "1.29.14"
+        versionCode = 129150
+        versionName = "1.29.15"
 
         // 星历 aar 只带 arm64-v8a 的 libdecodeutil.so。真机都是 arm64，
         // 但别在这里加 abiFilters 之外的假设：换了 SoC 就得回来改
@@ -57,6 +57,10 @@ android {
         // 硅基流动 ASR（手机侧语音输入）：同上只落 local.properties，没配就退成空串，
         // 麦克风按钮退回"未接"的提示语，链路自动跳过
         buildConfigField("String", "SILICONFLOW_ASR_KEY", bakedField("siliconflow.asrKey"))
+        // 数字钥匙合作方（风控在线）：同一纪律 —— local.properties 没配就是空串，
+        // DigitalKeyClient.configured 不过，界面明说「没配凭据」，不装通（owner 11-28 拍板直接实装）
+        buildConfigField("String", "DIGITALKEY_APPID", bakedField("digitalkey.appid"))
+        buildConfigField("String", "DIGITALKEY_KEY", bakedField("digitalkey.key"))
     }
 
     signingConfigs {

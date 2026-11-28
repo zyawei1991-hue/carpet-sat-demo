@@ -104,6 +104,14 @@ class MaintStore(private val dataStore: DataStore<Preferences>) {
      * 接了真卡才是 `Device`；车主填的那几项本来就是 `User`。
      * **缺读数的规则整条不出现**，所以这里不给任何默认值兜底。
      */
+    /**
+     * 数字钥匙（风控在线）取到的真读数由 :app 在拉取成功后塞进来，档位是 `ValueSource.Cloud`。
+     * 空 = 云端没接上，`board()` 照旧发 Stub。**这是唯一让「示意」标自己消失的路** ——
+     * 标由读数自己说（见 ValueSource 注释），不由某个 demo_mode 开关说。
+     * ReadingBoard 用 associateBy 取每个 key 的最后一条，所以这里放云端就会盖掉同 key 的桩。
+     */
+    @Volatile var cloudReadings: List<Reading> = emptyList()
+
     fun board(quotaWaiting: Int?, quotaCapacity: Int?, quotaReal: Boolean): ReadingBoard {
         val now = System.currentTimeMillis()
         val src = if (quotaReal) ValueSource.Device else ValueSource.Stub
@@ -124,6 +132,8 @@ class MaintStore(private val dataStore: DataStore<Preferences>) {
             r += Reading(ReadingKey.QuotaCapacity, quotaCapacity.toDouble(), src, now)
             r += Reading(ReadingKey.QuotaWaiting, (quotaWaiting ?: 0).toDouble(), src, now)
         }
+        // 云端接上才追加；没接上这行是空的，桩保持原样（不假造）
+        r += cloudReadings
         return ReadingBoard(r)
     }
 
